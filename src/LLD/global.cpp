@@ -370,7 +370,7 @@ namespace LLD
         if(Contract && (nInstances & INSTANCES::CONTRACT))
             Contract->MemoryCommit();
 
-        /* Commit the register DB transacdtion. */
+        /* Commit the register DB transaction. */
         if(Register && (nInstances & INSTANCES::REGISTER))
             Register->MemoryCommit();
 
