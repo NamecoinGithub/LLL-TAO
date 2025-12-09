@@ -17,6 +17,7 @@ ________________________________________________________________________________
 
 #include <LLP/packets/packet.h>
 #include <LLC/types/uint1024.h>
+#include <TAO/Register/types/address.h>
 
 #include <string>
 #include <cstdint>
@@ -56,6 +57,11 @@ namespace LLP
         uint64_t nSessionStart;      // Timestamp when session was established
         uint64_t nSessionTimeout;    // Session timeout in seconds (default 300s)
         uint32_t nKeepaliveCount;    // Number of keepalives received
+        
+        /* Account binding fields (encrypted after ChaCha20 established) */
+        std::string strAccount;      // Account name (e.g., "default", "savings")
+        TAO::Register::Address hashDefaultAccount;  // Resolved account address
+        bool fAccountBound;          // True after successful MINER_ACCOUNT_BIND
 
         /** Default Constructor **/
         MiningContext();
@@ -163,6 +169,27 @@ namespace LLP
          *
          **/
         MiningContext WithKeepaliveCount(uint32_t nKeepaliveCount_) const;
+
+        /** WithAccount
+         *
+         *  Returns a new context with updated account name.
+         *
+         **/
+        MiningContext WithAccount(const std::string& strAccount_) const;
+
+        /** WithAccountAddress
+         *
+         *  Returns a new context with updated account address.
+         *
+         **/
+        MiningContext WithAccountAddress(const TAO::Register::Address& hashAccountAddress_) const;
+
+        /** WithAccountBound
+         *
+         *  Returns a new context with updated account bound flag.
+         *
+         **/
+        MiningContext WithAccountBound(bool fAccountBound_) const;
 
         /** GetPayoutAddress
          *
@@ -367,6 +394,22 @@ namespace LLP
             const Packet& packet
         );
 
+        /** ProcessAccountBind
+         *
+         *  Process account binding request (encrypted).
+         *  Verifies username produces correct genesis, resolves account.
+         *
+         *  @param[in] context Current miner state
+         *  @param[in] packet Account bind packet (encrypted payload)
+         *
+         *  @return ProcessResult with updated context (account bound)
+         *
+         **/
+        static ProcessResult ProcessAccountBind(
+            const MiningContext& context,
+            const Packet& packet
+        );
+
     private:
         /** DeriveChaCha20SessionKey
          *
@@ -379,6 +422,24 @@ namespace LLP
          *
          **/
         static std::vector<uint8_t> DeriveChaCha20SessionKey(const uint256_t& hashGenesis);
+
+        /** ResolveNamedAccount
+         *
+         *  Resolve a username:account combination to an account register address.
+         *  Uses TAO::Register::GetNameRegister to lookup the name.
+         *
+         *  @param[in] strUsername Username (e.g., "FLUFFER")
+         *  @param[in] strAccount Account name (e.g., "default", "savings")
+         *  @param[out] hashAccount Resolved account register address
+         *
+         *  @return true if account was successfully resolved
+         *
+         **/
+        static bool ResolveNamedAccount(
+            const std::string& strUsername,
+            const std::string& strAccount,
+            TAO::Register::Address& hashAccount
+        );
 
         /** BuildAuthMessage
          *

@@ -116,6 +116,10 @@ namespace LLP
             SESSION_START        = 211,  // session start request (not fully implemented yet)
             SESSION_KEEPALIVE    = 212,  // session keepalive ping (not fully implemented yet)
 
+            /** ACCOUNT BINDING PACKETS (encrypted after ChaCha20 established) **/
+            MINER_ACCOUNT_BIND   = 213,  // 0xd3 - miner -> node, sends username + account (encrypted)
+            MINER_ACCOUNT_RESULT = 214,  // 0xd4 - node -> miner, sends bind result (encrypted)
+
             /** GENERIC **/
             PING           = 253,
             CLOSE          = 254

@@ -23,6 +23,10 @@ ________________________________________________________________________________
 #include <LLC/include/encrypt.h>
 #include <LLC/hash/SK.h>
 
+#include <TAO/Register/include/names.h>
+#include <TAO/Ledger/types/credentials.h>
+#include <LLD/include/global.h>
+
 #include <Util/include/debug.h>
 #include <Util/include/runtime.h>
 #include <Util/include/config.h>
@@ -57,6 +61,9 @@ namespace LLP
     , nSessionStart(0)
     , nSessionTimeout(DEFAULT_SESSION_TIMEOUT)
     , nKeepaliveCount(0)
+    , strAccount("")
+    , hashDefaultAccount(0)
+    , fAccountBound(false)
     {
     }
 
@@ -87,6 +94,9 @@ namespace LLP
     , nSessionStart(0)
     , nSessionTimeout(DEFAULT_SESSION_TIMEOUT)
     , nKeepaliveCount(0)
+    , strAccount("")
+    , hashDefaultAccount(0)
+    , fAccountBound(false)
     {
     }
 
@@ -179,6 +189,27 @@ namespace LLP
     {
         MiningContext c = *this;
         c.nKeepaliveCount = nKeepaliveCount_;
+        return c;
+    }
+
+    MiningContext MiningContext::WithAccount(const std::string& strAccount_) const
+    {
+        MiningContext c = *this;
+        c.strAccount = strAccount_;
+        return c;
+    }
+
+    MiningContext MiningContext::WithAccountAddress(const TAO::Register::Address& hashAccountAddress_) const
+    {
+        MiningContext c = *this;
+        c.hashDefaultAccount = hashAccountAddress_;
+        return c;
+    }
+
+    MiningContext MiningContext::WithAccountBound(bool fAccountBound_) const
+    {
+        MiningContext c = *this;
+        c.fAccountBound = fAccountBound_;
         return c;
     }
 
@@ -295,6 +326,10 @@ namespace LLP
         /* Session management packets */
         SESSION_START        = 211,
         SESSION_KEEPALIVE    = 212,
+
+        /* Account binding packets (encrypted after ChaCha20 established) */
+        MINER_ACCOUNT_BIND   = 213,  // 0xd3 - miner -> node, sends username + account (encrypted)
+        MINER_ACCOUNT_RESULT = 214,  // 0xd4 - node -> miner, sends bind result (encrypted)
     };
 
 
@@ -337,6 +372,10 @@ namespace LLP
             case SESSION_KEEPALIVE:
                 debug::log(3, FUNCTION, "Routing to ProcessSessionKeepalive");
                 return ProcessSessionKeepalive(context, packet);
+
+            case MINER_ACCOUNT_BIND:
+                debug::log(2, FUNCTION, "Routing to ProcessAccountBind");
+                return ProcessAccountBind(context, packet);
 
             default:
                 debug::log(1, FUNCTION, "Unknown miner opcode: ", uint32_t(packet.HEADER));
@@ -1044,6 +1083,278 @@ namespace LLP
         response.DATA.push_back(static_cast<uint8_t>((nRemaining >> 24) & 0xFF));
 
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+
+        return ProcessResult::Success(newContext, response);
+    }
+
+
+    /* Resolve username:account to account register address */
+    bool StatelessMiner::ResolveNamedAccount(
+        const std::string& strUsername,
+        const std::string& strAccount,
+        TAO::Register::Address& hashAccount
+    )
+    {
+        /* Get genesis from username */
+        uint256_t hashGenesis = TAO::Ledger::Credentials::Genesis(
+            SecureString(strUsername.c_str()));
+
+        /* Get the name register for this account */
+        TAO::Register::Object nameRegister;
+        if(!TAO::Register::GetNameRegister(hashGenesis, strAccount, nameRegister))
+        {
+            debug::log(0, FUNCTION, "Name register not found for '",
+                      strUsername, ":", strAccount, "'");
+            return false;
+        }
+
+        /* Parse the name register */
+        if(!nameRegister.Parse())
+        {
+            debug::log(0, FUNCTION, "Failed to parse name register");
+            return false;
+        }
+
+        /* Extract the address field */
+        try
+        {
+            hashAccount = nameRegister.get<uint256_t>("address");
+        }
+        catch(const std::exception& e)
+        {
+            debug::log(0, FUNCTION, "Failed to get address from name register: ", e.what());
+            return false;
+        }
+
+        /* Verify the account exists and is valid */
+        TAO::Register::Object account;
+        if(!LLD::Register->ReadObject(hashAccount, account, TAO::Ledger::FLAGS::LOOKUP))
+        {
+            debug::log(0, FUNCTION, "Account register not found");
+            return false;
+        }
+
+        /* Verify ownership */
+        if(account.hashOwner != hashGenesis)
+        {
+            debug::log(0, FUNCTION, "Account ownership mismatch");
+            return false;
+        }
+
+        debug::log(2, FUNCTION, "✓ Resolved ", strUsername, ":", strAccount,
+                  " → ", hashAccount.ToString());
+
+        return true;
+    }
+
+
+    /* Process account binding request (encrypted) */
+    ProcessResult StatelessMiner::ProcessAccountBind(
+        const MiningContext& context,
+        const Packet& packet
+    )
+    {
+        debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND from ", context.strAddress);
+
+        /* Require authentication before account binding */
+        if(!context.fAuthenticated)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: not authenticated");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 19;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Not authenticated";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        /* Require ChaCha20 keys (genesis must be set) */
+        if(context.hashGenesis == 0)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: no genesis (ChaCha20 keys not established)");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 26;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "ChaCha20 keys not ready";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        const std::vector<uint8_t>& vData = packet.DATA;
+
+        /* Decrypt the payload using ChaCha20 session key */
+        std::vector<uint8_t> vSessionKey = DeriveChaCha20SessionKey(context.hashGenesis);
+        std::vector<uint8_t> vDecrypted;
+
+        /* Expected format: nonce(12) + ciphertext + tag(16) */
+        if(vData.size() < 28)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: payload too small for encryption, size=", vData.size());
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 19;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Invalid payload size";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        std::vector<uint8_t> vNonce(vData.begin(), vData.begin() + 12);
+        std::vector<uint8_t> vCiphertext(vData.begin() + 12, vData.end() - 16);
+        std::vector<uint8_t> vTag(vData.end() - 16, vData.end());
+        std::vector<uint8_t> vAAD{'A','C','C','O','U','N','T','_','B','I','N','D'};
+
+        if(!LLC::DecryptChaCha20Poly1305(vCiphertext, vTag, vSessionKey, vNonce, vDecrypted, vAAD))
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: ChaCha20 decryption FAILED");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 18;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Decryption failed";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        /* Parse username and account from decrypted data */
+        if(vDecrypted.size() < 2)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: decrypted payload too small");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 15;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Invalid payload";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        uint8_t nUsernameLen = vDecrypted[0];
+        if(vDecrypted.size() < 1 + nUsernameLen + 1)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: payload too small for username");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 15;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Invalid payload";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        std::string strUsername(vDecrypted.begin() + 1,
+                                vDecrypted.begin() + 1 + nUsernameLen);
+
+        uint8_t nAccountLen = vDecrypted[1 + nUsernameLen];
+        if(vDecrypted.size() < 2 + nUsernameLen + nAccountLen)
+        {
+            debug::log(0, FUNCTION, "MINER_ACCOUNT_BIND: payload too small for account");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 15;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Invalid payload";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        std::string strAccount(vDecrypted.begin() + 2 + nUsernameLen,
+                               vDecrypted.begin() + 2 + nUsernameLen + nAccountLen);
+
+        debug::log(0, FUNCTION, "Account bind request (encrypted):");
+        debug::log(0, FUNCTION, "  Username: ", strUsername);
+        debug::log(0, FUNCTION, "  Account: ", strAccount);
+
+        /* CRITICAL: Verify username produces the genesis we received */
+        uint256_t hashExpected = TAO::Ledger::Credentials::Genesis(
+            SecureString(strUsername.c_str()));
+
+        if(hashExpected != context.hashGenesis)
+        {
+            debug::log(0, FUNCTION, "Genesis mismatch! Username '", strUsername,
+                      "' produces ", hashExpected.SubString(),
+                      " but miner sent ", context.hashGenesis.SubString());
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 16;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Genesis mismatch";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        debug::log(0, FUNCTION, "✓ Genesis verified for username '", strUsername, "'");
+
+        /* Resolve the account using Names API pattern */
+        TAO::Register::Address hashAccount;
+        if(!ResolveNamedAccount(strUsername, strAccount, hashAccount))
+        {
+            debug::log(0, FUNCTION, "Failed to resolve '", strUsername, ":", strAccount, "'");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 17;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Account not found";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        debug::log(0, FUNCTION, "✓ Account bound: ", strUsername, ":", strAccount,
+                  " → ", hashAccount.ToString());
+
+        /* Update context with bound account */
+        MiningContext newContext = context
+            .WithUserName(strUsername)
+            .WithAccount(strAccount)
+            .WithAccountAddress(hashAccount)
+            .WithAccountBound(true)
+            .WithTimestamp(runtime::unifiedtimestamp());
+
+        /* Send success result (encrypted) */
+        std::string strAddress = hashAccount.ToString();
+        std::vector<uint8_t> vPlaintext;
+        vPlaintext.push_back(0x01); // Success
+        vPlaintext.push_back(static_cast<uint8_t>(strAddress.length()));
+        vPlaintext.insert(vPlaintext.end(), strAddress.begin(), strAddress.end());
+
+        /* Encrypt the response */
+        std::vector<uint8_t> vResponseNonce = LLC::GetRand256().GetBytes();
+        vResponseNonce.resize(12); // ChaCha20 uses 12-byte nonce
+        std::vector<uint8_t> vCiphertextOut;
+        std::vector<uint8_t> vTagOut;
+
+        if(!LLC::EncryptChaCha20Poly1305(vPlaintext, vSessionKey, vResponseNonce, vCiphertextOut, vTagOut, vAAD))
+        {
+            debug::log(0, FUNCTION, "Failed to encrypt response");
+            Packet response(MINER_ACCOUNT_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            uint8_t nMsgLen = 18;
+            response.DATA.push_back(nMsgLen);
+            std::string strMsg = "Encryption failed";
+            response.DATA.insert(response.DATA.end(), strMsg.begin(), strMsg.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            return ProcessResult::Success(context, response);
+        }
+
+        /* Build encrypted response: nonce(12) + ciphertext + tag(16) */
+        Packet response(MINER_ACCOUNT_RESULT);
+        response.DATA.insert(response.DATA.end(), vResponseNonce.begin(), vResponseNonce.end());
+        response.DATA.insert(response.DATA.end(), vCiphertextOut.begin(), vCiphertextOut.end());
+        response.DATA.insert(response.DATA.end(), vTagOut.begin(), vTagOut.end());
+        response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+
+        debug::log(0, FUNCTION, "Sending encrypted MINER_ACCOUNT_RESULT success");
 
         return ProcessResult::Success(newContext, response);
     }
