@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <LLP/include/global.h>
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/falcon_constants.h>
+#include <LLP/include/falcon_auth.h>
 #include <LLP/types/miner.h>
 #include <LLP/templates/events.h>
 #include <LLP/templates/ddos.h>
@@ -766,14 +767,32 @@ namespace LLP
 
                 /* Authentication succeeded */
                 fMinerAuthenticated = true;
+
+                /* Derive key ID and session ID from public key */
+                FalconAuth::IFalconAuth* pAuth = FalconAuth::Get();
+                uint256_t hashKeyID(0);
+                if(pAuth)
+                    hashKeyID = pAuth->DeriveKeyId(vMinerPubKey);
+
+                /* Derive session ID from key ID (lower 32 bits) */
+                uint32_t nSessionId = static_cast<uint32_t>(hashKeyID.Get64(0) & 0xFFFFFFFF);
+
                 debug::log(0, FUNCTION, "MinerLLP: MINER_AUTH success for miner_id=", strMinerId,
-                           " from ", GetAddress().ToStringIP());
+                           " sessionId=", nSessionId, " from ", GetAddress().ToStringIP());
 
                 /* ChaCha20 key was already derived in MINER_AUTH_INIT */
                 debug::log(0, FUNCTION, "✓ ChaCha20 encryption ready (derived in MINER_AUTH_INIT)");
 
-                /* Send success result */
-                std::vector<uint8_t> vSuccess(1, 0x01);
+                /* Build success response with session ID */
+                std::vector<uint8_t> vSuccess;
+                vSuccess.push_back(0x01);  // Success status
+
+                // Append session ID (4 bytes, little-endian)
+                vSuccess.push_back(nSessionId & 0xFF);
+                vSuccess.push_back((nSessionId >> 8) & 0xFF);
+                vSuccess.push_back((nSessionId >> 16) & 0xFF);
+                vSuccess.push_back((nSessionId >> 24) & 0xFF);
+
                 respond(MINER_AUTH_RESULT, vSuccess);
 
                 return true;
