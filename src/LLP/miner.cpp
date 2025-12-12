@@ -773,9 +773,14 @@ namespace LLP
                 uint256_t hashKeyID(0);
                 if(pAuth)
                     hashKeyID = pAuth->DeriveKeyId(vMinerPubKey);
+                else
+                {
+                    /* Fallback: derive key ID from public key hash if FalconAuth unavailable */
+                    hashKeyID = LLC::SK256(vMinerPubKey);
+                }
 
                 /* Derive session ID from key ID (lower 32 bits) */
-                uint32_t nSessionId = static_cast<uint32_t>(hashKeyID.Get64(0) & 0xFFFFFFFF);
+                uint32_t nSessionId = static_cast<uint32_t>(hashKeyID.Get64(0));
 
                 debug::log(0, FUNCTION, "MinerLLP: MINER_AUTH success for miner_id=", strMinerId,
                            " sessionId=", nSessionId, " from ", GetAddress().ToStringIP());

@@ -733,9 +733,14 @@ namespace LLP
         uint256_t hashKeyID(0);
         if(pAuth)
             hashKeyID = pAuth->DeriveKeyId(context.vMinerPubKey);
+        else
+        {
+            /* Fallback: derive key ID from public key hash if FalconAuth unavailable */
+            hashKeyID = LLC::SK256(context.vMinerPubKey);
+        }
 
         /* Derive session ID from key ID (lower 32 bits) */
-        uint32_t nSessionId = static_cast<uint32_t>(hashKeyID.Get64(0) & 0xFFFFFFFF);
+        uint32_t nSessionId = static_cast<uint32_t>(hashKeyID.Get64(0));
 
         /* Use genesis from MINER_AUTH_INIT if provided, otherwise check binding */
         uint256_t hashGenesis = context.hashGenesis;  // Already set from INIT
