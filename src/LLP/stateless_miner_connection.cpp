@@ -799,11 +799,11 @@ namespace LLP
         }
 
         /* Log dual-identity model clearly */
-        debug::log(0, FUNCTION, "=== STATELESS BLOCK CREATION ===");
-        debug::log(0, FUNCTION, "  Signing identity: ", pCredentials->Genesis().SubString(), " (node operator)");
-        debug::log(0, FUNCTION, "  Reward routing:   ", hashRewardAddress.SubString(), " (miner)");
-        debug::log(0, FUNCTION, "  Channel:          ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
-        debug::log(0, FUNCTION, "  Height:           ", TAO::Ledger::ChainState::nBestHeight.load() + 1);
+        debug::log(1, FUNCTION, "=== STATELESS BLOCK CREATION ===");
+        debug::log(1, FUNCTION, "  Signing identity: ", pCredentials->Genesis().SubString(), " (node operator)");
+        debug::log(1, FUNCTION, "  Reward routing:   ", hashRewardAddress.SubString(), " (miner)");
+        debug::log(1, FUNCTION, "  Channel:          ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
+        debug::log(1, FUNCTION, "  Height:           ", TAO::Ledger::ChainState::nBestHeight.load() + 1);
 
         /* Create a new block and loop for prime channel if minimum bit target length isn't met.
          * NOTE: hashRewardAddress is passed as the final parameter (hashDynamicGenesis) to CreateBlock,
