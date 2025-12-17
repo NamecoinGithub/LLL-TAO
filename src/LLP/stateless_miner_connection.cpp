@@ -759,20 +759,15 @@ namespace LLP
         const uint32_t nBitMask =
             config::GetBoolArg(std::string("-primemod"), false) ? 0xFE000000 : 0x80000000;
 
-        /* Verify DEFAULT session exists (needed for signing block producer) */
-        if(!TAO::API::Authentication::HasSession(TAO::API::Authentication::SESSION::DEFAULT))
-        {
-            debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
-            debug::error(FUNCTION, "  Node operator must unlock mining credentials via -unlock=mining");
-            debug::error(FUNCTION, "  This provides the signing authority for block production");
-            return nullptr;
-        }
-
-        /* Unlock sigchain to create new block. */
+        /* Unlock sigchain to create new block.
+         * NOTE: This requires the DEFAULT session to be initialized (via -unlock=mining).
+         * If the session doesn't exist, Unlock() will throw an exception. */
         SecureString strPIN;
         RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
 
-        /* Get an instance of our credentials (for SIGNING the block producer transaction). */
+        /* Get an instance of our credentials (for SIGNING the block producer transaction).
+         * This is the node operator's credentials from the DEFAULT session.
+         * These credentials sign the block on behalf of remote miners. */
         const auto& pCredentials =
             TAO::API::Authentication::Credentials(uint256_t(TAO::API::Authentication::SESSION::DEFAULT));
 
