@@ -347,12 +347,36 @@ namespace TAO::Ledger
     }
 
 
-    /* Create a new block object from the chain. */
+    /* Create a new block object from the chain. 
+     *
+     * DUAL-IDENTITY MINING MODEL (hashDynamicGenesis parameter):
+     * ===========================================================
+     *
+     * The hashDynamicGenesis parameter enables separation of authentication from reward routing:
+     *
+     *   - user: Credentials for SIGNING the block producer transaction
+     *   - hashDynamicGenesis: WHERE coinbase rewards are sent (if non-zero)
+     *
+     * When hashDynamicGenesis == 0:
+     *   - Traditional solo mining: user->Genesis() used for both signing and rewards
+     *
+     * When hashDynamicGenesis != 0:
+     *   - Stateless/pool mining: user->Genesis() signs, hashDynamicGenesis receives rewards
+     *   - Passed to CreateProducer() which validates and routes coinbase accordingly
+     *   - Enables mining pools to sign on behalf of remote miners
+     *
+     * This architecture supports:
+     *   - Solo mining (node operator mines for themselves)
+     *   - Pool mining (node operator signs, miner receives rewards)
+     *   - Stateless mining (pure MiningContext, no session dependencies)
+     */
     bool CreateBlock(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
         const uint32_t nChannel, TAO::Ledger::TritiumBlock &rBlockRet, const uint64_t nExtraNonce, Legacy::Coinbase *pCoinbaseRecipients,
         const uint256_t& hashDynamicGenesis)
     {
-        /* Get the session - use dynamic genesis if provided, otherwise use user genesis */
+        /* Get the session - use dynamic genesis if provided, otherwise use user genesis.
+         * NOTE: This hashGenesis is primarily used for session lookups and validation.
+         * The actual reward routing is determined in CreateProducer() using hashDynamicGenesis. */
         const uint256_t hashGenesis = (hashDynamicGenesis != 0) ? hashDynamicGenesis : user->Genesis();
 
         /* Only allow prime, hash, and private channels. */
@@ -468,7 +492,29 @@ namespace TAO::Ledger
         return true;
     }
 
-    /* Create a producer transaction object from signature chain. */
+    /* Create a producer transaction object from signature chain.
+     *
+     * REWARD ROUTING VIA hashDynamicGenesis:
+     * ======================================
+     *
+     * This function implements the coinbase reward routing logic:
+     *
+     *   - user: Credentials that SIGN the producer transaction
+     *   - hashDynamicGenesis: Determines WHERE coinbase rewards are sent
+     *
+     * Reward Routing Logic:
+     *   1. If hashDynamicGenesis == 0: Use user->Genesis() (solo mining)
+     *   2. If hashDynamicGenesis != 0 AND exists on-chain: Use hashDynamicGenesis (pool mining)
+     *   3. If hashDynamicGenesis != 0 BUT NOT on-chain: Fallback to user->Genesis()
+     *
+     * The on-chain validation (LLD::Ledger->HasFirst) ensures that reward addresses
+     * are legitimate sigchains that can receive coinbase transactions.
+     *
+     * For stateless mining:
+     *   - hashDynamicGenesis comes from context.hashRewardAddress (MINER_SET_REWARD packet)
+     *   - user credentials come from DEFAULT session (node operator)
+     *   - This separates signing authority from reward destination
+     */
     bool CreateProducer(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
                            TAO::Ledger::Transaction &rProducer,
                            const TAO::Ledger::BlockState& tStateBest,
@@ -485,27 +531,43 @@ namespace TAO::Ledger
         /* Create the Coinbase Transaction if the Channel specifies. */
         if(nChannel == 1 || nChannel == 2)
         {
-            /* Determine the reward recipient - use dynamic genesis if provided and valid, otherwise use user genesis */
+            /* REWARD ROUTING IMPLEMENTATION:
+             * ==============================
+             * 
+             * Determine the reward recipient using the dual-identity model:
+             *   - Default: user->Genesis() (solo mining by node operator)
+             *   - Override: hashDynamicGenesis (if provided AND exists on-chain)
+             *
+             * This enables stateless/pool mining where:
+             *   - Node operator signs the block (user credentials)
+             *   - Remote miner receives rewards (hashDynamicGenesis)
+             */
             uint256_t hashRewardRecipient = user->Genesis();
             
             /* Validate and use dynamic genesis if provided */
             if(hashDynamicGenesis != 0)
             {
+                /* Check if the dynamic genesis exists on-chain (has at least one transaction) */
                 if(LLD::Ledger->HasFirst(hashDynamicGenesis))
                 {
+                    /* Route rewards to the dynamic genesis (miner's address) */
                     hashRewardRecipient = hashDynamicGenesis;
-                    debug::log(1, FUNCTION, "Reward routing: DYNAMIC to ", hashRewardRecipient.SubString());
+                    debug::log(1, FUNCTION, "Reward routing: DYNAMIC to ", hashRewardRecipient.SubString(), " (miner)");
                 }
                 else
                 {
+                    /* Dynamic genesis not found on-chain - this shouldn't happen in production
+                     * as StatelessMinerConnection::new_block() validates this before calling CreateBlock.
+                     * Fallback to user genesis for safety. */
                     debug::log(1, FUNCTION, "Dynamic genesis ", hashDynamicGenesis.SubString(), 
                               " not found on-chain, falling back to user genesis");
-                    debug::log(1, FUNCTION, "Reward routing: STATIC (fallback) to ", hashRewardRecipient.SubString());
+                    debug::log(1, FUNCTION, "Reward routing: STATIC (fallback) to ", hashRewardRecipient.SubString(), " (node operator)");
                 }
             }
             else
             {
-                debug::log(3, FUNCTION, "Reward routing: STATIC to ", hashRewardRecipient.SubString());
+                /* No dynamic genesis provided - solo mining by node operator */
+                debug::log(3, FUNCTION, "Reward routing: STATIC to ", hashRewardRecipient.SubString(), " (solo mining)");
             }
 
             /* Output type 0 is mining/minting reward */
@@ -514,7 +576,9 @@ namespace TAO::Ledger
             /* Create coinbase transaction. */
             rProducer[0] << uint8_t(TAO::Operation::OP::COINBASE);
 
-            /* Add the spendable genesis - using dynamic routing if available */
+            /* Add the spendable genesis - this is where rewards actually go!
+             * In stateless mining: hashRewardRecipient = context.hashRewardAddress (miner)
+             * In solo mining: hashRewardRecipient = user->Genesis() (node operator) */
             rProducer[0] << hashRewardRecipient;
 
             /* The total to be credited. */

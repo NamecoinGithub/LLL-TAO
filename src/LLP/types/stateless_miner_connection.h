@@ -109,7 +109,27 @@ namespace LLP
 
         /** new_block
          *
-         *  Adds a new block to the map.
+         *  Creates a new block using the dual-identity model for stateless mining.
+         *
+         *  DUAL-IDENTITY MODEL:
+         *    - Authentication Identity: Node operator's DEFAULT session credentials
+         *      Used to SIGN the block producer transaction
+         *    
+         *    - Reward Identity: Miner's reward address from context.hashRewardAddress
+         *      Determines WHERE coinbase rewards are sent
+         *
+         *  This separation enables mining pools to sign blocks on behalf of miners
+         *  while routing rewards directly to the miner's address.
+         *
+         *  The hashRewardAddress is passed as the hashDynamicGenesis parameter to
+         *  TAO::Ledger::CreateBlock(), which routes it through CreateProducer() to
+         *  determine the coinbase recipient. This ensures rewards go to the miner,
+         *  not the node operator.
+         *
+         *  REQUIREMENTS:
+         *    - DEFAULT session must be unlocked (node operator credentials)
+         *    - context.hashRewardAddress must be set via MINER_SET_REWARD
+         *    - Reward address must exist on-chain (HasFirst validation)
          *
          *  @return Pointer to newly created block, or nullptr on failure.
          *

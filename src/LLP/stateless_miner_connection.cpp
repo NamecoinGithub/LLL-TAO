@@ -25,6 +25,8 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/types/tritium.h>
 
+#include <LLD/include/global.h>
+
 #include <TAO/API/include/global.h>
 #include <TAO/API/types/authentication.h>
 
@@ -713,18 +715,64 @@ namespace LLP
     }
 
 
-    /** Create a new block */
+    /** Create a new block 
+     *
+     *  STATELESS MINING DUAL-IDENTITY MODEL:
+     *  =====================================
+     *
+     *  This function implements a dual-identity model that separates authentication
+     *  from reward routing - enabling mining pools and remote miners to work together:
+     *
+     *  Authentication Identity (pCredentials):
+     *    - Node operator's sigchain credentials from DEFAULT session
+     *    - Used to SIGN the block producer transaction
+     *    - Signs blocks on behalf of remote miners
+     *    - Requires PIN unlock for security
+     *    - Obtained via: TAO::API::Authentication::Credentials(SESSION::DEFAULT)
+     *
+     *  Reward Identity (context.hashRewardAddress):
+     *    - Miner's reward address from MINER_SET_REWARD packet
+     *    - Determines WHERE coinbase rewards are sent
+     *    - Bound during authentication handshake
+     *    - Validated against on-chain sigchain existence
+     *    - Passed to CreateBlock() as hashDynamicGenesis parameter
+     *
+     *  This separation enables:
+     *    - Mining pools to sign blocks on behalf of miners
+     *    - Direct miner → reward routing without session coupling
+     *    - Proper security (node signs) + proper payout (miner receives)
+     *    - Stateless operation using only MiningContext state
+     *
+     *  Block Creation Flow:
+     *    1. Node operator unlocks DEFAULT session (for signing authority)
+     *    2. Miner sets reward address via MINER_SET_REWARD (stored in context)
+     *    3. CreateBlock() uses pCredentials for signing, hashRewardAddress for payout
+     *    4. CreateProducer() routes coinbase to hashRewardAddress (not pCredentials->Genesis())
+     *    5. Block signed by node operator, rewards sent to miner
+     *
+     *  @return Pointer to newly created block, or nullptr on failure
+     *
+     **/
     TAO::Ledger::Block* StatelessMinerConnection::new_block()
     {
         /* If the primemod flag is set, take the hash proof down to 1017-bit to maximize prime ratio as much as possible. */
         const uint32_t nBitMask =
             config::GetBoolArg(std::string("-primemod"), false) ? 0xFE000000 : 0x80000000;
 
+        /* Verify DEFAULT session exists (needed for signing block producer) */
+        if(!TAO::API::Authentication::HasSession(TAO::API::Authentication::SESSION::DEFAULT))
+        {
+            debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
+            debug::error(FUNCTION, "  Node operator must unlock mining credentials via -unlock=mining");
+            debug::error(FUNCTION, "  This provides the signing authority for block production");
+            return nullptr;
+        }
+
         /* Unlock sigchain to create new block. */
         SecureString strPIN;
         RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
 
-        /* Get an instance of our credentials. */
+        /* Get an instance of our credentials (for SIGNING the block producer transaction). */
         const auto& pCredentials =
             TAO::API::Authentication::Credentials(uint256_t(TAO::API::Authentication::SESSION::DEFAULT));
 
@@ -737,20 +785,35 @@ namespace LLP
         /* Get payout address - MUST be bound via MINER_SET_REWARD */
         const uint256_t hashRewardAddress = context.GetPayoutAddress();
 
-        /* Verify reward address is set */
+        /* Verify reward address is set (required for stateless mining) */
         if(hashRewardAddress == 0)
         {
             debug::error(FUNCTION, "Cannot create block - reward address not bound");
             debug::error(FUNCTION, "  Required: Send MINER_SET_REWARD before GET_BLOCK");
+            debug::error(FUNCTION, "  This specifies where coinbase rewards should be sent");
             return nullptr;
         }
 
-        /* Log reward routing (always explicit address now) */
-        debug::log(1, FUNCTION, "Creating block with REWARD ADDRESS: ", hashRewardAddress.ToString().substr(0, 16), "...");
-        debug::log(2, FUNCTION, "  Auth genesis: ", context.hashGenesis.SubString());
-        debug::log(2, FUNCTION, "  Reward address: ", hashRewardAddress.ToString());
+        /* Verify reward address exists on-chain (CreateProducer validates this too, but fail early) */
+        if(!LLD::Ledger->HasFirst(hashRewardAddress))
+        {
+            debug::error(FUNCTION, "Reward address not found on-chain: ", hashRewardAddress.SubString());
+            debug::error(FUNCTION, "  Miner must provide valid genesis hash via MINER_SET_REWARD");
+            debug::error(FUNCTION, "  Genesis must have at least one transaction on the blockchain");
+            return nullptr;
+        }
 
-        /* Create a new block and loop for prime channel if minimum bit target length isn't met */
+        /* Log dual-identity model clearly */
+        debug::log(0, FUNCTION, "=== STATELESS BLOCK CREATION ===");
+        debug::log(0, FUNCTION, "  Signing identity: ", pCredentials->Genesis().SubString(), " (node operator)");
+        debug::log(0, FUNCTION, "  Reward routing:   ", hashRewardAddress.SubString(), " (miner)");
+        debug::log(0, FUNCTION, "  Channel:          ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
+        debug::log(0, FUNCTION, "  Height:           ", TAO::Ledger::ChainState::nBestHeight.load() + 1);
+
+        /* Create a new block and loop for prime channel if minimum bit target length isn't met.
+         * NOTE: hashRewardAddress is passed as the final parameter (hashDynamicGenesis) to CreateBlock,
+         * which routes it through CreateProducer to determine the coinbase recipient address.
+         * This ensures rewards go to the miner, not the node operator. */
         while(TAO::Ledger::CreateBlock(pCredentials, strPIN, nChannel, *pBlock, ++nBlockIterator, nullptr, hashRewardAddress))
         {
             /* Break out of loop when block is ready for prime mod. */
@@ -759,7 +822,8 @@ namespace LLP
         }
 
         /* Output debug info and return the newly created block. */
-        debug::log(2, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), " nVersion=", pBlock->nVersion);
+        debug::log(1, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), " nVersion=", pBlock->nVersion);
+        debug::log(2, FUNCTION, "  Block rewards will be sent to: ", hashRewardAddress.SubString());
         return pBlock;
     }
 
