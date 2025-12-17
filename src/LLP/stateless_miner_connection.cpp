@@ -761,9 +761,21 @@ namespace LLP
 
         /* Unlock sigchain to create new block.
          * NOTE: This requires the DEFAULT session to be initialized (via -unlock=mining).
-         * If the session doesn't exist, Unlock() will throw an exception. */
+         * We wrap this in try-catch to provide clear error messages if session doesn't exist. */
         SecureString strPIN;
-        RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
+        try
+        {
+            RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
+        }
+        catch(const std::exception& e)
+        {
+            /* Provide helpful error message if DEFAULT session not found */
+            debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
+            debug::error(FUNCTION, "  Node operator must start with: -unlock=mining");
+            debug::error(FUNCTION, "  This provides signing credentials for block production");
+            debug::error(FUNCTION, "  Exception: ", e.what());
+            return nullptr;
+        }
 
         /* Get an instance of our credentials (for SIGNING the block producer transaction).
          * This is the node operator's credentials from the DEFAULT session.
@@ -786,15 +798,6 @@ namespace LLP
             debug::error(FUNCTION, "Cannot create block - reward address not bound");
             debug::error(FUNCTION, "  Required: Send MINER_SET_REWARD before GET_BLOCK");
             debug::error(FUNCTION, "  This specifies where coinbase rewards should be sent");
-            return nullptr;
-        }
-
-        /* Verify reward address exists on-chain (CreateProducer validates this too, but fail early) */
-        if(!LLD::Ledger->HasFirst(hashRewardAddress))
-        {
-            debug::error(FUNCTION, "Reward address not found on-chain: ", hashRewardAddress.SubString());
-            debug::error(FUNCTION, "  Miner must provide valid genesis hash via MINER_SET_REWARD");
-            debug::error(FUNCTION, "  Genesis must have at least one transaction on the blockchain");
             return nullptr;
         }
 
