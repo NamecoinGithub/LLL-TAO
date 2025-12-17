@@ -722,7 +722,7 @@ namespace LLP
 
         /* Verify DEFAULT session exists (required for signing blocks).
          * Node must be started with -unlock=mining to provide signing credentials. */
-        if(TAO::API::Authentication::Caller(uint256_t(TAO::API::Authentication::SESSION::DEFAULT), false) == 0)
+        if(TAO::API::Authentication::Caller(uint256_t(TAO::API::Authentication::SESSION::DEFAULT), false) == uint256_t(0))
         {
             debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
             debug::error(FUNCTION, "  Start node with: -unlock=mining");
