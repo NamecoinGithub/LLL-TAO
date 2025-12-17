@@ -29,6 +29,7 @@ ________________________________________________________________________________
 
 #include <TAO/API/include/global.h>
 #include <TAO/API/types/authentication.h>
+#include <TAO/API/types/exception.h>
 
 #include <Legacy/include/create.h>
 #include <Legacy/types/legacy.h>
@@ -767,7 +768,7 @@ namespace LLP
         {
             RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
         }
-        catch(const std::exception& e)
+        catch(const TAO::API::Exception& e)
         {
             /* Provide helpful error message if DEFAULT session not found */
             debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
