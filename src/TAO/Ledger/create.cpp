@@ -347,7 +347,10 @@ namespace TAO::Ledger
     }
 
 
-    /* Create a new block object from the chain. */
+    /* Create a new block object from the chain.
+     * hashDynamicGenesis enables dual-identity mining:
+     *   user: Signs the block (node operator credentials)
+     *   hashDynamicGenesis: Receives rewards (miner's address) */
     bool CreateBlock(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
         const uint32_t nChannel, TAO::Ledger::TritiumBlock &rBlockRet, const uint64_t nExtraNonce, Legacy::Coinbase *pCoinbaseRecipients,
         const uint256_t& hashDynamicGenesis)
@@ -485,7 +488,9 @@ namespace TAO::Ledger
         /* Create the Coinbase Transaction if the Channel specifies. */
         if(nChannel == 1 || nChannel == 2)
         {
-            /* Determine the reward recipient - use dynamic genesis if provided and valid, otherwise use user genesis */
+            /* Determine reward recipient:
+             *   If hashDynamicGenesis != 0 AND on-chain: Route to miner
+             *   Otherwise: Route to node operator (user->Genesis()) */
             uint256_t hashRewardRecipient = user->Genesis();
             
             /* Validate and use dynamic genesis if provided */

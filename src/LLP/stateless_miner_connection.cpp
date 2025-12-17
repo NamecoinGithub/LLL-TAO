@@ -720,11 +720,21 @@ namespace LLP
         const uint32_t nBitMask =
             config::GetBoolArg(std::string("-primemod"), false) ? 0xFE000000 : 0x80000000;
 
+        /* Verify DEFAULT session exists (required for signing blocks). */
+        if(TAO::API::Authentication::Caller(uint256_t(TAO::API::Authentication::SESSION::DEFAULT), false) == 0)
+        {
+            debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
+            debug::error(FUNCTION, "  Start node with: -unlock=mining");
+            return nullptr;
+        }
+
         /* Unlock sigchain to create new block. */
         SecureString strPIN;
         RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
 
-        /* Get an instance of our credentials. */
+        /* Dual-identity model: pCredentials signs, hashRewardAddress receives rewards. */
+
+        /* Get signing credentials from DEFAULT session (node operator). */
         const auto& pCredentials =
             TAO::API::Authentication::Credentials(uint256_t(TAO::API::Authentication::SESSION::DEFAULT));
 
@@ -734,7 +744,7 @@ namespace LLP
         /* Get channel from context */
         uint32_t nChannel = context.nChannel;
 
-        /* Get payout address - MUST be bound via MINER_SET_REWARD */
+        /* Get reward address from context (miner via MINER_SET_REWARD). */
         const uint256_t hashRewardAddress = context.GetPayoutAddress();
 
         /* Verify reward address is set */
@@ -745,12 +755,11 @@ namespace LLP
             return nullptr;
         }
 
-        /* Log reward routing (always explicit address now) */
-        debug::log(1, FUNCTION, "Creating block with REWARD ADDRESS: ", hashRewardAddress.ToString().substr(0, 16), "...");
-        debug::log(2, FUNCTION, "  Auth genesis: ", context.hashGenesis.SubString());
-        debug::log(2, FUNCTION, "  Reward address: ", hashRewardAddress.ToString());
+        /* Log dual-identity routing. */
+        debug::log(1, FUNCTION, "Block signing: ", pCredentials->Genesis().SubString(), " (node)");
+        debug::log(1, FUNCTION, "Reward routing: ", hashRewardAddress.SubString(), " (miner)");
 
-        /* Create a new block and loop for prime channel if minimum bit target length isn't met */
+        /* Pass hashRewardAddress as hashDynamicGenesis to route rewards to miner. */
         while(TAO::Ledger::CreateBlock(pCredentials, strPIN, nChannel, *pBlock, ++nBlockIterator, nullptr, hashRewardAddress))
         {
             /* Break out of loop when block is ready for prime mod. */

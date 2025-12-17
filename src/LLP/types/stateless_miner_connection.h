@@ -109,7 +109,9 @@ namespace LLP
 
         /** new_block
          *
-         *  Adds a new block to the map.
+         *  Creates a new block using dual-identity model:
+         *  - Signs with DEFAULT session credentials (node operator)
+         *  - Routes rewards to miner address from MINER_SET_REWARD
          *
          *  @return Pointer to newly created block, or nullptr on failure.
          *
