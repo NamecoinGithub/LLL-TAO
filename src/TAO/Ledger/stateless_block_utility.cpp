@@ -16,6 +16,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/difficulty.h>
 #include <TAO/Ledger/include/retarget.h>
+#include <TAO/Ledger/include/timelocks.h>
 
 #include <TAO/API/include/global.h>
 #include <TAO/API/types/authentication.h>
@@ -107,12 +108,12 @@ namespace TAO::Ledger
             
             TAO::Ledger::Transaction producer;
             producer.nVersion = 1;
-            producer.nSequence = 0;  // WRONG: Should lookup from sigchain
+            producer.nSequence = 0;  // TODO: Call CreateTransaction() to get proper sequence from sigchain
             producer.nTimestamp = pBlock->nTime;
             producer.hashGenesis = hashRewardAddress;
             producer.nKeyType = TAO::Ledger::SIGNATURE::BRAINPOOL;
             producer.nNextType = TAO::Ledger::SIGNATURE::BRAINPOOL;
-            // MISSING: hashPrevTx
+            // MISSING: hashPrevTx (requires LLD::Ledger->ReadLast() or CreateTransaction())
             // MISSING: OP::AUTHORIZE operation
             // MISSING: Proper signing
             
