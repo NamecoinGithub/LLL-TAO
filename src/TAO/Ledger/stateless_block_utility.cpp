@@ -86,33 +86,64 @@ namespace TAO::Ledger
             pBlock->nNonce = nExtraNonce;
             pBlock->nTime = runtime::unifiedtimestamp();
             
-            /* For hybrid blocks, we need to create a producer transaction */
-            /* This is where we're learning - trying simplified approach */
+            /* ALPHA LEARNING: Create a simplified producer transaction
+             * 
+             * KNOWN ISSUES (learning from these):
+             * 1. Missing hashPrevTx (requires sigchain lookup)
+             * 2. nSequence should be looked up from last transaction
+             * 3. Missing AUTHORIZE operation (hybrid blocks need this)
+             * 4. Producer not properly signed
+             * 
+             * CORRECT APPROACH (for future):
+             * - Use CreateTransaction() helper to get proper sequence
+             * - Add OP::AUTHORIZE operation like create.cpp line 629
+             * - Sign producer transaction with proper credentials
+             * - Store producer in block.producer field, not vtx
+             * 
+             * CURRENT STATUS:
+             * This simplified version will likely fail validation.
+             * That's OK - we're learning what fields are required!
+             */
             
             TAO::Ledger::Transaction producer;
             producer.nVersion = 1;
-            producer.nSequence = 0;
+            producer.nSequence = 0;  // WRONG: Should lookup from sigchain
             producer.nTimestamp = pBlock->nTime;
-            producer.hashGenesis = hashRewardAddress;  // Route reward here
+            producer.hashGenesis = hashRewardAddress;
             producer.nKeyType = TAO::Ledger::SIGNATURE::BRAINPOOL;
             producer.nNextType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+            // MISSING: hashPrevTx
+            // MISSING: OP::AUTHORIZE operation
+            // MISSING: Proper signing
             
-            /* Add producer to block */
+            /* LEARNING NOTE: This approach is wrong but educational
+             * Real implementation should store producer directly:
+             *   pBlock->producer = producer;
+             * Not in vtx vector. We'll learn this from validation errors.
+             */
             pBlock->vtx.push_back(
                 std::make_pair(TAO::Ledger::TRANSACTION::TRITIUM, producer.GetHash())
             );
             
             /* Calculate merkle root */
+            /* LEARNING NOTE: This may not be correct for hybrid blocks
+             * Real merkle construction might need special handling.
+             * We'll discover the right approach from errors.
+             */
             pBlock->hashMerkleRoot = pBlock->BuildMerkleTree(pBlock->vtx);
             
-            /* Try to sign block (this is where we might fail) */
-            /* For hybrid, signing might be different - we're learning */
-            
-            debug::log(2, FUNCTION, "Hybrid block created (unsigned)");
+            debug::log(2, FUNCTION, "Hybrid block created (INCOMPLETE - learning version)");
             debug::log(2, FUNCTION, "  Height: ", pBlock->nHeight);
             debug::log(2, FUNCTION, "  Version: ", pBlock->nVersion);
             debug::log(2, FUNCTION, "  Channel: ", pBlock->nChannel);
             debug::log(2, FUNCTION, "  Prev block: ", pBlock->hashPrevBlock.SubString());
+            debug::log(2, FUNCTION, "");
+            debug::log(2, FUNCTION, "ALPHA NOTE: This block is missing critical fields:");
+            debug::log(2, FUNCTION, "  - Producer transaction not properly initialized");
+            debug::log(2, FUNCTION, "  - Missing AUTHORIZE operation");
+            debug::log(2, FUNCTION, "  - Not signed");
+            debug::log(2, FUNCTION, "  - May fail validation (this is expected!)");
+            debug::log(2, FUNCTION, "Goal: Learn from validation errors what's needed");
             
             return pBlock;
         }
