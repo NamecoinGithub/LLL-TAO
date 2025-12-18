@@ -36,16 +36,19 @@ namespace TAO::Ledger
         }
 
         /* Get node operator's credentials (required for signing producer) */
-        const memory::encrypted_ptr<TAO::Ledger::Credentials>* pCredentials = 
+        const memory::encrypted_ptr<TAO::Ledger::Credentials>* pCredentialsPtr = 
             GetNodeCredentials();
         
-        if(!pCredentials)
+        if(!pCredentialsPtr)
         {
             debug::error(FUNCTION, "Cannot create block - node credentials not available");
             debug::error(FUNCTION, "  Stateless mining requires: nexus -unlock=mining");
             debug::error(FUNCTION, "  This provides node operator credentials for signing blocks");
             return nullptr;
         }
+
+        /* Dereference to get the actual encrypted_ptr (now safe after null check) */
+        const memory::encrypted_ptr<TAO::Ledger::Credentials>& pCredentials = *pCredentialsPtr;
 
         /* Unlock the node operator's PIN for mining */
         SecureString strPIN;
@@ -69,7 +72,7 @@ namespace TAO::Ledger
 
         /* Log the dual-identity model clearly for transparency */
         debug::log(1, FUNCTION, "=== Dual-Identity Mining Block Creation ===");
-        debug::log(1, FUNCTION, "Block producer signing: ", (*pCredentials)->Genesis().SubString(), 
+        debug::log(1, FUNCTION, "Block producer signing: ", pCredentials->Genesis().SubString(), 
                    " (node operator)");
         debug::log(1, FUNCTION, "Reward routing to:      ", hashRewardAddress.SubString(), 
                    " (miner)");
@@ -100,7 +103,7 @@ namespace TAO::Ledger
          * to the miner's address instead of the node operator's address.
          */
         const bool fSuccess = TAO::Ledger::CreateBlock(
-            *pCredentials,              // Node operator's credentials (for signing)
+            pCredentials,               // Node operator's credentials (for signing)
             strPIN,                     // Node operator's PIN
             nChannel,                   // Mining channel (1=Prime, 2=Hash, 3=Private)
             *pBlock,                    // Output block

@@ -744,11 +744,14 @@ namespace LLP
              * - Miner's reward address (for routing all rewards)
              * - All ambassador, developer, and client transaction logic
              * - Full consensus rule compliance
+             * 
+             * Note: nBlockIterator++ uses current value then increments,
+             * ensuring we start from 0 and don't skip any nonce values.
              */
             pBlock = TAO::Ledger::TritiumBlockUtility::CreateForStatelessMining(
                 context,           // Falcon-authenticated miner context
                 nChannel,          // Mining channel (1=Prime, 2=Hash, 3=Private)
-                ++nBlockIterator   // Extra nonce for iteration
+                nBlockIterator++   // Extra nonce: use current value, then increment
             );
 
             /* Check if block creation failed */
