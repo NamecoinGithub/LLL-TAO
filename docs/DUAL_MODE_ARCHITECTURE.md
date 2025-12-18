@@ -1,5 +1,41 @@
 # Dual-Mode Tritium Block Utility Architecture
 
+## ALPHA Branch: Hybrid Blocks Only
+
+**Current Focus:** Learning block creation with simpler Hybrid blocks.
+
+**Supported:**
+- Hybrid mining (nChannel = 3)
+- Stateless miner protocol
+- Reward address binding
+
+**Not Supported (yet):**
+- Tritium blocks (too complex for learning)
+- Mode 1/Mode 2 (simplified to hybrid-only)
+
+**Goal:** Get SOMETHING working to learn patterns.
+
+**Future:** Apply lessons to full Tritium implementation.
+
+**To Use:**
+```bash
+# Start daemon with hybrid mining
+./nexus -daemon -hybrid
+
+# Miner connects
+./nexusminer -host=127.0.0.1 -port=9549 -channel=3
+```
+
+**Expected:** Might not fully work, but will teach us block creation.
+
+**Philosophy:**
+> "Fail fast, learn faster, iterate smarter"
+
+We're building the world's first stateless mining protocol.
+Learning is part of the process!
+
+---
+
 ## Overview
 
 The Dual-Mode Tritium Block Utility provides intelligent block creation for stateless mining that automatically adapts to node configuration. It supports two distinct architectures:

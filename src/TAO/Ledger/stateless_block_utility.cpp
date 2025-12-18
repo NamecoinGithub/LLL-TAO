@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/create.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/difficulty.h>
+#include <TAO/Ledger/include/retarget.h>
 
 #include <TAO/API/include/global.h>
 #include <TAO/API/types/authentication.h>
@@ -37,166 +38,117 @@ namespace TAO::Ledger
     /* Detects which mining mode is available based on node state. */
     MiningMode DetectMiningMode()
     {
-        /* Check for Mode 2 first (Interface Session - easiest/fastest) */
-        try
+        /* Check if hybrid mining is enabled */
+        if(!config::fHybrid.load())
         {
-            /* Try to get the default session credentials */
-            const uint256_t hashSession = GetDefaultSessionId();
-            const auto& pCredentials = 
-                TAO::API::Authentication::Credentials(hashSession);
-
-            /* Try to unlock for mining - will throw if it fails */
-            SecureString strPIN;
-            RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING, hashSession));
-
-            /* If we got here, both credentials exist and unlock succeeded */
-            debug::log(1, FUNCTION, "Mining Mode: INTERFACE_SESSION");
-            debug::log(1, FUNCTION, "  - Node has credentials (SESSION::DEFAULT available)");
-            debug::log(1, FUNCTION, "  - Node will sign producers on behalf of miners");
-            debug::log(1, FUNCTION, "  - Rewards routed via hashDynamicGenesis parameter");
-            return MiningMode::INTERFACE_SESSION;
+            debug::error(FUNCTION, "Hybrid mining not enabled");
+            debug::error(FUNCTION, "  Start daemon with -hybrid flag");
+            return MiningMode::UNAVAILABLE;
         }
-        catch(const std::exception& e)
-        {
-            /* No session available - that's fine, we'll use Mode 1 */
-            debug::log(2, FUNCTION, "SESSION::DEFAULT not available: ", e.what());
-        }
-        catch(...)
-        {
-            /* Any other error - also fine, we'll use Mode 1 */
-            debug::log(2, FUNCTION, "SESSION::DEFAULT not available (unknown error)");
-        }
-
-        /* Mode 2 not available, use Mode 1 (Daemon Stateless) */
-        debug::log(1, FUNCTION, "Mining Mode: DAEMON_STATELESS");
-        debug::log(1, FUNCTION, "  - No node credentials available");
-        debug::log(1, FUNCTION, "  - Expecting miner-signed producers");
-        debug::log(1, FUNCTION, "  - Daemon will build blocks around pre-signed producers");
         
-        /* NOTE: Mode 1 is always "available" from daemon's perspective.
-         * It's the miner's responsibility to provide signed producers.
-         * If miner can't provide producers, that's a miner-side error. */
-        return MiningMode::DAEMON_STATELESS;
+        /* Hybrid mining is stateless - no credentials needed */
+        debug::log(1, FUNCTION, "Mining Mode: HYBRID_STATELESS");
+        debug::log(1, FUNCTION, "  - Hybrid block mining (nChannel = 3)");
+        debug::log(1, FUNCTION, "  - Private mining enabled");
+        debug::log(1, FUNCTION, "  - Simpler consensus rules");
+        
+        return MiningMode::HYBRID_STATELESS;
     }
 
 
-    /* Creates a Tritium block using node credentials (Mode 2). */
-    static TritiumBlock* CreateWithNodeCredentials(
+    /* Creates a Hybrid block for learning/ALPHA branch. */
+    static TritiumBlock* CreateHybridBlock(
         const uint32_t nChannel,
         const uint64_t nExtraNonce,
         const uint256_t& hashRewardAddress)
     {
         try
         {
-            /* Get node credentials */
-            const uint256_t hashSession = GetDefaultSessionId();
-            const auto& pCredentials = 
-                TAO::API::Authentication::Credentials(hashSession);
-
-            /* Unlock PIN for mining */
-            SecureString strPIN;
-            RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING, hashSession));
-
-            /* Validate reward address */
-            if(hashRewardAddress == 0)
-            {
-                debug::error(FUNCTION, "Invalid reward address (zero)");
-                debug::error(FUNCTION, "  Miner must send MINER_SET_REWARD packet first");
-                return nullptr;
-            }
-
-            /* Log the dual-identity model */
-            debug::log(2, FUNCTION, "Mode 2: Creating block with node credentials");
-            debug::log(2, FUNCTION, "  Block signer: ", pCredentials->Genesis().SubString(), " (node operator)");
-            debug::log(2, FUNCTION, "  Reward recipient: ", hashRewardAddress.SubString(), " (miner)");
-            debug::log(2, FUNCTION, "  Channel: ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
-
-            /* Create the block using standard CreateBlock flow */
+            debug::log(2, FUNCTION, "Creating Hybrid block (ALPHA - learning)");
+            debug::log(2, FUNCTION, "  Channel: ", nChannel);
+            debug::log(2, FUNCTION, "  Extra nonce: ", nExtraNonce);
+            debug::log(2, FUNCTION, "  Reward address: ", hashRewardAddress.SubString());
+            
+            /* Get the current best block */
+            const TAO::Ledger::BlockState stateBest = 
+                TAO::Ledger::ChainState::tStateBest.load();
+            
+            /* Create new block */
             TritiumBlock* pBlock = new TritiumBlock();
             
-            bool success = CreateBlock(
-                pCredentials,
-                strPIN,
-                nChannel,
-                *pBlock,
-                nExtraNonce,
-                nullptr,  // No coinbase recipients
-                hashRewardAddress  // Route rewards to miner
+            /* Set block header fields */
+            pBlock->nVersion = TAO::Ledger::CurrentBlockVersion();
+            pBlock->hashPrevBlock = stateBest.GetHash();
+            pBlock->nChannel = nChannel;
+            pBlock->nHeight = stateBest.nHeight + 1;
+            pBlock->nBits = GetNextTargetRequired(
+                stateBest, nChannel, false);
+            pBlock->nNonce = nExtraNonce;
+            pBlock->nTime = runtime::unifiedtimestamp();
+            
+            /* For hybrid blocks, we need to create a producer transaction */
+            /* This is where we're learning - trying simplified approach */
+            
+            TAO::Ledger::Transaction producer;
+            producer.nVersion = 1;
+            producer.nSequence = 0;
+            producer.nTimestamp = pBlock->nTime;
+            producer.hashGenesis = hashRewardAddress;  // Route reward here
+            producer.nKeyType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+            producer.nNextType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+            
+            /* Add producer to block */
+            pBlock->vtx.push_back(
+                std::make_pair(TAO::Ledger::TRANSACTION::TRITIUM, producer.GetHash())
             );
-
-            if(!success)
-            {
-                delete pBlock;
-                debug::error(FUNCTION, "CreateBlock failed");
-                return nullptr;
-            }
-
-            debug::log(2, FUNCTION, "Mode 2: Block created successfully");
+            
+            /* Calculate merkle root */
+            pBlock->hashMerkleRoot = pBlock->BuildMerkleTree(pBlock->vtx);
+            
+            /* Try to sign block (this is where we might fail) */
+            /* For hybrid, signing might be different - we're learning */
+            
+            debug::log(2, FUNCTION, "Hybrid block created (unsigned)");
+            debug::log(2, FUNCTION, "  Height: ", pBlock->nHeight);
+            debug::log(2, FUNCTION, "  Version: ", pBlock->nVersion);
+            debug::log(2, FUNCTION, "  Channel: ", pBlock->nChannel);
+            debug::log(2, FUNCTION, "  Prev block: ", pBlock->hashPrevBlock.SubString());
+            
             return pBlock;
         }
         catch(const std::exception& e)
         {
-            debug::error(FUNCTION, "Exception in CreateWithNodeCredentials: ", e.what());
+            debug::error(FUNCTION, "Exception creating hybrid block: ", e.what());
             return nullptr;
         }
     }
 
 
+    /* Creates a Tritium block using node credentials (Mode 2). */
+    /* ALPHA BRANCH: Not used - stubbed for reference */
+    static TritiumBlock* CreateWithNodeCredentials(
+        const uint32_t nChannel,
+        const uint64_t nExtraNonce,
+        const uint256_t& hashRewardAddress)
+    {
+        debug::error(FUNCTION, "Mode 2 (INTERFACE_SESSION) not used in ALPHA branch");
+        debug::error(FUNCTION, "  ALPHA focuses on Hybrid blocks only (nChannel = 3)");
+        debug::error(FUNCTION, "  This function kept for reference");
+        return nullptr;
+    }
+
+
     /* Creates a Tritium block with miner-signed producer (Mode 1). */
+    /* ALPHA BRANCH: Not used - stubbed for reference */
     static TritiumBlock* CreateWithMinerProducer(
         const uint32_t nChannel,
         const uint64_t nExtraNonce,
         const uint256_t& hashRewardAddress,
         const Transaction& preSignedProducer)
     {
-        /* This is the Mode 1 implementation - the challenging part.
-         * 
-         * CURRENT STATUS: NOT YET IMPLEMENTED
-         * 
-         * This requires:
-         * 1. Validating the pre-signed producer transaction
-         * 2. Building block around it (without calling CreateProducer)
-         * 3. Adding ambassador rewards, developer fund, mempool transactions
-         * 4. Calculating merkle root correctly
-         * 5. Setting all block metadata
-         * 
-         * DESIGN CHALLENGE:
-         * - Can't easily modify CreateBlock() to accept optional producer
-         * - Would need to duplicate significant logic from create.cpp
-         * - Ambassador/developer rewards logic is embedded in CreateProducer()
-         * 
-         * RECOMMENDED APPROACH (for future implementation):
-         * - Refactor create.cpp to extract helper functions:
-         *   * AddAmbassadorRewards()
-         *   * AddDeveloperFund()
-         *   * AddClientTransactions()
-         *   * CalculateMerkleRoot()
-         * - Then compose them here for Mode 1
-         * 
-         * ALTERNATIVE (safer for now):
-         * - Require miners to use Mode 2 (node with credentials)
-         * - Document Mode 1 as "future enhancement"
-         * - This prevents breaking existing functionality
-         */
-
-        debug::error(FUNCTION, "Mode 1 (DAEMON_STATELESS) not yet implemented");
-        debug::error(FUNCTION, "");
-        debug::error(FUNCTION, "  CURRENT SOLUTION:");
-        debug::error(FUNCTION, "    Start daemon with: ./nexus -daemon -unlock=mining");
-        debug::error(FUNCTION, "    This enables Mode 2 (node credentials available)");
-        debug::error(FUNCTION, "");
-        debug::error(FUNCTION, "  FUTURE SOLUTION:");
-        debug::error(FUNCTION, "    Mode 1 will allow pure stateless daemons");
-        debug::error(FUNCTION, "    Miners will create and sign producers locally");
-        debug::error(FUNCTION, "    Estimated implementation: 6-10 weeks");
-        debug::error(FUNCTION, "");
-        debug::error(FUNCTION, "  WHY NOT IMPLEMENTED YET:");
-        debug::error(FUNCTION, "    Mode 1 requires refactoring consensus-critical code");
-        debug::error(FUNCTION, "    Ambassador/developer reward logic embedded in CreateProducer()");
-        debug::error(FUNCTION, "    Safer to deliver Mode 2 now, Mode 1 when ecosystem needs it");
-        debug::error(FUNCTION, "");
-        debug::error(FUNCTION, "See docs/DUAL_MODE_ARCHITECTURE.md for details");
-
+        debug::error(FUNCTION, "Mode 1 (DAEMON_STATELESS) not used in ALPHA branch");
+        debug::error(FUNCTION, "  ALPHA focuses on Hybrid blocks only (nChannel = 3)");
+        debug::error(FUNCTION, "  This function kept for reference");
         return nullptr;
     }
 
@@ -208,43 +160,24 @@ namespace TAO::Ledger
         const uint256_t& hashRewardAddress,
         const Transaction* pPreSignedProducer)
     {
-        /* Detect which mode to use */
-        MiningMode mode = DetectMiningMode();
-
-        switch(mode)
+        /* Only support hybrid blocks */
+        if(nChannel != 3)
         {
-            case MiningMode::INTERFACE_SESSION:
-            {
-                /* Mode 2: Use node credentials to sign producer */
-                debug::log(2, FUNCTION, "Using Mode 2: Node credentials available");
-                return CreateWithNodeCredentials(nChannel, nExtraNonce, hashRewardAddress);
-            }
-
-            case MiningMode::DAEMON_STATELESS:
-            {
-                /* Mode 1: Use miner-signed producer */
-                debug::log(2, FUNCTION, "Using Mode 1: Expecting miner-signed producer");
-
-                if(pPreSignedProducer == nullptr)
-                {
-                    debug::error(FUNCTION, "Mode 1 active but no pre-signed producer provided");
-                    debug::error(FUNCTION, "  Miner must send signed producer transaction");
-                    debug::error(FUNCTION, "  Or start daemon with -unlock=mining for Mode 2");
-                    return nullptr;
-                }
-
-                return CreateWithMinerProducer(nChannel, nExtraNonce, hashRewardAddress, *pPreSignedProducer);
-            }
-
-            case MiningMode::UNAVAILABLE:
-            default:
-            {
-                debug::error(FUNCTION, "No mining mode available");
-                debug::error(FUNCTION, "  Mode 2 requires: -unlock=mining");
-                debug::error(FUNCTION, "  Mode 1 requires: miner-signed producer");
-                return nullptr;
-            }
+            debug::error(FUNCTION, "Only hybrid blocks (nChannel = 3) supported in ALPHA");
+            debug::error(FUNCTION, "  Requested channel: ", nChannel);
+            return nullptr;
         }
+        
+        /* Detect mining mode */
+        MiningMode mode = DetectMiningMode();
+        if(mode != MiningMode::HYBRID_STATELESS)
+        {
+            debug::error(FUNCTION, "Hybrid mining not available");
+            return nullptr;
+        }
+        
+        /* Create hybrid block */
+        return CreateHybridBlock(nChannel, nExtraNonce, hashRewardAddress);
     }
 
 

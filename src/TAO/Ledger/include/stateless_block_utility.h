@@ -36,8 +36,9 @@ namespace TAO
          **/
         enum class MiningMode
         {
-            DAEMON_STATELESS,      // Mode 1: No credentials, miner signs producer
-            INTERFACE_SESSION,     // Mode 2: Has credentials, node signs producer
+            DAEMON_STATELESS,      // Mode 1: No credentials, miner signs producer (not used in ALPHA)
+            INTERFACE_SESSION,     // Mode 2: Has credentials, node signs producer (not used in ALPHA)
+            HYBRID_STATELESS,      // Hybrid blocks (ALPHA focus - nChannel = 3)
             UNAVAILABLE           // Neither mode available (error condition)
         };
 
