@@ -18,6 +18,7 @@ ________________________________________________________________________________
 #include <LLP/templates/events.h>
 
 #include <TAO/Ledger/include/create.h>
+#include <TAO/Ledger/include/stateless_block_utility.h>
 #include <TAO/Ledger/include/prime.h>
 #include <TAO/Ledger/include/constants.h>
 #include <TAO/Ledger/include/process.h>
@@ -720,61 +721,65 @@ namespace LLP
         const uint32_t nBitMask =
             config::GetBoolArg(std::string("-primemod"), false) ? 0xFE000000 : 0x80000000;
 
-        /* Verify DEFAULT session exists (required for signing blocks).
-         * Node must be started with -unlock=mining to provide signing credentials. */
-        const memory::encrypted_ptr<TAO::Ledger::Credentials>* pCredentialsCheck = nullptr;
-        try
-        {
-            /* Attempt to get credentials - will throw if session doesn't exist */
-            pCredentialsCheck = &TAO::API::Authentication::Credentials(uint256_t(TAO::API::Authentication::SESSION::DEFAULT));
-        }
-        catch(const std::exception& e)
-        {
-            debug::error(FUNCTION, "Cannot create block - DEFAULT session not initialized");
-            debug::error(FUNCTION, "  Start node with: -unlock=mining");
-            debug::error(FUNCTION, "  Error: ", e.what());
-            return nullptr;
-        }
-
-        /* Unlock sigchain to create new block. */
-        SecureString strPIN;
-        RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
-
-        /* Use the credentials we already validated */
-        const auto& pCredentials = *pCredentialsCheck;
-
-        /* Allocate memory for the new block. */
-        TAO::Ledger::TritiumBlock *pBlock = new TAO::Ledger::TritiumBlock();
-
+        /* Use the Tritium Block Creation Utility for stateless mining.
+         * This utility bridges the gap between Falcon-authenticated mining context
+         * and Credentials-based block signing, while leveraging ALL of Colin's proven
+         * block creation logic from CreateBlock(). */
+        TAO::Ledger::TritiumBlock *pBlock = nullptr;
+        
         /* Get channel from context */
-        uint32_t nChannel = context.nChannel;
+        const uint32_t nChannel = context.nChannel;
 
-        /* Get payout address - MUST be bound via MINER_SET_REWARD */
-        const uint256_t hashRewardAddress = context.GetPayoutAddress();
-
-        /* Verify reward address is set */
-        if(hashRewardAddress == 0)
+        /* Create blocks until prime mod requirement is met (for Prime channel).
+         * For Hash/Private channels, this loop executes only once. */
+        do
         {
-            debug::error(FUNCTION, "Cannot create block - reward address not bound");
-            debug::error(FUNCTION, "  Required: Send MINER_SET_REWARD before GET_BLOCK");
-            return nullptr;
-        }
+            /* Clean up previous attempt if needed */
+            if(pBlock)
+                delete pBlock;
 
-        /* Log dual-identity model clearly */
-        debug::log(1, FUNCTION, "Block signing: ", pCredentials->Genesis().SubString(), " (node operator)");
-        debug::log(1, FUNCTION, "Reward routing: ", hashRewardAddress.SubString(), " (miner)");
-        debug::log(1, FUNCTION, "Channel: ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
+            /* Create a new Tritium block using the utility.
+             * This calls CreateBlock() internally with:
+             * - Node operator credentials (for signing producer transaction)
+             * - Miner's reward address (for routing all rewards)
+             * - All ambassador, developer, and client transaction logic
+             * - Full consensus rule compliance
+             */
+            pBlock = TAO::Ledger::TritiumBlockUtility::CreateForStatelessMining(
+                context,           // Falcon-authenticated miner context
+                nChannel,          // Mining channel (1=Prime, 2=Hash, 3=Private)
+                ++nBlockIterator   // Extra nonce for iteration
+            );
 
-        /* Create a new block and loop for prime channel if minimum bit target length isn't met */
-        while(TAO::Ledger::CreateBlock(pCredentials, strPIN, nChannel, *pBlock, ++nBlockIterator, nullptr, hashRewardAddress))
-        {
-            /* Break out of loop when block is ready for prime mod. */
+            /* Check if block creation failed */
+            if(!pBlock)
+            {
+                debug::error(FUNCTION, "TritiumBlockUtility::CreateForStatelessMining failed");
+                return nullptr;
+            }
+
+            /* For Prime channel with -primemod flag, ensure bit mask requirement is met.
+             * For other channels, accept the block immediately. */
             if(is_prime_mod(nBitMask, pBlock))
                 break;
-        }
 
-        /* Output debug info and return the newly created block. */
-        debug::log(2, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), " nVersion=", pBlock->nVersion);
+            /* Log that we're iterating for prime mod compliance */
+            debug::log(3, FUNCTION, "Block did not meet prime mod requirement, iterating...");
+
+        } while(true); /* Loop until prime mod requirement is met */
+
+        /* Output debug info and return the newly created block.
+         * This block contains:
+         * ✅ Signed producer transaction (node operator's sigchain)
+         * ✅ All coinbase outputs routed to miner's address
+         * ✅ Ambassador rewards (if applicable)
+         * ✅ Developer fund (if applicable)
+         * ✅ Client transactions from mempool
+         * ✅ Valid merkle tree
+         * ✅ All required consensus rules satisfied
+         */
+        debug::log(2, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), 
+                   " nVersion=", pBlock->nVersion);
         return pBlock;
     }
 
