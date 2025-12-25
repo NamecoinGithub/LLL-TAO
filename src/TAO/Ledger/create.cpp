@@ -946,4 +946,64 @@ namespace TAO::Ledger
         /* Pass new producer transaction to update timestamp. */
         UpdateProducerTimestamp(block.producer);
     }
+
+
+    /* Simplified utility for stateless mining block creation. */
+    TritiumBlock* CreateBlockForStatelessMining(
+        const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
+        const SecureString& pin,
+        uint32_t nChannel,
+        uint32_t nBlockIterator,
+        const uint256_t& hashReward,
+        Transaction* pPreSignedProducer)
+    {
+        /* Validate that credentials are provided (caller must handle authentication) */
+        if(!user)
+        {
+            debug::error(FUNCTION, "Invalid credentials - caller must provide unlocked credentials");
+            return nullptr;
+        }
+
+        /* Note: We do NOT call TAO::API::Authentication::Unlock() here.
+         * The caller is responsible for authentication and unlocking.
+         * This function assumes credentials are already unlocked and ready to use. */
+
+        /* Allocate new block */
+        TritiumBlock* pBlock = new TritiumBlock();
+        
+        /* Create the block using existing CreateBlock infrastructure
+         * 
+         * Parameters:
+         *  - user: Already-unlocked credentials (passed from caller)
+         *  - pin: Already-unlocked PIN (passed from caller)
+         *  - nChannel: Mining channel
+         *  - *pBlock: Output block reference
+         *  - nBlockIterator: Extra nonce for iteration
+         *  - nullptr: No legacy coinbase recipients
+         *  - hashReward: Reward destination (can be genesis, register, or 0 for fallback)
+         */
+        bool success = CreateBlock(
+            user,
+            pin,
+            nChannel,
+            *pBlock,
+            nBlockIterator,  // nExtraNonce parameter
+            nullptr,         // No legacy coinbase recipients
+            hashReward       // Reward recipient address
+        );
+
+        if(!success)
+        {
+            /* CreateBlock failed - clean up and return null */
+            delete pBlock;
+            debug::error(FUNCTION, "CreateBlock failed for channel ", nChannel);
+            return nullptr;
+        }
+
+        /* Block created successfully */
+        debug::log(3, FUNCTION, "Created block for stateless mining: channel=", nChannel, 
+                   " reward=", hashReward.SubString());
+        
+        return pBlock;
+    }
 }

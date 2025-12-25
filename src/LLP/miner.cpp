@@ -1166,9 +1166,6 @@ namespace LLP
         const auto& pCredentials =
             TAO::API::Authentication::Credentials();
 
-        /* Allocate memory for the new block. */
-        TAO::Ledger::TritiumBlock *pBlock = new TAO::Ledger::TritiumBlock();
-
         /* Determine reward address for block creation.
          * 
          * REWARD PRIORITY LOGIC:
@@ -1211,13 +1208,35 @@ namespace LLP
          *   - If non-zero: Route rewards to this address (stateless miner)
          *   - If zero: Route rewards to node operator's genesis (wallet mining)
          * 
-         * CreateProducer() handles the fallback internally (see create.cpp:492-505)
+         * Using new CreateBlockForStatelessMining() utility (post PR #92 refactor)
          */
-        while(TAO::Ledger::CreateBlock(pCredentials, strPIN, nChannel.load(), *pBlock, ++nBlockIterator, &tCoinbaseTx, hashDynamicReward))
+        TAO::Ledger::TritiumBlock *pBlock = nullptr;
+        while(true)
         {
+            /* Create block using stateless mining utility */
+            pBlock = TAO::Ledger::CreateBlockForStatelessMining(
+                pCredentials,
+                strPIN,
+                nChannel.load(),
+                ++nBlockIterator,
+                hashDynamicReward,
+                nullptr  // No pre-signed producer
+            );
+
+            /* Check if block creation failed */
+            if(!pBlock)
+            {
+                debug::error(FUNCTION, "CreateBlockForStatelessMining failed");
+                return nullptr;
+            }
+
             /* Break out of loop when block is ready for prime mod. */
             if(is_prime_mod(nBitMask, pBlock))
                 break;
+
+            /* Delete unsuccessful block and try again with new extra nonce */
+            delete pBlock;
+            pBlock = nullptr;
         }
 
         /* Output debug info and return the newly created block. */

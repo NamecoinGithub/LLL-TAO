@@ -18,7 +18,6 @@ ________________________________________________________________________________
 #include <LLP/templates/events.h>
 
 #include <TAO/Ledger/include/create.h>
-#include <TAO/Ledger/include/stateless_block_utility.h>
 #include <TAO/Ledger/include/prime.h>
 #include <TAO/Ledger/include/constants.h>
 #include <TAO/Ledger/include/process.h>
@@ -794,7 +793,15 @@ namespace LLP
         }
         debug::log(1, FUNCTION, "  Channel: ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
 
-        /* Create block using dual-mode utility (auto-detects mode) */
+        /* Unlock sigchain to create new block */
+        SecureString strPIN;
+        RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
+
+        /* Get an instance of our credentials */
+        const auto& pCredentials =
+            TAO::API::Authentication::Credentials();
+
+        /* Create block using stateless mining utility */
         TAO::Ledger::TritiumBlock *pBlock = nullptr;
 
         /* Loop for prime channel until minimum bit target length is met.
@@ -805,18 +812,17 @@ namespace LLP
          */
         while(true)
         {
-            /* Use dual-mode block utility for intelligent block creation.
-             * This automatically detects whether to use:
-             * - Mode 2 (INTERFACE_SESSION): Node has credentials, signs on behalf of miner
-             * - Mode 1 (DAEMON_STATELESS): Pure daemon, expects miner-signed producer (future)
-             * 
-             * Currently only Mode 2 is implemented. Mode 1 will return error.
+            /* Create block using simplified utility from create.cpp
+             * This function does NOT do authentication internally (we handle it above)
+             * and creates the block with the specified reward address.
              */
             pBlock = TAO::Ledger::CreateBlockForStatelessMining(
+                pCredentials,
+                strPIN,
                 nChannel,
                 ++nBlockIterator,
                 hashRewardAddress,
-                nullptr  // No pre-signed producer (Mode 1 not yet supported)
+                nullptr  // No pre-signed producer
             );
 
             /* Check if block creation failed */

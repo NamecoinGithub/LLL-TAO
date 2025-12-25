@@ -181,6 +181,38 @@ namespace TAO
          *
          **/
         void UpdateProducerTimestamp(TAO::Ledger::TritiumBlock& block);
+
+
+        /** CreateBlockForStatelessMining
+         *
+         *  Simplified utility for stateless mining block creation.
+         *
+         *  This is a lightweight wrapper around CreateBlock() that handles block creation
+         *  without performing authentication. Callers must handle authentication and
+         *  credential management themselves.
+         *
+         *  Reward priority logic (to be handled by caller):
+         *  1. If explicit reward address set (via MINER_SET_REWARD) → use hashReward
+         *  2. If genesis hash available (Falcon auth) → use hashReward = hashGenesis
+         *  3. Otherwise → use hashReward = 0 (node operator's genesis)
+         *
+         *  @param[in] user The signature chain credentials (must be unlocked by caller)
+         *  @param[in] pin The PIN for signature generation (must be unlocked by caller)
+         *  @param[in] nChannel The mining channel (1 = Prime, 2 = Hash, 3 = Private)
+         *  @param[in] nBlockIterator Extra nonce for block iteration (incremented per attempt)
+         *  @param[in] hashReward Reward recipient address (genesis or register address)
+         *  @param[in] pPreSignedProducer Optional pre-signed producer (not currently used)
+         *
+         *  @return Pointer to created TritiumBlock, or nullptr on failure (caller must delete)
+         *
+         **/
+        TritiumBlock* CreateBlockForStatelessMining(
+            const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
+            const SecureString& pin,
+            uint32_t nChannel,
+            uint32_t nBlockIterator,
+            const uint256_t& hashReward,
+            Transaction* pPreSignedProducer = nullptr);
     }
 }
 
