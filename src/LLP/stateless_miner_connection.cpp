@@ -314,7 +314,7 @@ namespace LLP
                 const size_t MIN_SIZE = FalconConstants::MERKLE_ROOT_SIZE + FalconConstants::NONCE_SIZE;
                 
                 /* Maximum: full block dual-signature with ChaCha20 encryption = 1,878 bytes (Legacy) */
-                const size_t MAX_SIZE = FalconConstants::SUBMIT_BLOCK_DUAL_SIG_LEGACY_ENCRYPTED_MAX;
+                const size_t MAX_SIZE = FalconConstants::SUBMIT_BLOCK_FULL_DUAL_SIG_LEGACY_ENCRYPTED_MAX;
 
                 if(PACKET.DATA.size() < MIN_SIZE)
                 {

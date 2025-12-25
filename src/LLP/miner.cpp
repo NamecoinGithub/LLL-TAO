@@ -896,7 +896,8 @@ namespace LLP
 
                 /* Validate packet size using FalconConstants */
                 const size_t MIN_SIZE = FalconConstants::MERKLE_ROOT_SIZE + FalconConstants::NONCE_SIZE;
-                const size_t MAX_SIZE = FalconConstants::SUBMIT_BLOCK_DUAL_SIG_ENCRYPTED_MAX;
+                /* Use new full block format maximum (largest possible packet size) */
+                const size_t MAX_SIZE = FalconConstants::SUBMIT_BLOCK_FULL_DUAL_SIG_LEGACY_ENCRYPTED_MAX;
 
                 if(PACKET.DATA.size() < MIN_SIZE)
                 {
@@ -914,18 +915,41 @@ namespace LLP
                     return true;
                 }
 
+                /* Detect format: packets >= 200 bytes are full block format, < 200 are merkle format */
+                const bool fFullBlockFormat = (PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_FORMAT_DETECTION_THRESHOLD);
+                
                 /* Log signature mode for diagnostics */
-                if(PACKET.DATA.size() > FalconConstants::SUBMIT_BLOCK_WRAPPER_MAX)
+                if(fFullBlockFormat)
                 {
-                    debug::log(2, FUNCTION, "SUBMIT_BLOCK: Dual-signature mode detected");
-                }
-                else if(PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN)
-                {
-                    debug::log(3, FUNCTION, "SUBMIT_BLOCK: Single-signature mode");
+                    /* Full block format - use new thresholds */
+                    if(PACKET.DATA.size() > FalconConstants::SUBMIT_BLOCK_FULL_LEGACY_WRAPPER_ENCRYPTED_MAX)
+                    {
+                        debug::log(2, FUNCTION, "SUBMIT_BLOCK: Full block format with dual-signature mode");
+                    }
+                    else if(PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_FULL_LEGACY_MIN)
+                    {
+                        debug::log(3, FUNCTION, "SUBMIT_BLOCK: Full block format with single-signature mode");
+                    }
+                    else
+                    {
+                        debug::log(3, FUNCTION, "SUBMIT_BLOCK: Full block format (no signature)");
+                    }
                 }
                 else
                 {
-                    debug::log(3, FUNCTION, "SUBMIT_BLOCK: Legacy format");
+                    /* Legacy merkle format - use deprecated thresholds for backward compatibility */
+                    if(PACKET.DATA.size() > FalconConstants::SUBMIT_BLOCK_WRAPPER_MAX)
+                    {
+                        debug::log(2, FUNCTION, "SUBMIT_BLOCK: Merkle format with dual-signature mode (legacy)");
+                    }
+                    else if(PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN)
+                    {
+                        debug::log(3, FUNCTION, "SUBMIT_BLOCK: Merkle format with single-signature mode (legacy)");
+                    }
+                    else
+                    {
+                        debug::log(3, FUNCTION, "SUBMIT_BLOCK: Merkle format (no signature, legacy)");
+                    }
                 }
 
                 uint512_t hashMerkle;

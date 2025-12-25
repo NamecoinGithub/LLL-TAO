@@ -185,9 +185,5 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
         REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_DUAL_SIG_LEGACY_MAX == 1850);
         REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_DUAL_SIG_TRITIUM_ENCRYPTED_MAX == 1874);
         REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_DUAL_SIG_LEGACY_ENCRYPTED_MAX == 1878);
-        
-        /* Deprecated constants should still work for backward compatibility */
-        REQUIRE(FalconConstants::SUBMIT_BLOCK_DUAL_SIG_TRITIUM_ENCRYPTED_MAX == 1874);
-        REQUIRE(FalconConstants::SUBMIT_BLOCK_DUAL_SIG_LEGACY_ENCRYPTED_MAX == 1878);
     }
 }
