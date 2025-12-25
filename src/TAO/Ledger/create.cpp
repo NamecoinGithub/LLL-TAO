@@ -971,23 +971,13 @@ namespace TAO::Ledger
         /* Allocate new block */
         TritiumBlock* pBlock = new TritiumBlock();
         
-        /* Create the block using existing CreateBlock infrastructure
-         * 
-         * Parameters:
-         *  - user: Already-unlocked credentials (passed from caller)
-         *  - pin: Already-unlocked PIN (passed from caller)
-         *  - nChannel: Mining channel
-         *  - *pBlock: Output block reference
-         *  - nBlockIterator: Extra nonce for iteration
-         *  - nullptr: No legacy coinbase recipients
-         *  - hashReward: Reward destination (can be genesis, register, or 0 for fallback)
-         */
+        /* Create the block using existing CreateBlock infrastructure */
         bool success = CreateBlock(
             user,
             pin,
             nChannel,
             *pBlock,
-            nBlockIterator,  // nExtraNonce parameter
+            nBlockIterator,  // Extra nonce for iteration
             nullptr,         // No legacy coinbase recipients
             hashReward       // Reward recipient address
         );

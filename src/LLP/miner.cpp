@@ -1210,11 +1210,10 @@ namespace LLP
          * 
          * Using new CreateBlockForStatelessMining() utility (post PR #92 refactor)
          */
-        TAO::Ledger::TritiumBlock *pBlock = nullptr;
         while(true)
         {
             /* Create block using stateless mining utility */
-            pBlock = TAO::Ledger::CreateBlockForStatelessMining(
+            TAO::Ledger::TritiumBlock *pBlock = TAO::Ledger::CreateBlockForStatelessMining(
                 pCredentials,
                 strPIN,
                 nChannel.load(),
@@ -1232,16 +1231,15 @@ namespace LLP
 
             /* Break out of loop when block is ready for prime mod. */
             if(is_prime_mod(nBitMask, pBlock))
-                break;
+            {
+                /* Output debug info and return the newly created block. */
+                debug::log(2, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), " nVersion=", pBlock->nVersion);
+                return pBlock;
+            }
 
             /* Delete unsuccessful block and try again with new extra nonce */
             delete pBlock;
-            pBlock = nullptr;
         }
-
-        /* Output debug info and return the newly created block. */
-        debug::log(2, FUNCTION, "Created new Tritium Block ", pBlock->ProofHash().SubString(), " nVersion=", pBlock->nVersion);
-        return pBlock;
     }
 
 
