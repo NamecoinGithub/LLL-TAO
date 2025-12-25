@@ -98,8 +98,8 @@ namespace TAO::Ledger
             RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING, hashSession));
 
             /* Validate reward address is provided
-             * Note: Zero is now allowed - CreateBlockForStatelessMining will handle fallback
-             * to node operator's genesis when hashRewardAddress is 0 */
+             * Note: Zero is now allowed - CreateBlock will handle fallback
+             * to node operator's genesis when hashReward is 0 */
             if(hashRewardAddress == 0)
             {
                 debug::log(2, FUNCTION, "Warning: Zero reward address - will use node operator's genesis");

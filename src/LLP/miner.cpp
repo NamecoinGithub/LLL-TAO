@@ -1203,12 +1203,16 @@ namespace LLP
         }
 
         /* Create a new block and loop for prime channel if minimum bit target length isn't met.
+         * Loop terminates when:
+         * 1. Block creation fails (pBlock == nullptr) - returns error
+         * 2. Prime mod condition satisfied (is_prime_mod returns true) - returns block
+         * Each iteration tries a new extra nonce value (++nBlockIterator)
          * 
          * NOTE: hashDynamicReward parameter controls coinbase payout:
          *   - If non-zero: Route rewards to this address (stateless miner)
          *   - If zero: Route rewards to node operator's genesis (wallet mining)
          * 
-         * CreateBlockForStatelessMining wraps CreateBlock/CreateProducer (see create.cpp)
+         * CreateBlockForStatelessMining wraps CreateBlock (see create.cpp)
          */
         TAO::Ledger::TritiumBlock *pBlock = nullptr;
         while(true)
@@ -1227,12 +1231,12 @@ namespace LLP
             if(pBlock == nullptr)
             {
                 debug::error(FUNCTION, "Failed to create block");
-                return nullptr;
+                return nullptr;  // TERMINATION CONDITION 1: Creation failed
             }
 
             /* Break out of loop when block is ready for prime mod. */
             if(is_prime_mod(nBitMask, pBlock))
-                break;
+                break;  // TERMINATION CONDITION 2: Prime mod satisfied
 
             /* Delete unsuccessful block and try again with new extra nonce */
             delete pBlock;
