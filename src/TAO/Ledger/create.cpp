@@ -953,7 +953,7 @@ namespace TAO::Ledger
         const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
         const SecureString& pin,
         uint32_t nChannel,
-        uint32_t nBlockIterator,
+        uint64_t nBlockIterator,
         const uint256_t& hashReward,
         Transaction* pPreSignedProducer)
     {
@@ -968,7 +968,7 @@ namespace TAO::Ledger
          * The caller is responsible for authentication and unlocking.
          * This function assumes credentials are already unlocked and ready to use. */
 
-        /* Allocate new block */
+        /* Allocate new block (caller is responsible for deletion) */
         TritiumBlock* pBlock = new TritiumBlock();
         
         /* Create the block using existing CreateBlock infrastructure */
@@ -977,7 +977,7 @@ namespace TAO::Ledger
             pin,
             nChannel,
             *pBlock,
-            nBlockIterator,  // Extra nonce for iteration
+            nBlockIterator,  // Extra nonce for iteration (uint64_t)
             nullptr,         // No legacy coinbase recipients
             hashReward       // Reward recipient address
         );

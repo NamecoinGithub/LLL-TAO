@@ -210,7 +210,7 @@ namespace TAO
             const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
             const SecureString& pin,
             uint32_t nChannel,
-            uint32_t nBlockIterator,
+            uint64_t nBlockIterator,
             const uint256_t& hashReward,
             Transaction* pPreSignedProducer = nullptr);
     }
