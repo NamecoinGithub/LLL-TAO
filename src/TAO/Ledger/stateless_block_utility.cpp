@@ -98,7 +98,7 @@ namespace TAO::Ledger
             RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING, hashSession));
 
             /* Validate reward address is provided
-             * Note: Zero is now allowed - CreateBlock/CreateProducer will handle fallback
+             * Note: Zero is now allowed - CreateBlockForStatelessMining will handle fallback
              * to node operator's genesis when hashRewardAddress is 0 */
             if(hashRewardAddress == 0)
             {
@@ -119,23 +119,19 @@ namespace TAO::Ledger
             }
             debug::log(2, FUNCTION, "  Channel: ", nChannel == 1 ? "Prime" : nChannel == 2 ? "Hash" : "Private");
 
-            /* Create the block using standard CreateBlock flow */
-            TritiumBlock* pBlock = new TritiumBlock();
-            
-            bool success = CreateBlock(
+            /* Use centralized utility for block creation */
+            TritiumBlock* pBlock = TAO::Ledger::CreateBlockForStatelessMining(
                 pCredentials,
                 strPIN,
                 nChannel,
-                *pBlock,
                 nExtraNonce,
-                nullptr,  // No coinbase recipients
-                hashRewardAddress  // Route rewards to miner
+                hashRewardAddress,  // Route rewards to miner
+                nullptr             // No coinbase recipients for stateless mining
             );
 
-            if(!success)
+            if(pBlock == nullptr)
             {
-                delete pBlock;
-                debug::error(FUNCTION, "CreateBlock failed");
+                debug::error(FUNCTION, "CreateBlockForStatelessMining failed");
                 return nullptr;
             }
 

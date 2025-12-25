@@ -468,6 +468,45 @@ namespace TAO::Ledger
         return true;
     }
 
+
+    /* Create a new block object from the chain for stateless mining. */
+    TritiumBlock* CreateBlockForStatelessMining(
+        const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
+        const SecureString& pin,
+        const uint32_t nChannel,
+        const uint64_t nExtraNonce,
+        const uint256_t& hashReward,
+        Legacy::Coinbase *pCoinbaseRecipients)
+    {
+        /* Allocate memory for the new block. */
+        TritiumBlock* pBlock = new TritiumBlock();
+
+        /* Attempt to create the block using existing CreateBlock function.
+         * Pass hashReward as the hashDynamicGenesis parameter to route rewards correctly.
+         * Pass coinbase recipients for wallet mining support. */
+        bool success = CreateBlock(
+            user,
+            pin,
+            nChannel,
+            *pBlock,
+            nExtraNonce,
+            pCoinbaseRecipients,  // Support wallet mining with coinbase recipients
+            hashReward            // Route rewards to this address
+        );
+
+        /* Check if block creation failed */
+        if(!success)
+        {
+            /* Clean up and return nullptr on failure */
+            delete pBlock;
+            return nullptr;
+        }
+
+        /* Return the successfully created block */
+        return pBlock;
+    }
+
+
     /* Create a producer transaction object from signature chain. */
     bool CreateProducer(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
                            TAO::Ledger::Transaction &rProducer,

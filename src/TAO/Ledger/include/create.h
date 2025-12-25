@@ -126,6 +126,35 @@ namespace TAO
                          Legacy::Coinbase *pCoinbaseRecipients = nullptr, const uint256_t& hashDynamicGenesis = uint256_t(0));
 
 
+        /** CreateBlockForStatelessMining
+         *
+          *  Centralized utility for creating blocks in stateless mining context.
+          *  Does NOT call TAO::API::Authentication functions - credentials must be provided by caller.
+          *
+          *  Creates a TritiumBlock with proper version, height, channel, difficulty, and coinbase
+          *  transaction paying to hashReward. Returns allocated block pointer or nullptr on error.
+          *
+          *  This function eliminates code duplication between miner.cpp and stateless_miner_connection.cpp.
+          *
+          *  @param[in] user The signature chain credentials to sign this block
+          *  @param[in] pin The pin number for signing.
+          *  @param[in] nChannel The channel to create block for (1=Prime, 2=Hash).
+          *  @param[in] nExtraNonce An extra nonce to use for double iterating.
+          *  @param[in] hashReward Reward recipient address (genesis hash OR register address).
+          *  @param[in] pCoinbaseRecipients Optional coinbase recipients for wallet mining.
+          *
+          *  @return Pointer to created TritiumBlock, or nullptr on error. Caller owns the pointer.
+          *
+          **/
+        TritiumBlock* CreateBlockForStatelessMining(
+            const memory::encrypted_ptr<TAO::Ledger::Credentials>& user,
+            const SecureString& pin,
+            const uint32_t nChannel,
+            const uint64_t nExtraNonce,
+            const uint256_t& hashReward,
+            Legacy::Coinbase *pCoinbaseRecipients = nullptr);
+
+
         /** CreateStakeBlock
          *
          *  Create a new Proof of Stake (channel 0) block object from the chain.
