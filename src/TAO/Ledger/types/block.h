@@ -253,6 +253,17 @@ namespace TAO
             bool IsProofOfWork() const;
 
 
+            /** IsInvalidProof
+             *
+             *  Check if block has invalid Proof of Work.
+             *  This checks channel-specific validation (prime or hash).
+             *
+             *  @return True if the block has invalid PoW, false otherwise.
+             *
+             **/
+            bool IsInvalidProof() const;
+
+
             /** IsPrivate
              *
              *  @return True if the block is private block.

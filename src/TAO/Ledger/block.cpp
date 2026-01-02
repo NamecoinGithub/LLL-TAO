@@ -288,6 +288,55 @@ namespace TAO
         }
 
 
+        /* Check if block has invalid proof of work. */
+        bool Block::IsInvalidProof() const
+        {
+            /* Only check PoW channels. */
+            if(!IsProofOfWork())
+                return false;
+
+            /* Check prime channel. */
+            if(nChannel == 1)
+            {
+                /* Get the prime base. */
+                uint1024_t hashPrime = GetPrime();
+
+                /* Check if base is prime. */
+                if(!TAO::Ledger::PrimeCheck(hashPrime))
+                    return true;
+
+                /* Check if we have valid offsets. */
+                if(vOffsets.empty())
+                    return true;
+
+                /* Verify prime difficulty. */
+                double nPrimeDifficulty = TAO::Ledger::GetPrimeDifficulty(hashPrime, vOffsets, true);
+                double nRequiredDifficulty = TAO::Ledger::GetDifficulty(nBits, 1);
+
+                /* Check difficulty threshold. */
+                if(nPrimeDifficulty < nRequiredDifficulty)
+                    return true;
+            }
+            /* Check hash channel. */
+            else if(nChannel == 2)
+            {
+                /* Get the proof hash. */
+                uint1024_t hashProof = ProofHash();
+
+                /* Get target from nBits. */
+                LLC::CBigNum bnTarget;
+                bnTarget.SetCompact(nBits);
+                uint1024_t nTarget = bnTarget.getuint1024();
+
+                /* Check if hash meets target. */
+                if(hashProof > nTarget)
+                    return true;
+            }
+
+            return false;
+        }
+
+
         /* Generate the Merkle Tree from uint512_t hashes. */
         uint512_t Block::BuildMerkleTree(const std::vector<uint512_t>& vtx) const
         {

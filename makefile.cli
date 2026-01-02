@@ -309,6 +309,8 @@ ifdef UNIT_TESTS
 		   build/Tests_TAO_API_util.o \
 		   build/Tests_TAO_Ledger_block.o \
 		   build/Tests_TAO_Ledger_mempool.o \
+		   build/Tests_TAO_Ledger_prime_validation_tests.o \
+		   build/Tests_TAO_Ledger_hash_validation_tests.o \
            build/Tests_TAO_Ledger_transaction.o \
 		   build/Tests_TAO_Ledger_sigchain.o \
 		   build/Tests_TAO_Ledger_stake.o \
