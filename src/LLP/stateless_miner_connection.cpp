@@ -1557,7 +1557,9 @@ namespace LLP
             }
             
             /* CRITICAL: DO NOT validate here!
-             * Validation happens in validate_block() using TritiumBlock::Check()
+             * Validation happens in validate_block() which calls:
+             *   1. TritiumBlock::Check() - validates offsets exist for prime channel (line 404-405)
+             *   2. Block::VerifyWork() - validates prime using GetPrimeBits() (line 456)
              * This ensures we use the SAME validation path as normal nodes */
             
             debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   ✓ Block updated (validation deferred to validate_block)", ANSI_COLOR_RESET);
