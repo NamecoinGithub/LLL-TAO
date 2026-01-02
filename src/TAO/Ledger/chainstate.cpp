@@ -250,23 +250,42 @@ namespace TAO
             }
 
             /* Rewind the chain a total number of blocks. */
+            /* Support both -revertblocks and -rollback-invalid-blocks flags. */
             uint64_t nRevertBlocks = config::GetArg("-revertblocks", 0);
+            if(nRevertBlocks == 0)
+                nRevertBlocks = config::GetArg("-rollback-invalid-blocks", 0);
+                
             if(nRevertBlocks > 0)
             {
+                debug::log(0, "⚠️  === BLOCKCHAIN ROLLBACK INITIATED ===");
+                debug::log(0, "   Reason: Manual rollback requested via -revertblocks flag");
+                debug::log(0, "   Blocks to rollback: ", nRevertBlocks);
+                debug::log(0, "   Current best block: ", tStateBest.load().GetHash().SubString());
+                debug::log(0, "   Current height: ", tStateBest.load().nHeight);
+                
                 /* Rollback the chain a given number of blocks. */
                 TAO::Ledger::BlockState state = tStateBest.load();
                 for(int i = 0; i < nRevertBlocks; ++i)
                 {
                     /* Check for Genesis. */
                     if(state.hashPrevBlock == 0)
+                    {
+                        debug::warning(FUNCTION, "Cannot rollback past genesis block");
                         break;
+                    }
 
+                    /* Log each block being rolled back. */
+                    debug::log(0, "   Rolling back block ", state.nHeight, ": ", state.GetHash().SubString());
+                    
                     /* Iterate backwards the total number of blocks requested. */
                     state = state.Prev();
                     if(!state)
                         return debug::error(FUNCTION, "failed to find ancestor block");
                 }
 
+                debug::log(0, "   New best block: ", state.GetHash().SubString());
+                debug::log(0, "   New height: ", state.nHeight);
+                
                 /* Set the best to older block. */
                 LLD::TxnBegin();
 
@@ -274,13 +293,15 @@ namespace TAO
                 if(!state.SetBest())
                 {
                     /* Debug Output. */
-                    debug::log(0, FUNCTION, "-revertblocks=XXX failed to remove ", nRevertBlocks, " blocks");
+                    debug::error(FUNCTION, "❌ Rollback failed - could not set new best block");
+                    debug::log(0, ANSI_COLOR_BRIGHT_RED, "⚠️  === BLOCKCHAIN ROLLBACK FAILED ===", ANSI_COLOR_RESET);
                     LLD::TxnAbort();
                 }
                 else
                 {
                     /* Debug Output. */
-                    debug::log(0, FUNCTION, "-revertblocks=XXX requested removal of ", nRevertBlocks, " blocks");
+                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "✓ Successfully rolled back ", nRevertBlocks, " blocks", ANSI_COLOR_RESET);
+                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "⚠️  === BLOCKCHAIN ROLLBACK COMPLETE ===", ANSI_COLOR_RESET);
                     LLD::TxnCommit();
                 }
             }
