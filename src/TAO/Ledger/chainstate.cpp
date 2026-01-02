@@ -252,20 +252,25 @@ namespace TAO
             /* Rewind the chain a total number of blocks. */
             /* Support both -revertblocks and -rollback-invalid-blocks flags. */
             uint64_t nRevertBlocks = config::GetArg("-revertblocks", 0);
+            std::string strRollbackFlag = "-revertblocks";
             if(nRevertBlocks == 0)
+            {
                 nRevertBlocks = config::GetArg("-rollback-invalid-blocks", 0);
+                if(nRevertBlocks > 0)
+                    strRollbackFlag = "-rollback-invalid-blocks";
+            }
                 
             if(nRevertBlocks > 0)
             {
                 debug::log(0, "⚠️  === BLOCKCHAIN ROLLBACK INITIATED ===");
-                debug::log(0, "   Reason: Manual rollback requested via -revertblocks flag");
+                debug::log(0, "   Reason: Manual rollback requested via ", strRollbackFlag, " flag");
                 debug::log(0, "   Blocks to rollback: ", nRevertBlocks);
                 debug::log(0, "   Current best block: ", tStateBest.load().GetHash().SubString());
                 debug::log(0, "   Current height: ", tStateBest.load().nHeight);
                 
                 /* Rollback the chain a given number of blocks. */
                 TAO::Ledger::BlockState state = tStateBest.load();
-                for(int i = 0; i < nRevertBlocks; ++i)
+                for(uint64_t i = 0; i < nRevertBlocks; ++i)
                 {
                     /* Check for Genesis. */
                     if(state.hashPrevBlock == 0)
