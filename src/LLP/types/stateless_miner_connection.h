@@ -66,6 +66,12 @@ namespace LLP
         /** Mutex for thread-safe session key access **/
         mutable std::mutex SESSION_MUTEX;
 
+        /** Static counter for consecutive invalid block submissions across all connections **/
+        static std::atomic<uint32_t> nConsecutiveInvalidBlocks;
+
+        /** Static timestamp of last valid block accepted **/
+        static std::atomic<uint64_t> nLastValidBlockTime;
+
     public:
         /** Default Constructor **/
         StatelessMinerConnection();
@@ -178,6 +184,22 @@ namespace LLP
          *
          **/
         void clear_map();
+
+        /** handle_invalid_block
+         *
+         *  Track invalid block submissions and trigger automatic rollback if threshold exceeded.
+         *
+         *  @param[in] strReason Reason for the invalid block.
+         *
+         **/
+        static void handle_invalid_block(const std::string& strReason);
+
+        /** reset_invalid_counter
+         *
+         *  Reset the consecutive invalid block counter (called on successful block acceptance).
+         *
+         **/
+        static void reset_invalid_counter();
     };
 }
 

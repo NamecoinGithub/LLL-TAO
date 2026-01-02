@@ -28,6 +28,9 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/types/tritium.h>
+#include <TAO/Ledger/types/state.h>
+
+#include <LLD/include/global.h>
 
 #include <TAO/API/include/global.h>
 #include <TAO/API/types/authentication.h>
@@ -56,6 +59,13 @@ namespace LLP
 {
     /* The block iterator to act as extra nonce. */
     std::atomic<uint32_t> StatelessMinerConnection::nBlockIterator(0);
+    
+    /* Static counter for consecutive invalid block submissions. */
+    std::atomic<uint32_t> StatelessMinerConnection::nConsecutiveInvalidBlocks(0);
+    
+    /* Static timestamp of last valid block accepted. */
+    std::atomic<uint64_t> StatelessMinerConnection::nLastValidBlockTime(0);
+    
     /** Default Constructor **/
     StatelessMinerConnection::StatelessMinerConnection()
     : Connection()
@@ -1098,6 +1108,10 @@ namespace LLP
                 if(!sign_block(nonce, hashMerkle))
                 {
                     debug::error(FUNCTION, "❌ sign_block failed (nonce update failed)");
+                    
+                    /* Track invalid block submission. */
+                    handle_invalid_block("sign_block validation failed");
+                    
                     Packet response(BLOCK_REJECTED);
                     respond(response);
                     debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (sign_block failed) ===", ANSI_COLOR_RESET);
@@ -1108,6 +1122,10 @@ namespace LLP
                 if(!validate_block(hashMerkle))
                 {
                     debug::error(FUNCTION, "❌ validate_block failed (network rejected or stale)");
+                    
+                    /* Track invalid block submission. */
+                    handle_invalid_block("validate_block failed - network rejected or stale");
+                    
                     Packet response(BLOCK_REJECTED);
                     respond(response);
                     debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (validate_block failed) ===", ANSI_COLOR_RESET);
@@ -1131,6 +1149,9 @@ namespace LLP
                     debug::log(0, "   Miner: ", GetAddress().ToStringIP());
                     debug::log(0, "   Channel: ", pBlock->nChannel, " (", (pBlock->nChannel == 1 ? "Prime" : "Hash"), ")");
                 }
+                
+                /* Reset consecutive invalid counter on successful block acceptance. */
+                reset_invalid_counter();
                 
                 Packet response(BLOCK_ACCEPTED);
                 respond(response);
@@ -1841,6 +1862,110 @@ namespace LLP
 
         /* Clear the map. */
         mapBlocks.clear();
+    }
+
+
+    /** Track invalid block submissions and trigger automatic rollback if threshold exceeded */
+    void StatelessMinerConnection::handle_invalid_block(const std::string& strReason)
+    {
+        /* Increment the consecutive invalid counter. */
+        uint32_t nCount = ++nConsecutiveInvalidBlocks;
+        
+        debug::log(0, "⚠️  Invalid block submission detected (count: ", nCount, ")");
+        debug::log(0, "   Reason: ", strReason);
+        
+        /* Get the rollback threshold from config (default 5). */
+        uint32_t nThreshold = config::GetArg("-rollback-threshold", 5);
+        
+        /* Check if we've exceeded the threshold. */
+        if(nCount >= nThreshold)
+        {
+            debug::warning(FUNCTION, "⚠️  === AUTOMATIC ROLLBACK TRIGGERED ===");
+            debug::warning(FUNCTION, "   Consecutive invalid submissions: ", nCount);
+            debug::warning(FUNCTION, "   Threshold: ", nThreshold);
+            debug::warning(FUNCTION, "   This may indicate a fork or mining issue");
+            
+            /* Get the number of blocks to rollback from config (default 1). */
+            uint32_t nRollbackBlocks = config::GetArg("-auto-rollback-blocks", 1);
+            
+            debug::log(0, "   Rolling back ", nRollbackBlocks, " block(s) to recover...");
+            
+            /* Get the current best block. */
+            TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+            TAO::Ledger::BlockState state = stateBest;
+            
+            /* Track if we successfully rolled back. */
+            bool fRolledBack = false;
+            
+            /* Rollback the requested number of blocks. */
+            for(uint32_t i = 0; i < nRollbackBlocks && state.hashPrevBlock != 0; ++i)
+            {
+                debug::log(0, "   Rolling back block ", state.nHeight, ": ", state.GetHash().SubString());
+                
+                /* Get the previous block. */
+                state = state.Prev();
+                if(!state)
+                {
+                    debug::error(FUNCTION, "Failed to find ancestor block during auto-rollback");
+                    break;
+                }
+            }
+            
+            /* Only perform rollback if we found a valid state. */
+            if(state && state.GetHash() != stateBest.GetHash())
+            {
+                debug::log(0, "   New best block: ", state.GetHash().SubString());
+                debug::log(0, "   New height: ", state.nHeight);
+                
+                /* Begin database transaction. */
+                LLD::TxnBegin();
+                
+                /* Set the new best block. */
+                if(state.SetBest())
+                {
+                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "✓ Automatic rollback successful", ANSI_COLOR_RESET);
+                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "⚠️  === AUTOMATIC ROLLBACK COMPLETE ===", ANSI_COLOR_RESET);
+                    debug::log(0, "   Transactions from rolled-back blocks have been resurrected to mempool");
+                    
+                    LLD::TxnCommit();
+                    fRolledBack = true;
+                    
+                    /* Reset the counter after successful rollback. */
+                    nConsecutiveInvalidBlocks.store(0);
+                }
+                else
+                {
+                    debug::error(FUNCTION, "❌ Automatic rollback failed - could not set new best block");
+                    LLD::TxnAbort();
+                }
+            }
+            else
+            {
+                debug::warning(FUNCTION, "Cannot rollback - at genesis or invalid state");
+            }
+            
+            /* If rollback failed, just reset counter to prevent infinite attempts. */
+            if(!fRolledBack)
+            {
+                debug::warning(FUNCTION, "Resetting invalid counter without rollback");
+                nConsecutiveInvalidBlocks.store(0);
+            }
+        }
+    }
+
+
+    /** Reset the consecutive invalid block counter */
+    void StatelessMinerConnection::reset_invalid_counter()
+    {
+        uint32_t nPrevCount = nConsecutiveInvalidBlocks.exchange(0);
+        
+        if(nPrevCount > 0)
+        {
+            debug::log(0, "✓ Valid block accepted - resetting invalid counter (was: ", nPrevCount, ")");
+        }
+        
+        /* Update the last valid block timestamp. */
+        nLastValidBlockTime.store(runtime::unifiedtimestamp());
     }
 
 } // namespace LLP

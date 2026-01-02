@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the blockchain rollback safety mechanism and enhanced "training wheels" logging features added to help diagnose prime validation failures and block rejections in production.
+This document describes the blockchain rollback safety mechanism with **automatic rollback** and enhanced "training wheels" logging features added to help diagnose prime validation failures and block rejections in production.
 
 ## Problem Statement
 
@@ -10,10 +10,70 @@ Production nodes were experiencing:
 - Prime validation failures: `ERROR: sign_block : Prime validation failed: base number is NOT prime`
 - Block rejections: `📥 === SUBMIT_BLOCK: REJECTED (sign_block failed) ===`
 - Difficulty in diagnosing why specific nonces were failing validation
+- Risk of blockchain forks due to consecutive invalid block submissions
 
 ## Features Implemented
 
-### 1. Enhanced Prime Mining Diagnostic Logging
+### 1. Automatic Rollback After N Consecutive Invalid Submissions
+
+The node now automatically detects consecutive invalid block submissions and triggers a rollback when a threshold is exceeded.
+
+**Key Features:**
+- Tracks consecutive invalid block submissions across all mining connections
+- Configurable threshold (default: 5 consecutive failures)
+- Automatic rollback of N blocks (default: 1 block) when threshold exceeded
+- Transaction resurrection: All transactions from rolled-back blocks are automatically re-inserted into the mempool
+- Detailed logging of rollback operations
+
+**Configuration Flags:**
+```bash
+# Set the threshold for automatic rollback (default: 5)
+./nexus -rollback-threshold=5
+
+# Set the number of blocks to rollback automatically (default: 1)
+./nexus -auto-rollback-blocks=1
+```
+
+**Log Output Example:**
+```
+⚠️  Invalid block submission detected (count: 1)
+   Reason: sign_block validation failed
+⚠️  Invalid block submission detected (count: 2)
+   Reason: sign_block validation failed
+...
+⚠️  Invalid block submission detected (count: 5)
+   Reason: validate_block failed - network rejected or stale
+⚠️  === AUTOMATIC ROLLBACK TRIGGERED ===
+   Consecutive invalid submissions: 5
+   Threshold: 5
+   This may indicate a fork or mining issue
+   Rolling back 1 block(s) to recover...
+   Rolling back block 1000: 7d8f38ee9d9c...
+   New best block: a1b2c3d4e5f6...
+   New height: 999
+✓ Automatic rollback successful
+⚠️  === AUTOMATIC ROLLBACK COMPLETE ===
+   Transactions from rolled-back blocks have been resurrected to mempool
+```
+
+### 2. Transaction Resurrection and Mempool Re-insertion
+
+During rollback operations (both manual and automatic), all non-producer transactions from disconnected blocks are automatically resurrected and re-inserted into the mempool.
+
+**Implementation:**
+- Automatically handled in `BlockState::SetBest()` method
+- Transactions are disconnected in reverse order to preserve signature chain ordering
+- Producer transactions (coinbase, coinstake, hybrid) are excluded from resurrection
+- Transactions are re-validated before mempool insertion
+- Works for both Tritium and Legacy transactions
+
+**Benefits:**
+- Prevents transaction loss during rollbacks
+- Maintains network consistency
+- Allows transactions to be re-mined in future blocks
+- No manual intervention required
+
+### 3. Enhanced Prime Mining Diagnostic Logging
 
 The `sign_block()` function in `src/LLP/stateless_miner_connection.cpp` now includes comprehensive diagnostic output for every step of prime validation:
 
@@ -76,7 +136,7 @@ For hash channel (channel 2) mining, detailed proof-of-work validation logging:
 - Leading zeros required vs. found
 - Final validation result
 
-### 3. Block Validation - IsInvalidProof() Method
+### 4. Block Validation - IsInvalidProof() Method
 
 Added `IsInvalidProof()` method to `TAO::Ledger::Block` class:
 
@@ -101,7 +161,7 @@ The method checks:
 - For Hash channel (2): Hash meets target requirement
 - Returns `false` for non-PoW channels (PoS, Hybrid)
 
-### 4. Blockchain Rollback Mechanism
+### 5. Manual Blockchain Rollback Mechanism
 
 Enhanced the existing rollback mechanism with detailed logging and a new flag name.
 
@@ -109,11 +169,11 @@ Enhanced the existing rollback mechanism with detailed logging and a new flag na
 - `-revertblocks=<N>` (existing)
 - `-rollback-invalid-blocks=<N>` (new alias)
 
-Both flags rollback the blockchain by N blocks.
+Both flags manually rollback the blockchain by N blocks.
 
 **Usage:**
 ```bash
-# Rollback 5 blocks
+# Rollback 5 blocks manually
 ./nexus -rollback-invalid-blocks=5
 
 # Or using the original flag
@@ -123,7 +183,7 @@ Both flags rollback the blockchain by N blocks.
 **Enhanced Logging Output:**
 ```
 ⚠️  === BLOCKCHAIN ROLLBACK INITIATED ===
-   Reason: Manual rollback requested via -revertblocks flag
+   Reason: Manual rollback requested via -rollback-invalid-blocks flag
    Blocks to rollback: 5
    Current best block: 7d8f38ee9d9c...
    Current height: 1000
@@ -139,14 +199,15 @@ Both flags rollback the blockchain by N blocks.
 ```
 
 **Logging Includes:**
-- Reason for rollback
+- Reason for rollback (manual or automatic)
 - Number of blocks to rollback
 - Current and new best block hashes
 - Current and new heights
 - Each individual block being rolled back
+- Transaction resurrection confirmation
 - Success or failure status
 
-### 5. Unit Tests
+### 6. Unit Tests
 
 Created comprehensive unit tests to validate all validation logic:
 
@@ -193,30 +254,66 @@ make -f makefile.cli UNIT_TESTS=1 -j4
 
 ### For Node Operators
 
-1. **Rollback invalid blocks** if bad blocks were accepted:
+1. **Configure automatic rollback protection**:
+   ```bash
+   # Set threshold for automatic rollback (default: 5)
+   ./nexus -rollback-threshold=5
+   
+   # Set number of blocks to auto-rollback (default: 1)
+   ./nexus -auto-rollback-blocks=1
+   ```
+
+2. **Manual rollback** if bad blocks were accepted:
    ```bash
    ./nexus -rollback-invalid-blocks=5
    ```
 
-2. **Monitor for consecutive rejections** indicating potential fork:
+3. **Monitor for consecutive rejections** indicating potential fork:
    - Watch for patterns of REJECTED blocks
+   - Automatic rollback will trigger if threshold is exceeded
    - Check if multiple miners are submitting similar invalid blocks
    - Review prime validation diagnostics to identify the issue
 
-3. **Enable debug logging** to capture detailed validation steps:
+4. **Enable debug logging** to capture detailed validation steps:
    ```bash
    ./nexus -verbose=3 -debug=1
    ```
 
 ## Fork Prevention
 
-The enhanced logging helps prevent forks by:
+The enhanced logging and automatic rollback help prevent forks by:
 1. **Early Detection**: Detailed diagnostics catch validation issues before block acceptance
-2. **Clear Diagnostics**: Each validation step is logged, making issues traceable
-3. **Rollback Capability**: Quick recovery from invalid blocks that were accepted
-4. **Test Coverage**: Unit tests ensure validation logic is correct
+2. **Automatic Recovery**: Consecutive invalid submissions trigger automatic rollback
+3. **Transaction Preservation**: All transactions are resurrected to mempool during rollback
+4. **Clear Diagnostics**: Each validation step is logged, making issues traceable
+5. **Configurable Thresholds**: Node operators can tune sensitivity to their needs
+6. **Test Coverage**: Unit tests ensure validation logic is correct
 
 ## Technical Details
+
+### Automatic Rollback Mechanism
+
+**Tracking:**
+- Static counters track consecutive invalid submissions across all mining connections
+- Counter increments on any validation failure (sign_block or validate_block)
+- Counter resets to zero on successful block acceptance
+
+**Triggering:**
+- Default threshold: 5 consecutive invalid submissions
+- Configurable via `-rollback-threshold=<N>`
+- Logs warning messages as counter increases
+
+**Execution:**
+- Rolls back N blocks (default: 1, configurable via `-auto-rollback-blocks=<N>`)
+- Uses existing `BlockState::SetBest()` method
+- Automatically handles transaction resurrection
+
+**Transaction Resurrection:**
+- Implemented in `BlockState::SetBest()` in `src/TAO/Ledger/state.cpp`
+- Disconnects blocks in reverse order to preserve signature chain ordering
+- Excludes producer transactions (coinbase, coinstake, hybrid)
+- Re-validates and re-inserts transactions into mempool
+- Works for both Tritium and Legacy transactions
 
 ### Prime Validation Steps
 
@@ -234,19 +331,23 @@ The enhanced logging helps prevent forks by:
 ## Security Considerations
 
 - All validation failures are logged but do not crash the node
+- Automatic rollback has safeguards (won't rollback past genesis)
 - Rollback operations are logged with full details for audit trail
 - Unit tests ensure validation logic cannot be bypassed
 - IsInvalidProof() provides safe programmatic validation checking
+- Transaction resurrection prevents transaction loss during rollbacks
 
 ## Files Modified
 
-- `src/LLP/stateless_miner_connection.cpp` - Enhanced logging in sign_block()
+- `src/LLP/types/stateless_miner_connection.h` - Added tracking for consecutive invalid blocks
+- `src/LLP/stateless_miner_connection.cpp` - Enhanced logging, automatic rollback, invalid block tracking
 - `src/TAO/Ledger/types/block.h` - Added IsInvalidProof() declaration
 - `src/TAO/Ledger/block.cpp` - Implemented IsInvalidProof() method
 - `src/TAO/Ledger/chainstate.cpp` - Enhanced rollback logging
 - `tests/unit/TAO/Ledger/prime_validation_tests.cpp` - New test file
 - `tests/unit/TAO/Ledger/hash_validation_tests.cpp` - New test file
 - `makefile.cli` - Added new test files to build
+- `docs/BLOCKCHAIN_ROLLBACK_AND_LOGGING.md` - Comprehensive documentation
 
 ## Success Criteria
 
@@ -254,14 +355,17 @@ The enhanced logging helps prevent forks by:
 ✅ All prime validation steps are logged in detail  
 ✅ All hash validation steps are logged in detail  
 ✅ Unit tests pass with comprehensive coverage of validation logic  
-✅ Rollback mechanism works with detailed logging  
+✅ Manual rollback mechanism works with detailed logging  
+✅ **Automatic rollback triggers after N consecutive invalid submissions**  
+✅ **Transactions are resurrected to mempool during rollback**  
 ✅ AI and developers can use detailed logs to diagnose issues  
 
-## Future Enhancements
+## Configuration Reference
 
-Potential future additions (not implemented in this PR):
-- Automatic rollback after N consecutive invalid submissions
-- Fork detection heuristics based on rejection patterns
-- Transaction resurrection and mempool re-insertion during rollback
-- Persistent tracking of validation failure statistics
-- Alert system for unusual validation failure rates
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-rollback-threshold=<N>` | 5 | Number of consecutive invalid submissions before auto-rollback |
+| `-auto-rollback-blocks=<N>` | 1 | Number of blocks to rollback automatically |
+| `-rollback-invalid-blocks=<N>` | 0 | Manual rollback of N blocks (same as -revertblocks) |
+| `-revertblocks=<N>` | 0 | Manual rollback of N blocks (original flag) |
+| `-verbose=<N>` | 0 | Logging verbosity (3 recommended for mining diagnostics) |
