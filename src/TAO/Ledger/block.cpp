@@ -480,7 +480,7 @@ namespace TAO
                     debug::log(0, "   Proof Hash:   ", ProofHash().ToString().substr(0, 16), "...");
                     debug::log(0, "   Nonce:        ", nNonce);
                     debug::log(0, "   Prime:        ", nPrimeCandidate.ToString().substr(0, 32), "...");
-                    debug::log(0, "   Bit Length:   ", nPrimeCandidate.BitLength(), " bits");
+                    debug::log(0, "   Bit Length:   ", nPrimeCandidate.bits(), " bits");
                 }
 
                 /* Check proof of work limits. */
@@ -498,7 +498,7 @@ namespace TAO
                     if(fTrainingWheels)
                     {
                         debug::log(0, "   Cluster bits: ", nPrimeBits);
-                        debug::log(0, "   Minimum:      ", bnProofOfWorkLimit[1]);
+                        debug::log(0, "   Minimum:      ", bnProofOfWorkLimit[1].getuint1024().ToString().substr(0, 32), "...");
                         debug::log(0, "   ❌ FAILED: Prime-cluster below minimum work");
                     }
                     return debug::error(FUNCTION, "prime-cluster below minimum work" "(", nPrimeBits, ")");
@@ -593,18 +593,15 @@ namespace TAO
                         debug::log(0, "");
                         debug::log(0, "🔍 LEADING ZERO ANALYSIS");
                         
-                        /* Count leading zero bits */
+                        /* Use bits() to get actual bit count (1024 - bits = leading zeros) */
                         uint1024_t hashProof = ProofHash();
-                        uint32_t nLeadingZeros = 0;
-                        for(int i = 1023; i >= 0; --i)
-                        {
-                            if(hashProof.GetBit(i))
-                                break;
-                            nLeadingZeros++;
-                        }
+                        uint32_t nHashBits = hashProof.bits();
+                        uint32_t nLeadingZeros = 1024 - nHashBits;
+                        uint32_t nTargetBits = bnTarget.getuint1024().bits();
+                        uint32_t nRequiredZeros = 1024 - nTargetBits;
                         
-                        debug::log(0, "   Leading zeros: ", nLeadingZeros, " bits");
-                        debug::log(0, "   Required:      ~", (1024 - bnTarget.getuint1024().BitLength()), " bits");
+                        debug::log(0, "   Leading zeros: ~", nLeadingZeros, " bits");
+                        debug::log(0, "   Required:      ~", nRequiredZeros, " bits");
                         debug::log(0, "");
                         debug::log(0, "📊 VISUAL COMPARISON");
                         debug::log(0, "   Hash:   ", hashProof.ToString().substr(0, 64), "...");
@@ -620,18 +617,15 @@ namespace TAO
                     debug::log(0, "");
                     debug::log(0, "🔍 LEADING ZERO ANALYSIS");
                     
-                    /* Count leading zero bits */
+                    /* Use bits() to get actual bit count (1024 - bits = leading zeros) */
                     uint1024_t hashProof = ProofHash();
-                    uint32_t nLeadingZeros = 0;
-                    for(int i = 1023; i >= 0; --i)
-                    {
-                        if(hashProof.GetBit(i))
-                            break;
-                        nLeadingZeros++;
-                    }
+                    uint32_t nHashBits = hashProof.bits();
+                    uint32_t nLeadingZeros = 1024 - nHashBits;
+                    uint32_t nTargetBits = bnTarget.getuint1024().bits();
+                    uint32_t nRequiredZeros = 1024 - nTargetBits;
                     
-                    debug::log(0, "   Leading zeros: ", nLeadingZeros, " bits");
-                    debug::log(0, "   Required:      ~", (1024 - bnTarget.getuint1024().BitLength()), " bits");
+                    debug::log(0, "   Leading zeros: ~", nLeadingZeros, " bits");
+                    debug::log(0, "   Required:      ~", nRequiredZeros, " bits");
                     debug::log(0, "");
                     debug::log(0, "📊 VISUAL COMPARISON");
                     debug::log(0, "   Hash:   ", hashProof.ToString().substr(0, 64), "...");
