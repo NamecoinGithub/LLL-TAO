@@ -445,21 +445,78 @@ namespace TAO
         /* Verify the Proof of Work satisfies network requirements. */
         bool Block::VerifyWork() const
         {
+            /* Get training wheels flag */
+            bool fTrainingWheels = config::GetBoolArg("-trainingwheels", false);
+
             /* Check the Prime Number Proof of Work for the Prime Channel. */
             if(nChannel == 1)
             {
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "╔═══════════════════════════════════════════════════════════╗");
+                    debug::log(0, "║        PRIME VALIDATION - TRAINING WHEELS MODE            ║");
+                    debug::log(0, "╚═══════════════════════════════════════════════════════════╝");
+                }
+
                 /* Check prime minimum origins. */
                 if(nVersion >= 5 && ProofHash() < bnPrimeMinOrigins.getuint1024())
+                {
+                    if(fTrainingWheels)
+                    {
+                        debug::log(0, "");
+                        debug::log(0, "❌ FAILED: Prime origins below 1016-bits");
+                    }
                     return debug::error(FUNCTION, "prime origins below 1016-bits");
+                }
+
+                /* STEP 1: Extract prime candidate */
+                uint1024_t nPrimeCandidate = GetPrime();
+
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "📝 STEP 1: PRIME CANDIDATE EXTRACTION");
+                    debug::log(0, "   Proof Hash:   ", ProofHash().ToString().substr(0, 16), "...");
+                    debug::log(0, "   Nonce:        ", nNonce);
+                    debug::log(0, "   Prime:        ", nPrimeCandidate.ToString().substr(0, 32), "...");
+                    debug::log(0, "   Bit Length:   ", nPrimeCandidate.BitLength(), " bits");
+                }
 
                 /* Check proof of work limits. */
                 uint32_t nPrimeBits = GetPrimeBits(GetPrime(), vOffsets, !ChainState::Synchronizing());
+                
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "🔬 STEP 2: PRIME DIFFICULTY CALCULATION");
+                    debug::log(0, "   Cluster validation: ", (!ChainState::Synchronizing() ? "FULL" : "FAST"));
+                }
+
                 if(nPrimeBits < bnProofOfWorkLimit[1])
+                {
+                    if(fTrainingWheels)
+                    {
+                        debug::log(0, "   Cluster bits: ", nPrimeBits);
+                        debug::log(0, "   Minimum:      ", bnProofOfWorkLimit[1]);
+                        debug::log(0, "   ❌ FAILED: Prime-cluster below minimum work");
+                    }
                     return debug::error(FUNCTION, "prime-cluster below minimum work" "(", nPrimeBits, ")");
+                }
 
                 /* Check the prime difficulty target. */
                 if(nPrimeBits < nBits)
+                {
+                    if(fTrainingWheels)
+                    {
+                        debug::log(0, "");
+                        debug::log(0, "⚖️ STEP 3: DIFFICULTY COMPARISON");
+                        debug::log(0, "   Required:  ", GetDifficulty(nBits, 1));
+                        debug::log(0, "   Actual:    ", GetDifficulty(nPrimeBits, 1));
+                        debug::log(0, "   ❌ FAILED: Prime-cluster below target");
+                    }
                     return debug::error(FUNCTION, "prime-cluster below target ", "(proof: ", nPrimeBits, " target: ", nBits, ")");
+                }
 
                 /* Build offset list. */
                 std::string strOffsets = "";
@@ -470,6 +527,26 @@ namespace TAO
                         strOffsets += ", ";
                 }
 
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "🔗 STEP 3: CUNNINGHAM CHAIN ANALYSIS");
+                    debug::log(0, "   Chain offsets: [+ 0, ", strOffsets, "]");
+                    debug::log(0, "   Chain length:  ", (vOffsets.size() > 4 ? vOffsets.size() - 4 : 0), " primes");
+                    debug::log(0, "");
+                    debug::log(0, "⚖️ STEP 4: DIFFICULTY COMPARISON");
+                    debug::log(0, "   Required:  ", GetDifficulty(nBits, 1));
+                    debug::log(0, "   Actual:    ", GetDifficulty(nPrimeBits, 1));
+                    double margin = GetDifficulty(nPrimeBits, 1) - GetDifficulty(nBits, 1);
+                    debug::log(0, "   Margin:    ", std::fixed, std::setprecision(8), margin);
+                    debug::log(0, "   ✅ PASSED: Sufficient difficulty");
+                    debug::log(0, "");
+                    debug::log(0, "╔═══════════════════════════════════════════════════════════╗");
+                    debug::log(0, "║              ✅ PRIME BLOCK VALID                         ║");
+                    debug::log(0, "╚═══════════════════════════════════════════════════════════╝");
+                    debug::log(0, "");
+                }
+
                 /* Output offset list. */
                 debug::log(2, "  prime:  ", GetDifficulty(nPrimeBits, 1), " [+ 0, ", strOffsets, "]");
                 debug::log(2, "  target: ", GetDifficulty(nBits, 1));
@@ -478,17 +555,94 @@ namespace TAO
             }
             if(nChannel == 2)
             {
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "╔═══════════════════════════════════════════════════════════╗");
+                    debug::log(0, "║         HASH VALIDATION - TRAINING WHEELS MODE            ║");
+                    debug::log(0, "╚═══════════════════════════════════════════════════════════╝");
+                }
+
                 /* Get the hash target. */
                 LLC::CBigNum bnTarget;
                 bnTarget.SetCompact(nBits);
 
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "📝 PROOF-OF-WORK VALIDATION");
+                    debug::log(0, "   Block Hash:  ", ProofHash().ToString().substr(0, 64), "...");
+                    debug::log(0, "   Target:      ", bnTarget.getuint1024().ToString().substr(0, 64), "...");
+                }
+
                 /* Check that the hash is within range. */
                 if(bnTarget <= 0 || bnTarget > bnProofOfWorkLimit[2])
+                {
+                    if(fTrainingWheels)
+                    {
+                        debug::log(0, "   ❌ FAILED: Hash target not in valid range");
+                    }
                     return debug::error(FUNCTION, "proof-of-work hash not in range");
+                }
 
                 /* Check that the that enough work was done on this block. */
                 if(ProofHash() > bnTarget.getuint1024())
+                {
+                    if(fTrainingWheels)
+                    {
+                        debug::log(0, "");
+                        debug::log(0, "🔍 LEADING ZERO ANALYSIS");
+                        
+                        /* Count leading zero bits */
+                        uint1024_t hashProof = ProofHash();
+                        uint32_t nLeadingZeros = 0;
+                        for(int i = 1023; i >= 0; --i)
+                        {
+                            if(hashProof.GetBit(i))
+                                break;
+                            nLeadingZeros++;
+                        }
+                        
+                        debug::log(0, "   Leading zeros: ", nLeadingZeros, " bits");
+                        debug::log(0, "   Required:      ~", (1024 - bnTarget.getuint1024().BitLength()), " bits");
+                        debug::log(0, "");
+                        debug::log(0, "📊 VISUAL COMPARISON");
+                        debug::log(0, "   Hash:   ", hashProof.ToString().substr(0, 64), "...");
+                        debug::log(0, "   Target: ", bnTarget.getuint1024().ToString().substr(0, 64), "...");
+                        debug::log(0, "   ❌ Hash > Target (INVALID)");
+                        debug::log(0, "");
+                    }
                     return debug::error(FUNCTION, "proof-of-work hash below target");
+                }
+
+                if(fTrainingWheels)
+                {
+                    debug::log(0, "");
+                    debug::log(0, "🔍 LEADING ZERO ANALYSIS");
+                    
+                    /* Count leading zero bits */
+                    uint1024_t hashProof = ProofHash();
+                    uint32_t nLeadingZeros = 0;
+                    for(int i = 1023; i >= 0; --i)
+                    {
+                        if(hashProof.GetBit(i))
+                            break;
+                        nLeadingZeros++;
+                    }
+                    
+                    debug::log(0, "   Leading zeros: ", nLeadingZeros, " bits");
+                    debug::log(0, "   Required:      ~", (1024 - bnTarget.getuint1024().BitLength()), " bits");
+                    debug::log(0, "");
+                    debug::log(0, "📊 VISUAL COMPARISON");
+                    debug::log(0, "   Hash:   ", hashProof.ToString().substr(0, 64), "...");
+                    debug::log(0, "   Target: ", bnTarget.getuint1024().ToString().substr(0, 64), "...");
+                    debug::log(0, "   ✅ Hash ≤ Target (VALID)");
+                    debug::log(0, "");
+                    debug::log(0, "╔═══════════════════════════════════════════════════════════╗");
+                    debug::log(0, "║              ✅ HASH BLOCK VALID                          ║");
+                    debug::log(0, "╚═══════════════════════════════════════════════════════════╝");
+                    debug::log(0, "");
+                }
 
                 return true;
             }

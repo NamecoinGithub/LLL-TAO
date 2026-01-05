@@ -11,3 +11,14 @@ apipassword=password
 daemon=1
 #mining=1
 #stake=1
+
+# Fork Prevention Configuration
+# These settings help detect and recover from blockchain forks
+#forkthreshold=10          # Consecutive failures before rollback (default: 10)
+#autorollback=1            # Enable automatic rollback (default: enabled)
+#rollbackheight=0          # Manual rollback height (0 = disabled, use auto)
+
+# Training Wheels Logging
+# Enable detailed diagnostic logging for mining validation
+#trainingwheels=1          # Enable step-by-step validation logging (default: disabled)
+
