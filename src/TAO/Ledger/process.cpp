@@ -130,6 +130,19 @@ namespace TAO
                     /* Check for missing transactions. */
                     if(block.vMissing.size() == 0)
                     {
+                        /* Record validation failure for fork detection */
+                        ChainState::ForkDetector::RecordFailure();
+
+                        /* Check for fork condition */
+                        if(ChainState::ForkDetector::CheckForFork())
+                        {
+                            debug::warning(FUNCTION, "⚠️ FORK DETECTED - Triggering automatic rollback");
+
+                            /* Trigger rollback if enabled */
+                            if(config::GetAutoRollback())
+                                ChainState::ForkDetector::TriggerRollback();
+                        }
+
                         nStatus |= PROCESS::REJECTED;
                         return;
                     }
@@ -146,11 +159,27 @@ namespace TAO
                 /* Check if valid in the chain. */
                 else if(!block.Accept())
                 {
+                    /* Record validation failure for fork detection */
+                    ChainState::ForkDetector::RecordFailure();
+
+                    /* Check for fork condition */
+                    if(ChainState::ForkDetector::CheckForFork())
+                    {
+                        debug::warning(FUNCTION, "⚠️ FORK DETECTED - Triggering automatic rollback");
+
+                        /* Trigger rollback if enabled */
+                        if(config::GetAutoRollback())
+                            ChainState::ForkDetector::TriggerRollback();
+                    }
+
                     /* Set the status. */
                     nStatus |= PROCESS::REJECTED;
 
                     return;
                 }
+
+                /* Record successful validation */
+                ChainState::ForkDetector::RecordSuccess(block.nHeight, block.GetHash());
 
                 /* Set the status. */
                 nStatus |= PROCESS::ACCEPTED;
@@ -225,7 +254,22 @@ namespace TAO
                     {
                         /* Check for missing transactions. */
                         if(pOrphan->vMissing.size() == 0)
+                        {
+                            /* Record validation failure for fork detection */
+                            ChainState::ForkDetector::RecordFailure();
+
+                            /* Check for fork condition */
+                            if(ChainState::ForkDetector::CheckForFork())
+                            {
+                                debug::warning(FUNCTION, "⚠️ FORK DETECTED (orphan processing) - Triggering automatic rollback");
+
+                                /* Trigger rollback if enabled */
+                                if(config::GetAutoRollback())
+                                    ChainState::ForkDetector::TriggerRollback();
+                            }
+
                             return;
+                        }
 
                         /* Incomplete blocks can pass through orphan checks. */
                         nStatus |= PROCESS::INCOMPLETE;
@@ -241,7 +285,25 @@ namespace TAO
 
                     /* Accept each orphan. */
                     else if(!pOrphan->Accept())
+                    {
+                        /* Record validation failure for fork detection */
+                        ChainState::ForkDetector::RecordFailure();
+
+                        /* Check for fork condition */
+                        if(ChainState::ForkDetector::CheckForFork())
+                        {
+                            debug::warning(FUNCTION, "⚠️ FORK DETECTED (orphan processing) - Triggering automatic rollback");
+
+                            /* Trigger rollback if enabled */
+                            if(config::GetAutoRollback())
+                                ChainState::ForkDetector::TriggerRollback();
+                        }
+
                         return;
+                    }
+
+                    /* Record successful orphan validation */
+                    ChainState::ForkDetector::RecordSuccess(pOrphan->nHeight, pOrphan->GetHash());
 
                     /* Erase orphans from map. */
                     mapOrphans.erase(hash);

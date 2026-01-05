@@ -211,5 +211,44 @@ namespace config
         return true;  // HARDCODED: Always accept Physical Falcon (512 OR 1024, bonded, optional)
     }
 
+
+    /** GetForkThreshold
+     *
+     *  Get the number of consecutive validation failures before triggering rollback.
+     *
+     *  @return Fork detection threshold (default: 10)
+     *
+     **/
+    inline uint32_t GetForkThreshold()
+    {
+        return GetArg("-forkthreshold", 10);
+    }
+
+
+    /** GetAutoRollback
+     *
+     *  Get automatic rollback setting.
+     *
+     *  @return True if automatic rollback is enabled (default: true)
+     *
+     **/
+    inline bool GetAutoRollback()
+    {
+        return GetBoolArg("-autorollback", true);
+    }
+
+
+    /** GetManualRollbackHeight
+     *
+     *  Get manual rollback height setting.
+     *
+     *  @return Manual rollback height (0 = disabled)
+     *
+     **/
+    inline uint32_t GetManualRollbackHeight()
+    {
+        return GetArg("-rollbackheight", 0);
+    }
+
 }
 #endif

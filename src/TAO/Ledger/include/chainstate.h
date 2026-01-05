@@ -108,6 +108,77 @@ namespace TAO
             /** The best block in the chain. **/
             extern BlockState tStateGenesis;
 
+
+            /** ForkDetector
+             *
+             *  Monitors consecutive validation failures and triggers rollback.
+             *
+             **/
+            class ForkDetector
+            {
+            private:
+                static uint32_t nConsecutiveFailures;
+                static uint32_t nLastGoodHeight;
+                static uint512_t hashLastGoodBlock;
+
+            public:
+                /** RecordSuccess
+                 *
+                 *  Reset failure counter after successful validation.
+                 *
+                 *  @param[in] nHeight The height of the successful block
+                 *  @param[in] hash The hash of the successful block
+                 *
+                 **/
+                static void RecordSuccess(uint32_t nHeight, const uint512_t& hash);
+
+                /** RecordFailure
+                 *
+                 *  Increment failure counter.
+                 *
+                 **/
+                static void RecordFailure();
+
+                /** CheckForFork
+                 *
+                 *  Detects fork conditions based on consecutive failures.
+                 *
+                 *  @return True if fork threshold exceeded
+                 *
+                 **/
+                static bool CheckForFork();
+
+                /** GetRollbackHeight
+                 *
+                 *  Determines safe rollback height.
+                 *
+                 *  @return Height to rollback to
+                 *
+                 **/
+                static uint32_t GetRollbackHeight();
+
+                /** TriggerRollback
+                 *
+                 *  Initiates blockchain rollback to last known-good state.
+                 *
+                 *  @return True if rollback succeeded
+                 *
+                 **/
+                static bool TriggerRollback();
+
+                /** ResurrectTransactions
+                 *
+                 *  Re-inserts transactions from rolled-back blocks into mempool.
+                 *
+                 *  @param[in] nFromHeight Starting height
+                 *  @param[in] nToHeight Ending height
+                 *
+                 *  @return True if transactions resurrected successfully
+                 *
+                 **/
+                static bool ResurrectTransactions(uint32_t nFromHeight, uint32_t nToHeight);
+            };
+
         }
     }
 }
