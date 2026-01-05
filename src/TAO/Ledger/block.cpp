@@ -510,7 +510,7 @@ namespace TAO
                     if(fTrainingWheels)
                     {
                         debug::log(0, "");
-                        debug::log(0, "⚖️ STEP 3: DIFFICULTY COMPARISON");
+                        debug::log(0, "⚖️ DIFFICULTY COMPARISON");
                         debug::log(0, "   Required:  ", GetDifficulty(nBits, 1));
                         debug::log(0, "   Actual:    ", GetDifficulty(nPrimeBits, 1));
                         debug::log(0, "   ❌ FAILED: Prime-cluster below target");
@@ -534,7 +534,7 @@ namespace TAO
                     debug::log(0, "   Chain offsets: [+ 0, ", strOffsets, "]");
                     debug::log(0, "   Chain length:  ", (vOffsets.size() > 4 ? vOffsets.size() - 4 : 0), " primes");
                     debug::log(0, "");
-                    debug::log(0, "⚖️ STEP 4: DIFFICULTY COMPARISON");
+                    debug::log(0, "⚖️ STEP 4: FINAL DIFFICULTY CHECK");
                     debug::log(0, "   Required:  ", GetDifficulty(nBits, 1));
                     debug::log(0, "   Actual:    ", GetDifficulty(nPrimeBits, 1));
                     double margin = GetDifficulty(nPrimeBits, 1) - GetDifficulty(nBits, 1);
