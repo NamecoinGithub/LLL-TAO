@@ -376,6 +376,7 @@ namespace LLP
             case 131: return "GET_REWARD";
             case 132: return "CLEAR_MAP";
             case 133: return "GET_ROUND";
+            case 136: return "GET_ROUND_INFO";
             case 200: return "BLOCK_ACCEPTED";
             case 201: return "BLOCK_REJECTED";
             case 202: return "COINBASE_SET";

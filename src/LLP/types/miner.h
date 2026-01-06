@@ -93,6 +93,42 @@ namespace LLP
             GET_ROUND      = 133,
 
 
+            // ============================================================================
+            // MINING ROUND INFORMATION (136-139)
+            // Enhanced stateless mining support for multi-channel height tracking
+            // Added in PR #134 - Multi-Channel Height Tracking
+            // ============================================================================
+            
+            /** Get current round information (all channels)
+             * 
+             * Request format:  Header only (no payload)
+             * 
+             * Response format:
+             *   - uint32_t nProtocolVersion    (currently 1)
+             *   - uint32_t nUnifiedHeight      (current blockchain height - all channels)
+             *   - uint32_t nPrimeChannelHeight (Prime channel height - only Prime blocks)
+             *   - uint32_t nHashChannelHeight  (Hash channel height - only Hash blocks)
+             *   - uint32_t nStakeChannelHeight (Stake channel height - only Stake blocks)
+             * 
+             * Purpose: Provides comprehensive blockchain state for template staleness
+             *          detection across all mining channels.  This is a UTILITY opcode
+             *          that all channel types can use to get complete network state.
+             * 
+             * Usage:  Miners poll this periodically (5-10s intervals) to detect when
+             *        their specific channel has advanced (indicating template staleness).
+             *        The response includes all channels so: 
+             *        - Prime miners check nPrimeChannelHeight
+             *        - Hash miners check nHashChannelHeight
+             *        - Stake miners check nStakeChannelHeight
+             *        - All can see unified height for metrics/debugging
+             * 
+             * Key Insight: Templates should only be discarded when THEIR channel advances,
+             *              not when other channels mine blocks. This prevents unnecessary
+             *              template refreshes and maximizes mining efficiency.
+             */
+            GET_ROUND_INFO = 136,
+
+
             /** RESPONSE PACKETS **/
             BLOCK_ACCEPTED = 200,
             BLOCK_REJECTED = 201,
