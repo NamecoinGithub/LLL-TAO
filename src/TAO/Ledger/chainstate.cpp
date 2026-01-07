@@ -483,7 +483,9 @@ namespace TAO
             /* Check for genesis */
             if(tStateBest.nHeight == 0)
             {
-                nStake = nPrime = nHash = 0;
+                nStake = 0;
+                nPrime = 0;
+                nHash = 0;
                 return true;
             }
 

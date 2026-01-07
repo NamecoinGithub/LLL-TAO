@@ -111,7 +111,8 @@ TEST_CASE("Unified Height Verification - Channel heights non-negative", "[ledger
     
     /* All channel heights should be non-negative (uint32_t guarantees this) */
     /* Just verify they're reasonable values */
-    REQUIRE(nStake < 1000000000);  // Less than 1 billion
-    REQUIRE(nPrime < 1000000000);
-    REQUIRE(nHash < 1000000000);
+    const uint32_t MAX_REASONABLE_HEIGHT = 1000000000;  // Less than 1 billion blocks
+    REQUIRE(nStake < MAX_REASONABLE_HEIGHT);
+    REQUIRE(nPrime < MAX_REASONABLE_HEIGHT);
+    REQUIRE(nHash < MAX_REASONABLE_HEIGHT);
 }
