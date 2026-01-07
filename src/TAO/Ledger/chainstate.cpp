@@ -581,9 +581,10 @@ namespace TAO
             /* MISMATCH DETECTED - CRITICAL ERROR */
             int64_t nDiff = static_cast<int64_t>(nActualUnified) - static_cast<int64_t>(nCalculated);
 
-            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+            const char* ERROR_SEPARATOR = "═══════════════════════════════════════════";
+            debug::error(ANSI_COLOR_BRIGHT_RED, ERROR_SEPARATOR, ANSI_COLOR_RESET);
             debug::error(ANSI_COLOR_BRIGHT_RED, "❌ UNIFIED HEIGHT MISMATCH DETECTED!", ANSI_COLOR_RESET);
-            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+            debug::error(ANSI_COLOR_BRIGHT_RED, ERROR_SEPARATOR, ANSI_COLOR_RESET);
             debug::error("   Expected (Stake+Prime+Hash): ", nCalculated);
             debug::error("   Actual unified height:       ", nActualUnified);
             debug::error("   Difference:                  ", nDiff);
@@ -618,7 +619,7 @@ namespace TAO
             debug::error("     3. If problem persists, run: ./nexus -rescan");
             debug::error("     4. Check for disk/hardware errors");
             debug::error("     5. Contact developers if issue continues");
-            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+            debug::error(ANSI_COLOR_BRIGHT_RED, ERROR_SEPARATOR, ANSI_COLOR_RESET);
 
             /* Set chain health warning flag */
             /* NOTE: This doesn't stop the node - allows investigation */
