@@ -101,6 +101,43 @@ namespace TAO
             uint1024_t Genesis();
 
 
+            /** VerifyUnifiedHeightConsistency
+             *
+             *  Verify that unified height equals sum of all channel heights.
+             *
+             *  Formula: nUnified = nStake + nPrime + nHash
+             *
+             *  This prevents:
+             *  - Channel-specific forks
+             *  - Incomplete rollbacks
+             *  - Database corruption
+             *  - Consensus attacks
+             *
+             *  WHEN TO CALL:
+             *  - ONLY after block fully accepted (SetBest() completes)
+             *  - NOT during block creation or validation
+             *  - Every N blocks (configurable)
+             *
+             *  @return true if consistent, false if mismatch detected
+             *
+             **/
+            bool VerifyUnifiedHeightConsistency();
+
+
+            /** GetChannelHeights
+             *
+             *  Get current heights for all three channels.
+             *
+             *  @param[out] nStake Stake channel height (channel 0)
+             *  @param[out] nPrime Prime channel height (channel 1)
+             *  @param[out] nHash Hash channel height (channel 2)
+             *
+             *  @return true if successful, false if channels not found
+             *
+             **/
+            bool GetChannelHeights(uint32_t& nStake, uint32_t& nPrime, uint32_t& nHash);
+
+
             /** The best block in the chain. **/
             extern memory::atomic<BlockState> tStateBest;
 

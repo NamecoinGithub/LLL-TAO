@@ -1130,6 +1130,15 @@ namespace TAO
                 if(!ChainState::Synchronizing())
                     Dispatch::Instance().PushRelay(ChainState::hashBestChain.load());
                 #endif
+
+                /* Verify unified height consistency after chain update */
+                if(!ChainState::VerifyUnifiedHeightConsistency())
+                {
+                    debug::warning(FUNCTION, "Unified height verification failed at height ", nHeight);
+                    debug::warning(FUNCTION, "Chain may be in inconsistent state - manual intervention required");
+                    /* Don't reject SetBest - block is already committed */
+                    /* But flag for monitoring/alerting */
+                }
             }
 
             return true;

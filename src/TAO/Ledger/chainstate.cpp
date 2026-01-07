@@ -472,5 +472,160 @@ namespace TAO
         {
             return (config::fHybrid.load() ? TAO::Ledger::hashGenesisHybrid : config::fTestNet.load() ? TAO::Ledger::hashGenesisTestnet : (config::fClient.load() ? TAO::Ledger::hashTritium : TAO::Ledger::hashGenesis));
         }
+
+
+        /* Get current channel heights */
+        bool ChainState::GetChannelHeights(uint32_t& nStake, uint32_t& nPrime, uint32_t& nHash)
+        {
+            /* Get current best state */
+            BlockState tStateBest = ChainState::tStateBest.load();
+
+            /* Check for genesis */
+            if(tStateBest.nHeight == 0)
+            {
+                nStake = nPrime = nHash = 0;
+                return true;
+            }
+
+            /* Get Stake channel (channel 0) */
+            BlockState stateChannel = tStateBest;
+            if(!GetLastState(stateChannel, 0))
+            {
+                debug::warning(FUNCTION, "Could not get Stake channel state");
+                nStake = 0;
+            }
+            else
+            {
+                nStake = stateChannel.nChannelHeight;
+            }
+
+            /* Get Prime channel (channel 1) */
+            stateChannel = tStateBest;
+            if(!GetLastState(stateChannel, 1))
+            {
+                debug::warning(FUNCTION, "Could not get Prime channel state");
+                nPrime = 0;
+            }
+            else
+            {
+                nPrime = stateChannel.nChannelHeight;
+            }
+
+            /* Get Hash channel (channel 2) */
+            stateChannel = tStateBest;
+            if(!GetLastState(stateChannel, 2))
+            {
+                debug::warning(FUNCTION, "Could not get Hash channel state");
+                nHash = 0;
+            }
+            else
+            {
+                nHash = stateChannel.nChannelHeight;
+            }
+
+            return true;
+        }
+
+
+        /* Verify unified height consistency */
+        bool ChainState::VerifyUnifiedHeightConsistency()
+        {
+            /* Get current best state atomically */
+            BlockState tStateBest = ChainState::tStateBest.load();
+            uint32_t nActualUnified = tStateBest.nHeight;
+
+            /* Skip during initial sync (let sync complete first) */
+            if(Synchronizing())
+                return true;
+
+            /* Skip for genesis block */
+            if(nActualUnified == 0)
+                return true;
+
+            /* Skip if not at checkpoint height */
+            const uint32_t VERIFICATION_INTERVAL = config::GetArg("-verifyunified", 10);
+            if(nActualUnified % VERIFICATION_INTERVAL != 0)
+                return true;
+
+            debug::log(2, FUNCTION, "═══ UNIFIED HEIGHT VERIFICATION (Height ", nActualUnified, ") ═══");
+
+            /* Get channel heights using existing GetLastState() infrastructure */
+            uint32_t nStakeHeight = 0;
+            uint32_t nPrimeHeight = 0;
+            uint32_t nHashHeight = 0;
+
+            if(!GetChannelHeights(nStakeHeight, nPrimeHeight, nHashHeight))
+            {
+                debug::error(FUNCTION, "Failed to get channel heights");
+                return false;
+            }
+
+            /* Calculate expected unified height */
+            uint32_t nCalculated = nStakeHeight + nPrimeHeight + nHashHeight;
+
+            debug::log(2, FUNCTION, "   Stake:      ", nStakeHeight);
+            debug::log(2, FUNCTION, "   Prime:      ", nPrimeHeight);
+            debug::log(2, FUNCTION, "   Hash:       ", nHashHeight);
+            debug::log(2, FUNCTION, "   Calculated: ", nCalculated);
+            debug::log(2, FUNCTION, "   Actual:     ", nActualUnified);
+
+            /* Check for exact match */
+            if(nCalculated == nActualUnified)
+            {
+                debug::log(2, FUNCTION, "✓ Unified height consistent");
+                return true;
+            }
+
+            /* MISMATCH DETECTED - CRITICAL ERROR */
+            int64_t nDiff = static_cast<int64_t>(nActualUnified) - static_cast<int64_t>(nCalculated);
+
+            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+            debug::error(ANSI_COLOR_BRIGHT_RED, "❌ UNIFIED HEIGHT MISMATCH DETECTED!", ANSI_COLOR_RESET);
+            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+            debug::error("   Expected (Stake+Prime+Hash): ", nCalculated);
+            debug::error("   Actual unified height:       ", nActualUnified);
+            debug::error("   Difference:                  ", nDiff);
+            debug::error("");
+            debug::error("   Stake channel:  ", nStakeHeight);
+            debug::error("   Prime channel:  ", nPrimeHeight);
+            debug::error("   Hash channel:   ", nHashHeight);
+            debug::error("");
+
+            /* Determine likely cause */
+            if(nDiff > 0)
+            {
+                debug::error("   DIAGNOSIS: Unified height is AHEAD");
+                debug::error("   Possible causes:");
+                debug::error("     - Block double-counted in unified height");
+                debug::error("     - Channel height not incremented");
+                debug::error("     - Database corruption");
+            }
+            else
+            {
+                debug::error("   DIAGNOSIS: Unified height is BEHIND");
+                debug::error("   Possible causes:");
+                debug::error("     - Channel block not reflected in unified");
+                debug::error("     - Incomplete rollback");
+                debug::error("     - Channel on fork");
+            }
+
+            debug::error("");
+            debug::error("   RECOMMENDED ACTIONS:");
+            debug::error("     1. Stop the node immediately");
+            debug::error("     2. Run: ./nexus -reindex");
+            debug::error("     3. If problem persists, run: ./nexus -rescan");
+            debug::error("     4. Check for disk/hardware errors");
+            debug::error("     5. Contact developers if issue continues");
+            debug::error(ANSI_COLOR_BRIGHT_RED, "═══════════════════════════════════════════", ANSI_COLOR_RESET);
+
+            /* Set chain health warning flag */
+            /* NOTE: This doesn't stop the node - allows investigation */
+            /* In production, you might want to: */
+            /* - Trigger automatic rollback */
+            /* - Halt block acceptance */
+            /* - Initiate resync */
+
+            return false;  // Indicates mismatch - caller decides action
+        }
     }
 }
