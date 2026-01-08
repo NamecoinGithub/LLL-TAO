@@ -22,26 +22,7 @@ The `HasDataPayload()` function in `src/LLP/packets/packet.h` was not recognizin
 
 ### Serialization Logic
 
-The `GetBytes()` method in `src/LLP/packets/packet.h` only includes LENGTH and DATA fields when `HasDataPayload()` returns true:
-
-```cpp
-std::vector<uint8_t> GetBytes() const
-{
-    std::vector<uint8_t> BYTES(1, HEADER);
-    
-    if(HasDataPayload())  // ← Only includes LENGTH+DATA if this returns true
-    {
-        BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
-        BYTES.push_back(static_cast<uint8_t>(LENGTH >> 16));
-        BYTES.push_back(static_cast<uint8_t>(LENGTH >> 8));
-        BYTES.push_back(static_cast<uint8_t>(LENGTH));
-        
-        BYTES.insert(BYTES.end(), DATA.begin(), DATA.end());
-    }
-    
-    return BYTES;
-}
-```
+The `GetBytes()` method in `src/LLP/packets/packet.h` (lines 294-311) only includes LENGTH and DATA fields when `HasDataPayload()` returns true. See the source file for the complete implementation.
 
 ## Solution
 
@@ -179,14 +160,14 @@ Unit tests in `tests/unit/LLP/packet_round_response.cpp` verify:
 
 ## Expected Outcome
 
-After this fix, miners receive complete NEW_ROUND packets:
+After this fix, miners receive complete NEW_ROUND packets (example values shown):
 
 ```
 [LLP RECV] header=204 (0xcc) NEW_ROUND length=12
 [Solo GET_ROUND] NEW_ROUND response received
-[Solo GET_ROUND]   Unified height:  6538431
-[Solo GET_ROUND]   Channel height:  2303058
-[Solo GET_ROUND]   Difficulty:      0x1D00FFFF
+[Solo GET_ROUND]   Unified height:  6538431    (example value)
+[Solo GET_ROUND]   Channel height:  2303058    (example value)
+[Solo GET_ROUND]   Difficulty:      0x1D00FFFF (example value)
 ```
 
 ## Impact
@@ -210,6 +191,9 @@ After this fix, miners receive complete NEW_ROUND packets:
 
 ## Files With Test Coverage
 
-- `tests/unit/LLP/packet_round_response.cpp` - NEW_ROUND/OLD_ROUND serialization tests
-- `tests/unit/LLP/packet_data_payload.cpp` - General HasDataPayload() tests
-- `tests/unit/LLP/test_get_round_schema.cpp` - GET_ROUND protocol schema tests
+The following test files verify the fix (see `tests/unit/LLP/` directory):
+- `packet_round_response.cpp` - NEW_ROUND/OLD_ROUND serialization tests
+- `packet_data_payload.cpp` - General HasDataPayload() tests  
+- `test_get_round_schema.cpp` - GET_ROUND protocol schema tests
+
+Note: Test files may be updated or reorganized as the codebase evolves.
