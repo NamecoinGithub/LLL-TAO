@@ -160,15 +160,17 @@ Unit tests in `tests/unit/LLP/packet_round_response.cpp` verify:
 
 ## Expected Outcome
 
-After this fix, miners receive complete NEW_ROUND packets (example values shown):
+After this fix, miners receive complete NEW_ROUND packets (values from actual production logs):
 
 ```
 [LLP RECV] header=204 (0xcc) NEW_ROUND length=12
 [Solo GET_ROUND] NEW_ROUND response received
-[Solo GET_ROUND]   Unified height:  6538431    (example value)
-[Solo GET_ROUND]   Channel height:  2303058    (example value)
-[Solo GET_ROUND]   Difficulty:      0x1D00FFFF (example value)
+[Solo GET_ROUND]   Unified height:  6538431    (actual production value)
+[Solo GET_ROUND]   Channel height:  2303058    (actual production value)
+[Solo GET_ROUND]   Difficulty:      0x1D00FFFF (actual production value)
 ```
+
+Note: Test files use different constants (e.g., 6537420, 2302664) as mock data.
 
 ## Impact
 
