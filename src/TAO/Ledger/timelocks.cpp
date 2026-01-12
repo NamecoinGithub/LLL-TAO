@@ -49,6 +49,12 @@ namespace TAO
          * This allows v1/v2 miners (old Windows.exe) to continue operating
          * while the network migrates to modern stateless mining infrastructure.
          * 
+         * Note: Setting this to 1 effectively allows v1-v8 blocks during transition.
+         * This is intentional to support:
+         * - Primary target: Old v1/v2 miners that control majority hashrate
+         * - Secondary benefit: Network can sync through historical v3-v8 blocks
+         * - Simplicity: Single constant for all legacy versions vs current (v9)
+         * 
          * TRANSITION STRATEGY:
          * 1. Enable v1/v2 acceptance to unblock network sync
          * 2. Deploy stateless mining infrastructure (Phase 2)
@@ -58,7 +64,7 @@ namespace TAO
          * 6. Network fully upgraded to modern protocol
          * 
          * SECURITY: This is safe because:
-         * - V1/v2 blocks still validated for proof-of-work
+         * - v1/v2 blocks still validated for proof-of-work
          * - Only version check is relaxed, not security rules
          * - Can be reverted with single-line code change
          * - Gives community time to upgrade without network halt
@@ -194,17 +200,18 @@ namespace TAO
                 return false;
 
             /* DUAL-VERSION SUPPORT FOR BLOCK TRANSITION PERIOD:
-             * Accept blocks v1, v2, and current version (v9+) to allow:
-             * - Old Windows.exe miners to keep producing blocks (v1/v2)
+             * Accept blocks v1-v8 and current version (v9+) to allow:
+             * - Old Windows.exe miners to keep producing blocks (v1/v2 primarily)
+             * - Legacy blocks from intermediate versions (v3-v8) during sync
              * - New stateless miners to produce modern blocks (v9+)
              * - Network to operate during transition period
              * - Gradual migration as hashrate shifts to new infrastructure
              * 
              * This bypasses the strict timelock enforcement (1-hour grace period)
-             * for v1/v2 blocks, preventing rejection of legacy blocks during upgrade.
+             * for legacy blocks (v1-v8), preventing rejection during upgrade.
              * 
              * POLITICAL CONTEXT:
-             * - V1/v2 miners control majority hashrate (source: MiningPoolStats shows "Unknown 100%")
+             * - v1/v2 miners control majority hashrate (source: MiningPoolStats shows "Unknown 100%")
              * - No modern mining alternative existed until stateless mining implementation
              * - Cannot force upgrade without halting all block production
              * - This enables gradual, non-disruptive transition
@@ -224,7 +231,7 @@ namespace TAO
              * - Network health dashboard */
             if(nVersion >= BLOCK_MINIMUM_SUPPORTED_VERSION && nVersion < nCurrent)
             {
-                /* Accept v1/v2 blocks without strict timelock enforcement during transition */
+                /* Accept legacy blocks (v1-v8) without strict timelock enforcement during transition */
                 return true;
             }
 
