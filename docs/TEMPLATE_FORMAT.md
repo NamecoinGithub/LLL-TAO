@@ -679,29 +679,57 @@ nNonce at offset 208    ✓
 Instead of deserializing entire struct, access fields directly:
 
 ```cpp
-// Fast: Read nHeight directly from byte array
+// Fast (portable): Read nHeight directly with proper endianness handling
+const uint8_t* data = template.data();
+uint32_t nHeight = data[200] | (data[201] << 8) | 
+                   (data[202] << 16) | (data[203] << 24);
+// Works on all architectures (portable)
+
+// Alternative (non-portable): Direct cast on little-endian systems only
+// WARNING: Only works on little-endian architectures (x86, ARM)
+// Will produce incorrect results on big-endian systems (MIPS, PowerPC, etc.)
 const uint8_t* data = template.data();
 uint32_t nHeight = *reinterpret_cast<const uint32_t*>(data + 200);
-// (Assuming little-endian architecture)
+// ⚠️ NOT RECOMMENDED - Use bitwise approach above for portable code
 
 // Slow: Full deserialization for one field
 TritiumBlock block = ParseTemplate(template);
 uint32_t nHeight = block.nHeight;
 ```
 
-**Speedup:** 10-50× faster for field access
+**Speedup:** Bitwise field access is 10-50× faster than full deserialization
 
 ### Nonce Iteration
 
 ```cpp
-// Fast: Modify nonce in-place
+// Fast (portable): Modify nonce in-place with proper endianness
+uint8_t* pNonce = template.data() + 208;
+uint64_t nonce = 0;
+
+while (true) {
+    // Write nonce (little-endian)
+    pNonce[0] = (nonce >> 0) & 0xFF;
+    pNonce[1] = (nonce >> 8) & 0xFF;
+    pNonce[2] = (nonce >> 16) & 0xFF;
+    pNonce[3] = (nonce >> 24) & 0xFF;
+    pNonce[4] = (nonce >> 32) & 0xFF;
+    pNonce[5] = (nonce >> 40) & 0xFF;
+    pNonce[6] = (nonce >> 48) & 0xFF;
+    pNonce[7] = (nonce >> 56) & 0xFF;
+    
+    if (hash(template) < target) break;
+    nonce++;
+}
+
+// Alternative (non-portable): Direct cast on little-endian systems
+// ⚠️ Only for x86/ARM little-endian architectures
 uint64_t* pNonce = reinterpret_cast<uint64_t*>(template.data() + 208);
 while (true) {
     if (hash(template) < target) break;
     (*pNonce)++;  // In-place increment
 }
 
-// Slow: Deserialize/serialize each iteration
+// Slow: Deserialize/serialize each iteration (DON'T DO THIS)
 while (true) {
     TritiumBlock block = ParseTemplate(template);
     if (hash(block) < target) break;
@@ -710,7 +738,9 @@ while (true) {
 }
 ```
 
-**Speedup:** 100× faster (avoids serialization overhead)
+**Speedup:** In-place nonce modification is 100× faster than serialization overhead
+
+**Portability Note:** The bitwise approach works on all architectures (big-endian, little-endian, strict alignment). The `reinterpret_cast` approach only works reliably on little-endian systems with relaxed alignment requirements (x86, ARM).
 
 ## Troubleshooting
 

@@ -525,10 +525,13 @@ private:
         // Parse 216-byte TritiumBlock
         const uint8_t* data = notification.DATA.data();
         
-        // Extract key fields
-        uint32_t nChannel = *reinterpret_cast<const uint32_t*>(data + 196);
-        uint32_t nHeight = *reinterpret_cast<const uint32_t*>(data + 200);
-        uint32_t nBits = *reinterpret_cast<const uint32_t*>(data + 204);
+        // Extract key fields (portable, little-endian parsing)
+        uint32_t nChannel = data[196] | (data[197] << 8) | 
+                            (data[198] << 16) | (data[199] << 24);
+        uint32_t nHeight = data[200] | (data[201] << 8) | 
+                           (data[202] << 16) | (data[203] << 24);
+        uint32_t nBits = data[204] | (data[205] << 8) | 
+                         (data[206] << 16) | (data[207] << 24);
         
         std::cout << "Template: height=" << nHeight 
                   << " channel=" << nChannel 

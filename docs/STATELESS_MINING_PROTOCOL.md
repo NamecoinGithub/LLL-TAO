@@ -105,17 +105,28 @@ Miners subscribe to push notifications for their channel.
 
 ```
 Miner → Node:   MINER_READY (0xD007)
-                (empty payload - subscription request)
+                (8-byte header, empty payload)
+                ├─ MESSAGE: 0xD007
+                ├─ FLAGS: 0x0000
+                └─ LENGTH: 0 (no payload data)
 
 Node → Miner:   MINER_READY (0xD007)
+                (8-byte header + 1-byte acknowledgment)
+                ├─ MESSAGE: 0xD007
+                ├─ FLAGS: 0x0000
+                ├─ LENGTH: 1
                 └─ Ack (1 byte): 0x01 = subscribed
 
 Node → Miner:   BLOCK_DATA (0x0000)
+                (8-byte header + 216-byte template)
+                ├─ MESSAGE: 0x0000
+                ├─ FLAGS: 0x0000
+                ├─ LENGTH: 216
                 └─ Initial template (216 bytes): Serialized TritiumBlock
 ```
 
 **Key Points:**
-- MINER_READY subscribes to channel-specific push notifications
+- MINER_READY subscription request has empty payload (LENGTH=0), but includes 8-byte MessagePacket header
 - Node immediately sends current template (no waiting for next block)
 - Miners can start hashing immediately after subscription
 - **This eliminates the 0.00 GIPS idle problem**
