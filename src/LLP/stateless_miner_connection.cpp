@@ -14,6 +14,7 @@ ________________________________________________________________________________
 #include <LLP/types/stateless_miner_connection.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/llp_opcodes.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
 #include <LLP/include/falcon_verify.h>
@@ -3132,8 +3133,7 @@ namespace LLP
         }
         
         /* Send template via BLOCK_DATA opcode */
-        const uint8_t BLOCK_DATA = 0;
-        Packet response(BLOCK_DATA);
+        Packet response(Opcodes::Legacy::BLOCK_DATA);
         response.DATA = vTemplate;
         response.LENGTH = static_cast<uint32_t>(vTemplate.size());
         

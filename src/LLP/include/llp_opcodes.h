@@ -2,7 +2,7 @@
 
             Hash(BEGIN(Satoshi[2010]), END(Sunny[2012])) == Videlicet[2014]++
 
-            (c) Copyright The Nexus Developers 2014 - 2026
+            (c) Copyright The Nexus Developers 2014 - 2025
 
             Distributed under the MIT software license, see the accompanying
             file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -169,17 +169,17 @@ namespace LLP
          *  Miner -> Node:   SET_CHANNEL (0xD005)         [Prime=1 or Hash=2]
          *  Node -> Miner:   CHANNEL_ACK (0xD006)         [Success/failure]
          *  
-         *  Phase 3: Subscription
+         *  Phase 3: Subscription (216-byte templates)
          *  ---------------------
          *  Miner -> Node:   MINER_READY (0xD007)         [Subscribe to templates]
          *  Node -> Miner:   MINER_READY (0xD007)         [1-byte acknowledgment]
-         *  Node -> Miner:   GET_BLOCK (0xD008)           [Initial 228-byte template] ← FIX!
+         *  Node -> Miner:   GET_BLOCK (0xD008)           [Initial 216-byte template] ← FIX!
          *  
-         *  Phase 4: Mining
+         *  Phase 4: Mining (216-byte templates)
          *  ---------------
          *  [Miner works on template...]
          *  [Network event: New block found]
-         *  Node -> Miner:   NEW_BLOCK (0xD009)           [Updated 228-byte template] ← FIX!
+         *  Node -> Miner:   NEW_BLOCK (0xD009)           [Updated 216-byte template] ← FIX!
          *  [Miner abandons old work, starts new template]
          *  
          *  Phase 5: Solution Submission
@@ -191,15 +191,13 @@ namespace LLP
          *  Node -> Miner:   BLOCK_REJECTED (0xD00C)      [Failure + reason]
          *  Node -> All:     NEW_BLOCK (0xD009)           [Next template to all miners]
          *  
-         *  TEMPLATE FORMAT (228 bytes):
+         *  TEMPLATE FORMAT (216 bytes):
          *  ===========================
-         *  [TemplateMetadata: 12 bytes]
-         *    uint32_t nUnifiedHeight;    // Overall blockchain height
-         *    uint32_t nChannelHeight;    // Channel-specific height (Prime/Hash counter)
-         *    uint32_t nDifficulty;       // Mining target (matches block.nBits)
+         *  Serialized TritiumBlock (wallet-signed, ready to mine)
          *  
-         *  [BlockTemplate: 216 bytes]
-         *    Serialized TritiumBlock (wallet-signed, ready to mine)
+         *  Note: Earlier documentation mentioned 228 bytes (12-byte metadata + 216-byte block).
+         *  The actual implementation uses 216 bytes only. Metadata (height, difficulty) can
+         *  be derived from the block itself or sent separately via notifications.
          *  
          *  SECURITY:
          *  =========
@@ -230,8 +228,8 @@ namespace LLP
             
             /* Template delivery (CRITICAL FIX in this PR) */
             constexpr uint16_t MINER_READY         = 0xD007;  // Subscribe to templates
-            constexpr uint16_t GET_BLOCK           = 0xD008;  // Initial template (228 bytes) ← NEW!
-            constexpr uint16_t NEW_BLOCK           = 0xD009;  // Updated template (228 bytes) ← NEW!
+            constexpr uint16_t GET_BLOCK           = 0xD008;  // Initial template (216 bytes) ← NEW!
+            constexpr uint16_t NEW_BLOCK           = 0xD009;  // Updated template (216 bytes) ← NEW!
             
             /* Solution submission */
             constexpr uint16_t SUBMIT_BLOCK        = 0xD00A;  // Submit solution (216 bytes + sig)
