@@ -29,6 +29,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/constants.h>
 #include <TAO/Ledger/include/difficulty.h>
 #include <TAO/Ledger/include/timelocks.h>
+#include <TAO/Ledger/include/version_control.h>
 
 #include <ios>
 #include <iomanip>
@@ -41,6 +42,8 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        /* Use version control constants for cleaner code. */
+        using namespace Versions;
 
         /** The default constructor. Sets block state to Null. **/
         Block::Block()
@@ -301,8 +304,8 @@ namespace TAO
         /* Generate a Hash For the Block from the Header. */
         uint1024_t Block::GetHash() const
         {
-            /* Pre-Version 5 rule of being block hash. */
-            if(nVersion < 5)
+            /* Pre-Version 5 rule of being block hash (legacy PoW). */
+            if(Block::IsLegacyPoW(nVersion))
                 return ProofHash();
 
             return SignatureHash();
@@ -509,8 +512,8 @@ namespace TAO
                     debug::log(0, "   Channel:      ", nChannel, " (Prime)");
                 }
                 
-                /* Check prime minimum origins. */
-                if(nVersion >= 5 && ProofHash() < bnPrimeMinOrigins.getuint1024())
+                /* Check prime minimum origins for Tritium blocks. */
+                if(Block::IsTritium(nVersion) && ProofHash() < bnPrimeMinOrigins.getuint1024())
                 {
                     if(fTrainingWheels)
                     {

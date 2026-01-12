@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/constants.h>
 
 #include <TAO/Ledger/include/timelocks.h>
+#include <TAO/Ledger/include/version_control.h>
 
 #include <Util/include/args.h>
 #include <Util/include/runtime.h>
@@ -27,6 +28,9 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        /* Use version control constants for cleaner code. */
+        using namespace Versions;
+
         /** Hash to start a hybrid Blockchain. **/
         uint1024_t hashGenesisHybrid;
 
@@ -39,7 +43,7 @@ namespace TAO
 
             /* Apply legacy interval for all versions prior to version 7.  If the caller is not able to provide a block to base
                this calculation off, then we will use the tStateBest instead */
-            if((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion) < 7 )
+            if(!State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
                 return NEXUS_MATURITY_LEGACY;
 
             return NEXUS_MATURITY_COINBASE;
@@ -54,7 +58,7 @@ namespace TAO
 
             /* Apply legacy interval for all versions prior to version 7.  If the caller is not able to provide a block to base
                this calculation off, then we will use the tStateBest instead */
-            if((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion) < 7 )
+            if(!State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
                 return NEXUS_MATURITY_LEGACY;
 
             return NEXUS_MATURITY_COINSTAKE;
