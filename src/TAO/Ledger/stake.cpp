@@ -139,8 +139,8 @@ namespace TAO
                 if(nUnstake < nStake)
                     nStakeNew = nStake - nUnstake;
 
-                /* Check for version 8+. */
-                if(nVersion > 7)
+                /* Check for version 8+ (uses 128-bit arithmetic). */
+                if(nVersion > State::MODERN_RETARGET)
                 {
                     /* Build new score with 128-bit arithmatic to prevent overflows. */
                     uint128_t nScoreNew = (nStakeNew * uint128_t(nScore)) / nStake;
