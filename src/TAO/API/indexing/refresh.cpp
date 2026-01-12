@@ -27,189 +27,257 @@ namespace TAO::API
     /* Checks current events against transaction history to ensure we are up to date. */
     void Indexing::RefreshEvents()
     {
-        /* Check to disable for -client mode. */
-        if(config::fClient.load())
-            return;
-
-        /* Our list of transactions to read. */
-        std::map<uint512_t, TAO::Ledger::Transaction> mapTransactions;
-
-        /* Start a timer to track. */
-        runtime::timer timer;
-        timer.Start();
-
-        /* Check our starting block to read from. */
-        uint1024_t hashBlock;
-
-        /* Track the last block processed. */
-        TAO::Ledger::BlockState tStateLast;
-
-        /* Handle first key if needed. */
-        uint512_t hashIndex;
-        if(!LLD::Logical->ReadLastIndex(hashIndex))
+        try
         {
-            /* Set our internal values. */
-            hashBlock = TAO::Ledger::hashTritium;
+            /* Check to disable for -client mode. */
+            if(config::fClient.load())
+                return;
 
-            /* Check for testnet mode. */
-            if(config::fTestNet.load())
-                hashBlock = TAO::Ledger::hashGenesisTestnet;
-
-            /* Check for hybrid mode. */
-            if(config::fHybrid.load())
-                LLD::Ledger->ReadHybridGenesis(hashBlock);
-
-            /* Read the first tritium block. */
-            TAO::Ledger::BlockState tCurrent;
-            if(!LLD::Ledger->ReadBlock(hashBlock, tCurrent))
+            /* Safety check: Verify databases are initialized */
+            if(!LLD::Logical || !LLD::Ledger)
             {
-                debug::warning(FUNCTION, "No tritium blocks available to initialize ", hashBlock.SubString());
+                debug::error(FUNCTION, "Databases not initialized - skipping event refresh");
                 return;
             }
 
-            /* Set our last block as prev tritium block. */
-            if(!tCurrent.Prev())
-                tStateLast = tCurrent;
-            else
+            /* Our list of transactions to read. */
+            std::map<uint512_t, TAO::Ledger::Transaction> mapTransactions;
+
+            /* Start a timer to track. */
+            runtime::timer timer;
+            timer.Start();
+
+            /* Check our starting block to read from. */
+            uint1024_t hashBlock;
+
+            /* Track the last block processed. */
+            TAO::Ledger::BlockState tStateLast;
+
+            /* Handle first key if needed. */
+            uint512_t hashIndex;
+            if(!LLD::Logical->ReadLastIndex(hashIndex))
             {
-                hashBlock  = tCurrent.hashPrevBlock;
-                tStateLast = tCurrent.Prev();
-            }
-
-            debug::log(0, FUNCTION, "Initializing indexing at tx ", hashBlock.SubString(), " and height ", tCurrent.nHeight);
-        }
-        else
-        {
-            /* Set our initial block hash. */
-            TAO::Ledger::BlockState tCurrent;
-            if(LLD::Ledger->ReadBlock(hashIndex, tCurrent))
-            {
-                /* Set our last block hash. */
-                hashBlock = tCurrent.hashPrevBlock;
-
-                /* Set our last block as prev tritium block. */
-                tStateLast = tCurrent.Prev();
-            }
-        }
-
-        /* Keep track of our total count. */
-        uint32_t nScannedCount = 0;
-
-        /* Start our scan. */
-        debug::log(0, FUNCTION, "Scanning from block ", hashBlock.SubString());
-
-        /* Build our loop based on the blocks we have read sequentially. */
-        std::vector<TAO::Ledger::BlockState> vStates;
-        while(!config::fShutdown.load() && LLD::Ledger->BatchRead(hashBlock, "block", vStates, 1000, true))
-        {
-            /* Loop through all available states. */
-            for(auto& state : vStates)
-            {
-                /* Update start every iteration. */
-                hashBlock = state.GetHash();
-
-                /* Skip if not in main chain. */
-                if(!state.IsInMainChain())
-                    continue;
-
-                /* Check for matching hashes. */
-                if(state.hashPrevBlock != tStateLast.GetHash())
+                try
                 {
-                    /* Read the correct block from next index. */
-                    if(!LLD::Ledger->ReadBlock(tStateLast.hashNextBlock, state))
+                    /* Set our internal values. */
+                    hashBlock = TAO::Ledger::hashTritium;
+
+                    /* Check for testnet mode. */
+                    if(config::fTestNet.load())
+                        hashBlock = TAO::Ledger::hashGenesisTestnet;
+
+                    /* Check for hybrid mode. */
+                    if(config::fHybrid.load())
+                        LLD::Ledger->ReadHybridGenesis(hashBlock);
+
+                    /* Read the first tritium block. */
+                    TAO::Ledger::BlockState tCurrent;
+                    if(!LLD::Ledger->ReadBlock(hashBlock, tCurrent))
                     {
-                        debug::log(0, FUNCTION, "Terminated scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
+                        debug::warning(FUNCTION, "No tritium blocks available to initialize ", hashBlock.SubString());
                         return;
                     }
 
-                    /* Update hashBlock. */
-                    hashBlock = state.GetHash();
+                    /* Set our last block as prev tritium block. */
+                    if(!tCurrent.Prev())
+                        tStateLast = tCurrent;
+                    else
+                    {
+                        hashBlock  = tCurrent.hashPrevBlock;
+                        tStateLast = tCurrent.Prev();
+                    }
+
+                    debug::log(0, FUNCTION, "Initializing indexing at tx ", hashBlock.SubString(), " and height ", tCurrent.nHeight);
                 }
-
-                /* Cache the block hash. */
-                tStateLast = state;
-
-                /* Track our checkpoint by first transaction in non-processed block. */
-                LLD::Logical->WriteLastIndex(state.vtx[0].second);
-
-                /* Handle our transactions now. */
-                for(const auto& proof : state.vtx)
+                catch(const std::exception& e)
                 {
-                    /* Skip over legacy indexes. */
-                    if(proof.first == TAO::Ledger::TRANSACTION::LEGACY)
-                        continue;
-
-                    /* Check our map contains transactions. */
-                    if(!mapTransactions.count(proof.second))
+                    debug::error(FUNCTION, "Exception during initialization: ", e.what());
+                    return;
+                }
+            }
+            else
+            {
+                try
+                {
+                    /* Set our initial block hash. */
+                    TAO::Ledger::BlockState tCurrent;
+                    if(LLD::Ledger->ReadBlock(hashIndex, tCurrent))
                     {
-                        /* Read the next batch of inventory. */
-                        std::vector<TAO::Ledger::Transaction> vList;
-                        if(LLD::Ledger->BatchRead(proof.second, "tx", vList, 1000, false))
-                        {
-                            /* Add all of our values to a map. */
-                            for(const auto& tBatch : vList)
-                                mapTransactions[tBatch.GetHash()] = tBatch;
-                        }
-                    }
+                        /* Set our last block hash. */
+                        hashBlock = tCurrent.hashPrevBlock;
 
-                    /* Check that we found it in batch. */
-                    if(!mapTransactions.count(proof.second))
-                    {
-                        /* Track this warning since this should not happen. */
-                        debug::warning(FUNCTION, "batch read for ", proof.second.SubString(), " did not find results");
-
-                        /* Make sure we have the transaction. */
-                        TAO::Ledger::Transaction tMissing;
-                        if(LLD::Ledger->ReadTx(proof.second, tMissing))
-                            mapTransactions[proof.second] = tMissing;
-                        else
-                        {
-                            debug::warning(FUNCTION, "single read for ", proof.second.SubString(), " is missing");
-                            continue;
-                        }
-                    }
-
-                    /* Get our transaction now. */
-                    const TAO::Ledger::Transaction& rTX =
-                        mapTransactions[proof.second];
-
-                    /* Iterate the transaction contracts. */
-                    for(uint32_t nContract = 0; nContract < rTX.Size(); ++nContract)
-                    {
-                        /* Grab contract reference. */
-                        const TAO::Operation::Contract& rContract = rTX[nContract];
-
-                        {
-                            LOCK(REGISTERED_MUTEX);
-
-                            /* Loop through registered commands. */
-                            for(const auto& strCommands : REGISTERED)
-                                Commands::Instance(strCommands)->Index(rContract, nContract);
-                        }
-                    }
-
-                    /* Delete processed transaction from memory. */
-                    mapTransactions.erase(proof.second);
-
-                    /* Update the scanned count for meters. */
-                    ++nScannedCount;
-
-                    /* Meter for output. */
-                    if(nScannedCount % 100000 == 0)
-                    {
-                        /* Get the time it took to rescan. */
-                        const uint32_t nElapsedSeconds = timer.Elapsed();
-                        debug::log(0, FUNCTION, "Processed ", nScannedCount, " in ", nElapsedSeconds, " seconds from height ", state.nHeight, " (",
-                            std::fixed, (double)(nScannedCount / (nElapsedSeconds > 0 ? nElapsedSeconds : 1 )), " tx/s)");
+                        /* Set our last block as prev tritium block. */
+                        tStateLast = tCurrent.Prev();
                     }
                 }
-
-                /* Check if we are ready to terminate. */
-                if(hashBlock == TAO::Ledger::ChainState::hashBestChain.load())
-                    break;
+                catch(const std::exception& e)
+                {
+                    debug::error(FUNCTION, "Exception reading checkpoint block: ", e.what());
+                    return;
+                }
             }
-        }
 
-        debug::log(0, FUNCTION, "Complated scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
+            /* Keep track of our total count. */
+            uint32_t nScannedCount = 0;
+
+            /* Start our scan. */
+            debug::log(0, FUNCTION, "Scanning from block ", hashBlock.SubString());
+
+            /* Build our loop based on the blocks we have read sequentially. */
+            std::vector<TAO::Ledger::BlockState> vStates;
+            while(!config::fShutdown.load() && LLD::Ledger->BatchRead(hashBlock, "block", vStates, 1000, true))
+            {
+                /* Loop through all available states. */
+                for(auto& state : vStates)
+                {
+                    try
+                    {
+                        /* Update start every iteration. */
+                        hashBlock = state.GetHash();
+
+                        /* Skip if not in main chain. */
+                        if(!state.IsInMainChain())
+                            continue;
+
+                        /* Check for matching hashes. */
+                        if(state.hashPrevBlock != tStateLast.GetHash())
+                        {
+                            /* Read the correct block from next index. */
+                            if(!LLD::Ledger->ReadBlock(tStateLast.hashNextBlock, state))
+                            {
+                                debug::log(0, FUNCTION, "Terminated scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
+                                return;
+                            }
+
+                            /* Update hashBlock. */
+                            hashBlock = state.GetHash();
+                        }
+
+                        /* Cache the block hash. */
+                        tStateLast = state;
+
+                        /* Track our checkpoint by first transaction in non-processed block. */
+                        LLD::Logical->WriteLastIndex(state.vtx[0].second);
+
+                        /* Handle our transactions now. */
+                        for(const auto& proof : state.vtx)
+                        {
+                            try
+                            {
+                                /* Skip over legacy indexes. */
+                                if(proof.first == TAO::Ledger::TRANSACTION::LEGACY)
+                                    continue;
+
+                                /* Check our map contains transactions. */
+                                if(!mapTransactions.count(proof.second))
+                                {
+                                    /* Read the next batch of inventory. */
+                                    std::vector<TAO::Ledger::Transaction> vList;
+                                    if(LLD::Ledger->BatchRead(proof.second, "tx", vList, 1000, false))
+                                    {
+                                        /* Add all of our values to a map. */
+                                        for(const auto& tBatch : vList)
+                                            mapTransactions[tBatch.GetHash()] = tBatch;
+                                    }
+                                }
+
+                                /* Check that we found it in batch. */
+                                if(!mapTransactions.count(proof.second))
+                                {
+                                    /* Track this warning since this should not happen. */
+                                    debug::warning(FUNCTION, "batch read for ", proof.second.SubString(), " did not find results");
+
+                                    /* Make sure we have the transaction. */
+                                    TAO::Ledger::Transaction tMissing;
+                                    if(LLD::Ledger->ReadTx(proof.second, tMissing))
+                                        mapTransactions[proof.second] = tMissing;
+                                    else
+                                    {
+                                        debug::warning(FUNCTION, "single read for ", proof.second.SubString(), " is missing");
+                                        continue;
+                                    }
+                                }
+
+                                /* Get our transaction now. */
+                                const TAO::Ledger::Transaction& rTX =
+                                    mapTransactions[proof.second];
+
+                                /* Iterate the transaction contracts. */
+                                for(uint32_t nContract = 0; nContract < rTX.Size(); ++nContract)
+                                {
+                                    try
+                                    {
+                                        /* Grab contract reference. */
+                                        const TAO::Operation::Contract& rContract = rTX[nContract];
+
+                                        {
+                                            LOCK(REGISTERED_MUTEX);
+
+                                            /* Loop through registered commands. */
+                                            for(const auto& strCommands : REGISTERED)
+                                            {
+                                                try
+                                                {
+                                                    Commands::Instance(strCommands)->Index(rContract, nContract);
+                                                }
+                                                catch(const std::exception& e)
+                                                {
+                                                    debug::error(FUNCTION, "Exception in ", strCommands, 
+                                                               " index handler: ", e.what());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch(const std::exception& e)
+                                    {
+                                        debug::error(FUNCTION, "Exception processing contract ", nContract, 
+                                                   " in tx ", proof.second.SubString(), ": ", e.what());
+                                    }
+                                }
+
+                                /* Delete processed transaction from memory. */
+                                mapTransactions.erase(proof.second);
+
+                                /* Update the scanned count for meters. */
+                                ++nScannedCount;
+
+                                /* Meter for output. */
+                                if(nScannedCount % 100000 == 0)
+                                {
+                                    /* Get the time it took to rescan. */
+                                    const uint32_t nElapsedSeconds = timer.Elapsed();
+                                    debug::log(0, FUNCTION, "Processed ", nScannedCount, " in ", nElapsedSeconds, " seconds from height ", state.nHeight, " (",
+                                        std::fixed, (double)(nScannedCount / (nElapsedSeconds > 0 ? nElapsedSeconds : 1 )), " tx/s)");
+                                }
+                            }
+                            catch(const std::exception& e)
+                            {
+                                debug::error(FUNCTION, "Exception processing transaction ", proof.second.SubString(), ": ", e.what());
+                                // Continue with next transaction
+                            }
+                        }
+
+                        /* Check if we are ready to terminate. */
+                        if(hashBlock == TAO::Ledger::ChainState::hashBestChain.load())
+                            break;
+                    }
+                    catch(const std::exception& e)
+                    {
+                        debug::error(FUNCTION, "Exception processing block ", state.GetHash().SubString(), ": ", e.what());
+                        // Continue with next block
+                    }
+                }
+            }
+
+            debug::log(0, FUNCTION, "Complated scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
+        }
+        catch(const std::exception& e)
+        {
+            debug::error(FUNCTION, "Critical exception in RefreshEvents: ", e.what());
+        }
+        catch(...)
+        {
+            debug::error(FUNCTION, "Unknown critical exception in RefreshEvents");
+        }
     }
 }

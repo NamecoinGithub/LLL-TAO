@@ -105,66 +105,117 @@ namespace TAO::API
     /* Default destructor. */
     void Indexing::InitializeThread()
     {
-        /* List our current active sessions. */
-        std::map<uint256_t, uint64_t> mapSessions;
-        if(LLD::Sessions->ListAccesses(mapSessions, SESSION_TIMEOUT))
+        try
         {
-            /* Loop through our active sessions and build indexes. */
-            for(const auto& rSession : mapSessions)
+            /* Safety check: Verify database is initialized */
+            if(!LLD::Sessions)
             {
-                /* Build our indexes if we are not in -client mode. */
-                if(!config::fClient.load())
-                    BuildIndexes(rSession.first);
+                debug::error(FUNCTION, "LLD::Sessions not initialized - skipping session indexing");
             }
+            else
+            {
+                /* List our current active sessions. */
+                std::map<uint256_t, uint64_t> mapSessions;
+                
+                try
+                {
+                    if(LLD::Sessions->ListAccesses(mapSessions, SESSION_TIMEOUT))
+                    {
+                        debug::log(1, FUNCTION, "Found ", mapSessions.size(), " active sessions to index");
+                        
+                        /* Loop through our active sessions and build indexes. */
+                        for(const auto& rSession : mapSessions)
+                        {
+                            try
+                            {
+                                /* Build our indexes if we are not in -client mode. */
+                                if(!config::fClient.load())
+                                    BuildIndexes(rSession.first);
+                            }
+                            catch(const std::exception& e)
+                            {
+                                debug::error(FUNCTION, "Exception building indexes for session ", 
+                                            rSession.first.SubString(), ": ", e.what());
+                                // Continue with next session
+                            }
+                        }
+                    }
+                }
+                catch(const std::exception& e)
+                {
+                    debug::error(FUNCTION, "Exception during session access: ", e.what());
+                }
+            }
+        }
+        catch(const std::exception& e)
+        {
+            debug::error(FUNCTION, "Critical exception in InitializeThread startup: ", e.what());
+        }
+        catch(...)
+        {
+            debug::error(FUNCTION, "Unknown critical exception in InitializeThread startup");
         }
 
         /* Main loop controlled by condition variable. */
         std::mutex CONDITION_MUTEX;
         while(!config::fShutdown.load())
         {
-            /* Wait for entries in the queue. */
-            std::unique_lock<std::mutex> CONDITION_LOCK(CONDITION_MUTEX);
-            INITIALIZE_CONDITION.wait_for(CONDITION_LOCK, std::chrono::milliseconds(500),
-            [&]
+            try
             {
+                /* Wait for entries in the queue. */
+                std::unique_lock<std::mutex> CONDITION_LOCK(CONDITION_MUTEX);
+                INITIALIZE_CONDITION.wait_for(CONDITION_LOCK, std::chrono::milliseconds(500),
+                [&]
+                {
+                    /* Check for shutdown. */
+                    if(config::fShutdown.load())
+                        return true;
+
+                    return Indexing::INITIALIZE->size() != 0;
+                });
+
                 /* Check for shutdown. */
                 if(config::fShutdown.load())
-                    return true;
+                    return;
 
-                return Indexing::INITIALIZE->size() != 0;
-            });
+                /* Check that we have items in the queue. */
+                if(Indexing::INITIALIZE->empty())
+                    continue;
 
-            /* Check for shutdown. */
-            if(config::fShutdown.load())
-                return;
+                /* Get the current genesis-id to initialize for. */
+                const uint256_t hashSession = INITIALIZE->front();
+                INITIALIZE->pop();
 
-            /* Check that we have items in the queue. */
-            if(Indexing::INITIALIZE->empty())
-                continue;
+                /* Get our current genesis-id. */
+                const uint256_t hashGenesis =
+                    Authentication::Caller(hashSession);
 
-            /* Get the current genesis-id to initialize for. */
-            const uint256_t hashSession = INITIALIZE->front();
-            INITIALIZE->pop();
+                /* Give us some debug info so we know this has triggered. */
+                debug::log(0, FUNCTION, "Initializing Dynamic Indexing Services for ", hashGenesis.SubString());
 
-            /* Get our current genesis-id. */
-            const uint256_t hashGenesis =
-                Authentication::Caller(hashSession);
+                /* Write our current time to the database. */
+                LLD::Sessions->WriteAccess(hashGenesis, runtime::unifiedtimestamp());
 
-            /* Give us some debug info so we know this has triggered. */
-            debug::log(0, FUNCTION, "Initializing Dynamic Indexing Services for ", hashGenesis.SubString());
+                /* Check that our indexes are built. */
+                BuildIndexes(hashGenesis);
 
-            /* Write our current time to the database. */
-            LLD::Sessions->WriteAccess(hashGenesis, runtime::unifiedtimestamp());
+                /* Set our indexing status to ready now. */
+                Authentication::SetReady(hashSession);
 
-            /* Check that our indexes are built. */
-            BuildIndexes(hashGenesis);
-
-            /* Set our indexing status to ready now. */
-            Authentication::SetReady(hashSession);
-
-            /* Debug output to track our sequences. */
-            debug::log(0, FUNCTION, "Dynamic Indexing Services Initialized for ", hashGenesis.SubString());
-            //debug::log(0, FUNCTION, "Completed building indexes at ", VARIABLE(nLegacySequence), " | ", VARIABLE(nLogicalSequence), " | ", VARIABLE(nLedgerHeight), " | ", VARIABLE(nLogicalHeight), " for genesis=", hashGenesis.SubString());
+                /* Debug output to track our sequences. */
+                debug::log(0, FUNCTION, "Dynamic Indexing Services Initialized for ", hashGenesis.SubString());
+                //debug::log(0, FUNCTION, "Completed building indexes at ", VARIABLE(nLegacySequence), " | ", VARIABLE(nLogicalSequence), " | ", VARIABLE(nLedgerHeight), " | ", VARIABLE(nLogicalHeight), " for genesis=", hashGenesis.SubString());
+            }
+            catch(const std::exception& e)
+            {
+                debug::error(FUNCTION, "Exception in InitializeThread main loop: ", e.what());
+                // Continue running - don't terminate thread
+            }
+            catch(...)
+            {
+                debug::error(FUNCTION, "Unknown exception in InitializeThread main loop");
+                // Continue running - don't terminate thread
+            }
         }
     }
 
