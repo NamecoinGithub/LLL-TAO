@@ -42,6 +42,8 @@ namespace TAO::Ledger
         const uint64_t nExtraNonce,
         const uint256_t& hashRewardAddress)
     {
+        using namespace TemplateConstants;
+        
         /* Validate input nChannel parameter (defense in depth) */
         if(nChannel == 0)
         {
@@ -50,11 +52,52 @@ namespace TAO::Ledger
             return nullptr;
         }
         
-        if(nChannel != 1 && nChannel != 2)
+        if(nChannel != Channels::PRIME && nChannel != Channels::HASH)
         {
             debug::error(FUNCTION, "❌ Invalid input: nChannel = ", nChannel);
             debug::error(FUNCTION, "   Valid channels: 1 (Prime), 2 (Hash)");
             return nullptr;
+        }
+        
+        /* TRY TEMPLATE CACHE FIRST (fast path)
+         * 
+         * Cache strategy:
+         * - Hash channel: Always use cache regardless of nExtraNonce
+         *   (prime_mod check always passes for hash channel, so same template is fine)
+         * 
+         * - Prime channel: Use cache only for initial requests (nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE)
+         *   (prime_mod optimization needs varied templates, so skip cache for retries)
+         */
+        TritiumBlock* pBlock = nullptr;
+        bool bTryCache = (nChannel == Channels::HASH) || (nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE);
+        
+        if (bTryCache)
+        {
+            /* Check if cache is valid before allocating memory */
+            if (IsTemplateCacheFresh(nChannel))
+            {
+                pBlock = new TritiumBlock();
+                if (GetCachedTemplate(nChannel, *pBlock))
+                {
+                    debug::log(1, FUNCTION, "✓ Using cached template (30× faster)");
+                    return pBlock;
+                }
+                
+                /* Cache retrieval failed despite being marked fresh - fall through to create new block */
+                delete pBlock;
+                pBlock = nullptr;
+                debug::log(1, FUNCTION, "Cache retrieval failed - creating fresh template");
+            }
+            else
+            {
+                debug::log(1, FUNCTION, "Cache miss or stale - creating fresh template");
+            }
+        }
+        else
+        {
+            /* Prime channel with nExtraNonce > PRIME_CACHE_MAX_EXTRANONCE: Skip cache for prime_mod variation */
+            debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, 
+                       " > ", PRIME_CACHE_MAX_EXTRANONCE, ") for varied template");
         }
         
         /* All blocks MUST be wallet-signed per Nexus consensus */
@@ -112,7 +155,7 @@ namespace TAO::Ledger
                 return nullptr;
             }
             
-            TritiumBlock* pBlock = new TritiumBlock();
+            pBlock = new TritiumBlock();
             
             /* Initialize block with proper chain context BEFORE CreateBlock()
              * This ensures CreateBlock() has the correct context to populate the producer transaction.

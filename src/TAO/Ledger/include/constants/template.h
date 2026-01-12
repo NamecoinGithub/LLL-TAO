@@ -72,6 +72,21 @@ namespace TemplateConstants
     constexpr uint32_t CACHE_STATISTICS_LOG_LEVEL = 0;  // Always shown
     constexpr uint32_t CACHE_CREATION_LOG_LEVEL = 0;    // Always shown
     
+    /** PRIME_CACHE_MAX_EXTRANONCE
+     *
+     *  Maximum nExtraNonce value for using cached templates on Prime channel.
+     *  
+     *  Prime channel mining uses prime_mod optimization that requires varied templates
+     *  to find blocks matching specific bit patterns. The cache is used when:
+     *    nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE  (i.e., nExtraNonce <= 1)
+     *  
+     *  This allows initial requests to benefit from cache while retry loops
+     *  (with nExtraNonce > 1) get fresh templates with varied merkle roots.
+     *  
+     *  Hash channel always uses cache regardless of nExtraNonce.
+     **/
+    constexpr uint64_t PRIME_CACHE_MAX_EXTRANONCE = 1;
+    
     /** MINING CHANNEL IDENTIFIERS (Protocol constants) **/
     namespace Channels
     {
