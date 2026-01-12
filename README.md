@@ -24,6 +24,14 @@ We use Make to build our project to multiple platforms. Please read out build do
 
 Nexus supports both private solo mining and decentralized public mining pools using the enhanced Falcon Handshake protocol.
 
+### Protocol Documentation
+
+**For developers implementing miners or mining pools:**
+
+- **[STATELESS_MINING_PROTOCOL.md](docs/STATELESS_MINING_PROTOCOL.md)** - Complete protocol specification
+- **[TEMPLATE_FORMAT.md](docs/TEMPLATE_FORMAT.md)** - Wire format details for mining templates
+- **[MIGRATION_GET_ROUND_TO_GETBLOCK.md](docs/MIGRATION_GET_ROUND_TO_GETBLOCK.md)** - Migration guide from legacy protocol
+
 ### Falcon Handshake & Stateless Mining
 
 The LLL-TAO node implements a secure, post-quantum Falcon handshake for miner authentication with the following features:
