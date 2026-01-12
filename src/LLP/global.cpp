@@ -189,6 +189,10 @@ namespace LLP
 
 
         /* API_SERVER instance */
+        /* NOTE: This is the ONLY location where LLP::API_SERVER should be created.
+         * TAO::API::Initialize() (called in main.cpp before LLP::Initialize) only registers
+         * commands and initializes subsystems - it does NOT create the server instance.
+         * Creating the server in multiple locations causes port binding failures. */
         if((config::HasArg("-apiuser") && config::HasArg("-apipassword")) || !config::GetBoolArg("-apiauth", true))
         {
             /* Generate our config object and use correct settings. */
