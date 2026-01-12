@@ -85,27 +85,63 @@ namespace LLP
         namespace Legacy
         {
             /* Block management */
-            constexpr uint16_t SUBMIT_BLOCK        = 0x0001;  // Submit mined block
-            constexpr uint16_t BLOCK_DATA          = 0x0000;  // Block template data
-            constexpr uint16_t BLOCK_HEIGHT        = 0x0002;  // Current block height
-            constexpr uint16_t BLOCK_REWARD        = 0x0004;  // Mining reward amount
-            constexpr uint16_t BLOCK_ACCEPTED      = 0x00C8;  // Block accepted (200)
-            constexpr uint16_t BLOCK_REJECTED      = 0x00C9;  // Block rejected (201)
+            constexpr uint16_t BLOCK_DATA          = 0x0000;  // Block template data (0)
+            constexpr uint16_t SUBMIT_BLOCK        = 0x0001;  // Submit mined block (1)
+            constexpr uint16_t BLOCK_HEIGHT        = 0x0002;  // Current block height (2)
+            constexpr uint16_t SET_CHANNEL         = 0x0003;  // Set mining channel (3)
+            constexpr uint16_t BLOCK_REWARD        = 0x0004;  // Mining reward amount (4)
+            constexpr uint16_t SET_COINBASE        = 0x0005;  // Set coinbase transaction (5)
+            constexpr uint16_t GOOD_BLOCK          = 0x0006;  // Block accepted notification (6)
+            constexpr uint16_t ORPHAN_BLOCK        = 0x0007;  // Block orphaned notification (7)
+            
+            /* Data requests */
+            constexpr uint16_t CHECK_BLOCK         = 0x0040;  // Check block validity (64)
+            constexpr uint16_t SUBSCRIBE           = 0x0041;  // Subscribe to updates (65)
             
             /* Template requests */
             constexpr uint16_t GET_BLOCK           = 0x0081;  // Request block template (129)
             constexpr uint16_t GET_HEIGHT          = 0x0082;  // Request blockchain height (130)
             constexpr uint16_t GET_REWARD          = 0x0083;  // Request mining reward (131)
+            
+            /* Server commands */
+            constexpr uint16_t CLEAR_MAP           = 0x0084;  // Clear block map (132)
             constexpr uint16_t GET_ROUND           = 0x0085;  // Request mining round info (133)
             
-            /* Round management */
+            /* Response packets */
+            constexpr uint16_t BLOCK_ACCEPTED      = 0x00C8;  // Block accepted (200)
+            constexpr uint16_t BLOCK_REJECTED      = 0x00C9;  // Block rejected (201)
+            
+            /* Validation responses */
+            constexpr uint16_t COINBASE_SET        = 0x00CA;  // Coinbase set successfully (202)
+            constexpr uint16_t COINBASE_FAIL       = 0x00CB;  // Coinbase set failed (203)
+            constexpr uint16_t CHANNEL_ACK         = 0x00CE;  // Channel acknowledged (206)
+            
+            /* Round validations */
             constexpr uint16_t NEW_ROUND           = 0x00CC;  // New mining round started (204)
             constexpr uint16_t OLD_ROUND           = 0x00CD;  // Mining round expired (205)
+            
+            /* Authentication packets */
+            constexpr uint16_t MINER_AUTH_INIT      = 0x00CF;  // Miner auth init (207)
+            constexpr uint16_t MINER_AUTH_CHALLENGE = 0x00D0;  // Auth challenge (208)
+            constexpr uint16_t MINER_AUTH_RESPONSE  = 0x00D1;  // Auth response (209)
+            constexpr uint16_t MINER_AUTH_RESULT    = 0x00D2;  // Auth result (210)
+            
+            /* Session management */
+            constexpr uint16_t SESSION_START        = 0x00D3;  // Session start (211)
+            constexpr uint16_t SESSION_KEEPALIVE    = 0x00D4;  // Session keepalive (212)
+            
+            /* Reward address binding */
+            constexpr uint16_t MINER_SET_REWARD     = 0x00D5;  // Set reward address (213)
+            constexpr uint16_t MINER_REWARD_RESULT  = 0x00D6;  // Reward result (214)
             
             /* Push notifications */
             constexpr uint16_t MINER_READY         = 0x00D8;  // Miner ready for updates (216)
             constexpr uint16_t PRIME_BLOCK_AVAILABLE = 0x00D9; // Prime block available (217)
             constexpr uint16_t HASH_BLOCK_AVAILABLE  = 0x00DA; // Hash block available (218)
+            
+            /* Generic */
+            constexpr uint16_t PING                = 0x00FD;  // Ping (253)
+            constexpr uint16_t CLOSE               = 0x00FE;  // Close connection (254)
         }
 
         /** Tritium Node Protocol (0x1000 - 0x1FFF)
@@ -272,21 +308,41 @@ namespace LLP
         /* Legacy protocol (0x0000 - 0x0FFF) */
         if (nOpcode <= 0x0FFF) {
             switch(nOpcode) {
-                case Opcodes::Legacy::SUBMIT_BLOCK:        return "SUBMIT_BLOCK";
                 case Opcodes::Legacy::BLOCK_DATA:          return "BLOCK_DATA";
+                case Opcodes::Legacy::SUBMIT_BLOCK:        return "SUBMIT_BLOCK";
                 case Opcodes::Legacy::BLOCK_HEIGHT:        return "BLOCK_HEIGHT";
+                case Opcodes::Legacy::SET_CHANNEL:         return "SET_CHANNEL";
                 case Opcodes::Legacy::BLOCK_REWARD:        return "BLOCK_REWARD";
+                case Opcodes::Legacy::SET_COINBASE:        return "SET_COINBASE";
+                case Opcodes::Legacy::GOOD_BLOCK:          return "GOOD_BLOCK";
+                case Opcodes::Legacy::ORPHAN_BLOCK:        return "ORPHAN_BLOCK";
+                case Opcodes::Legacy::CHECK_BLOCK:         return "CHECK_BLOCK";
+                case Opcodes::Legacy::SUBSCRIBE:           return "SUBSCRIBE";
                 case Opcodes::Legacy::GET_BLOCK:           return "GET_BLOCK";
                 case Opcodes::Legacy::GET_HEIGHT:          return "GET_HEIGHT";
                 case Opcodes::Legacy::GET_REWARD:          return "GET_REWARD";
+                case Opcodes::Legacy::CLEAR_MAP:           return "CLEAR_MAP";
                 case Opcodes::Legacy::GET_ROUND:           return "GET_ROUND";
                 case Opcodes::Legacy::BLOCK_ACCEPTED:      return "BLOCK_ACCEPTED";
                 case Opcodes::Legacy::BLOCK_REJECTED:      return "BLOCK_REJECTED";
+                case Opcodes::Legacy::COINBASE_SET:        return "COINBASE_SET";
+                case Opcodes::Legacy::COINBASE_FAIL:       return "COINBASE_FAIL";
                 case Opcodes::Legacy::NEW_ROUND:           return "NEW_ROUND";
                 case Opcodes::Legacy::OLD_ROUND:           return "OLD_ROUND";
+                case Opcodes::Legacy::CHANNEL_ACK:         return "CHANNEL_ACK";
+                case Opcodes::Legacy::MINER_AUTH_INIT:     return "MINER_AUTH_INIT";
+                case Opcodes::Legacy::MINER_AUTH_CHALLENGE: return "MINER_AUTH_CHALLENGE";
+                case Opcodes::Legacy::MINER_AUTH_RESPONSE: return "MINER_AUTH_RESPONSE";
+                case Opcodes::Legacy::MINER_AUTH_RESULT:   return "MINER_AUTH_RESULT";
+                case Opcodes::Legacy::SESSION_START:       return "SESSION_START";
+                case Opcodes::Legacy::SESSION_KEEPALIVE:   return "SESSION_KEEPALIVE";
+                case Opcodes::Legacy::MINER_SET_REWARD:    return "MINER_SET_REWARD";
+                case Opcodes::Legacy::MINER_REWARD_RESULT: return "MINER_REWARD_RESULT";
                 case Opcodes::Legacy::MINER_READY:         return "MINER_READY";
                 case Opcodes::Legacy::PRIME_BLOCK_AVAILABLE: return "PRIME_BLOCK_AVAILABLE";
                 case Opcodes::Legacy::HASH_BLOCK_AVAILABLE:  return "HASH_BLOCK_AVAILABLE";
+                case Opcodes::Legacy::PING:                return "PING";
+                case Opcodes::Legacy::CLOSE:               return "CLOSE";
                 default: return "LEGACY_UNKNOWN";
             }
         }

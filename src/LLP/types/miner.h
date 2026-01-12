@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #define NEXUS_LLP_TYPES_MINER_H
 
 #include <LLP/templates/connection.h>
+#include <LLP/include/llp_opcodes.h>
 #include <TAO/Ledger/types/block.h>
 #include <Legacy/types/coinbase.h>
 #include <atomic>
@@ -63,236 +64,45 @@ namespace LLP
      **/
     class Miner : public Connection
     {
-        /* Protocol messages based on Default Packet. */
-        enum : Packet::message_t
-        {
-            /** DATA PACKETS **/
-            BLOCK_DATA     = 0,
-            SUBMIT_BLOCK   = 1,
-            BLOCK_HEIGHT   = 2,
-            SET_CHANNEL    = 3,
-            BLOCK_REWARD   = 4,
-            SET_COINBASE   = 5,
-            GOOD_BLOCK     = 6,
-            ORPHAN_BLOCK   = 7,
-
-
-            /** DATA REQUESTS **/
-            CHECK_BLOCK    = 64,
-            SUBSCRIBE      = 65,
-
-
-            /** REQUEST PACKETS **/
-            GET_BLOCK      = 129,
-            GET_HEIGHT     = 130,
-            GET_REWARD     = 131,
-
-
-            /** SERVER COMMANDS **/
-            CLEAR_MAP      = 132,
-            
-            /** GET_ROUND (133) - Multi-Channel Height Information
-             *
-             *  Returns unified blockchain height + per-channel heights for staleness detection.
-             *
-             *  NEXUS MULTI-CHANNEL CONSENSUS ARCHITECTURE:
-             *  -------------------------------------------
-             *  Nexus uses three independent mining channels that compete on the same blockchain:
-             *  - Prime channel (1): CPU mining via prime number cluster discovery
-             *  - Hash channel (2):  GPU/FPGA mining via SHA3 hashing  
-             *  - Stake channel (0): Proof-of-Stake (trust-based)
-             *
-             *  UNIFIED vs CHANNEL HEIGHTS:
-             *  ---------------------------
-             *  • Unified Height (nHeight): Increments for EVERY block regardless of channel
-             *    Example: Height 6535193 (Hash) → 6535194 (Prime) → 6535195 (Hash) → 6535196 (Stake)
-             *
-             *  • Channel Height (nChannelHeight): Only increments when THAT SPECIFIC CHANNEL mines a block
-             *    Example at unified height 6535196:
-             *      - Prime channel height:  2165442 (last Prime block)
-             *      - Hash channel height:   4165000 (last Hash block)
-             *      - Stake channel height:  235000  (last Stake block)
-             *
-             *  TEMPLATE STALENESS DETECTION:
-             *  -----------------------------
-             *  Mining templates should only be discarded when THEIR SPECIFIC CHANNEL advances,
-             *  not when other channels mine blocks. This prevents ~40% wasted mining work.
-             *
-             *  RESPONSE FORMAT (PR #134 - Enhanced GET_ROUND):
-             *  ------------------------------------------------
-             *  Total: 16 bytes
-             *    [0-3]   uint32_t nUnifiedHeight      - Current blockchain height (all channels)
-             *    [4-7]   uint32_t nPrimeChannelHeight - Last Prime channel block height
-             *    [8-11]  uint32_t nHashChannelHeight  - Last Hash channel block height
-             *    [12-15] uint32_t nStakeChannelHeight - Last Stake channel block height
-             *
-             *  BACKWARD COMPATIBILITY:
-             *  -----------------------
-             *  Old miners (pre-PR #134): Read 4 bytes (unified height), ignore remaining 12 bytes ✅
-             *  New miners (PR #134+):    Read all 16 bytes for enhanced staleness detection ✅
-             *  TCP stream protocol allows extra bytes to be ignored by older clients ✅
-             *
-             *  USAGE:
-             *  ------
-             *  Miners poll GET_ROUND every 5-10 seconds to check for new blocks:
-             *  - If unified height changes: Always fetch new template (any channel advanced)
-             *  - If only other channels changed: Keep mining current template (efficiency!)
-             *  - If own channel changed: Discard template, fetch new one (correctness!)
-             *
-             *  EFFICIENCY IMPACT:
-             *  ------------------
-             *  Before: Templates marked stale when ANY channel mines → ~40% wasted work
-             *  After:  Templates marked stale only when SAME channel mines → <5% wasted work
-             **/
-            GET_ROUND      = 133,
-
-            /** MINER_READY (216 / 0xd8) - Subscribe to Push Notifications
-             *
-             *  Miner → Node: Subscribe to channel-specific push notifications.
-             *  
-             *  REPLACES: Polling-based GET_ROUND (still supported for backward compatibility).
-             *  
-             *  PROTOCOL FLOW:
-             *  1. Miner authenticates via MINER_AUTH_INIT/RESPONSE
-             *  2. Miner sets channel via SET_CHANNEL (1=Prime, 2=Hash)
-             *  3. Miner sends MINER_READY (header-only, no payload)
-             *  4. Node validates authentication + channel
-             *  5. Node sends immediate PRIME_BLOCK_AVAILABLE or HASH_BLOCK_AVAILABLE
-             *  6. Node pushes notifications when miner's channel advances
-             *  
-             *  PAYLOAD: None (header-only packet)
-             *  
-             *  RESPONSE:
-             *  - Success: Immediate PRIME_BLOCK_AVAILABLE or HASH_BLOCK_AVAILABLE
-             *  - Error: Connection closed with error message
-             *  
-             *  REQUIREMENTS:
-             *  - Authentication required (fAuthenticated must be true)
-             *  - Channel must be 1 (Prime) or 2 (Hash)
-             *  - Stake channel (0) is REJECTED (not minable)
-             *  
-             *  BENEFITS vs GET_ROUND POLLING:
-             *  - Instant notification (<10ms vs 0-5s polling delay)
-             *  - 50% less network traffic (server-side filtering)
-             *  - No rate limiting conflicts
-             *  - Reduced node CPU usage (event-driven vs continuous polling)
-             *  
-             *  CHANNEL ISOLATION:
-             *  - Prime miners receive ONLY Prime notifications
-             *  - Hash miners receive ONLY Hash notifications
-             *  - Server filters before sending (no client-side filtering needed)
-             *  
-             *  BACKWARD COMPATIBILITY:
-             *  - Legacy miners continue using GET_ROUND polling
-             *  - Both protocols coexist on same node
-             *  - No breaking changes to existing miners
-             **/
-            MINER_READY    = 216,
-
-
-            /** RESPONSE PACKETS **/
-            BLOCK_ACCEPTED = 200,
-            BLOCK_REJECTED = 201,
-
-
-            /** VALIDATION RESPONSES **/
-            COINBASE_SET   = 202,
-            COINBASE_FAIL  = 203,
-            CHANNEL_ACK    = 206,
-
-            /** ROUND VALIDATIONS. **/
-            NEW_ROUND      = 204,
-            OLD_ROUND      = 205,
-
-            /** AUTHENTICATION PACKETS **/
-            MINER_AUTH_INIT      = 207,  // 0xcf - miner -> node: Genesis + Falcon pubkey + miner ID
-            MINER_AUTH_CHALLENGE = 208,  // 0xd0 - node -> miner: Random nonce challenge
-            MINER_AUTH_RESPONSE  = 209,  // 0xd1 - miner -> node: Falcon signature over nonce
-            MINER_AUTH_RESULT    = 210,  // 0xd2 - node -> miner: Auth success/failure + session ID
-
-            /** SESSION MANAGEMENT (handled via Node Cache) **/
-            // Note: Keep-alive is handled automatically via the node's connection cache
-            // SESSION_START (211) and SESSION_KEEPALIVE (212) reserved but not actively used
-            SESSION_START        = 211,  // session start request (not fully implemented yet)
-            SESSION_KEEPALIVE    = 212,  // session keepalive ping (not fully implemented yet)
-
-            /** REWARD ADDRESS BINDING (encrypted with ChaCha20 after Falcon auth) **/
-            MINER_SET_REWARD     = 213,  // 0xd5 - miner -> node: Encrypted reward address (32 bytes)
-            MINER_REWARD_RESULT  = 214,  // 0xd6 - node -> miner: Encrypted validation result
-
-            /** PRIME_BLOCK_AVAILABLE (217 / 0xd9) - Prime Block Notification
-             *
-             *  Node → Miner: New Prime block has been validated (channel 1 only).
-             *  
-             *  SERVER-INITIATED: Sent automatically when a Prime block is added to blockchain.
-             *  
-             *  CHANNEL FILTERING:
-             *  - Only sent to miners subscribed to Prime channel (1)
-             *  - Hash miners (channel 2) never receive this
-             *  - Server-side filtering ensures no wasted bandwidth
-             *  
-             *  PAYLOAD FORMAT (12 bytes, big-endian):
-             *    [0-3]   uint32_t nUnifiedHeight   - Current blockchain height (all channels)
-             *    [4-7]   uint32_t nPrimeHeight     - Prime channel height
-             *    [8-11]  uint32_t nDifficulty      - Current Prime difficulty
-             *  
-             *  TRIGGER:
-             *  - Called from BlockState::SetBest() after Prime block indexing
-             *  - Only when GetChannel() returns 1 (Prime)
-             *  
-             *  MINER ACTION:
-             *  - Detect template staleness (if mining)
-             *  - Request new template via GET_BLOCK
-             *  - Compare heights to avoid unnecessary refreshes
-             *  
-             *  PERFORMANCE:
-             *  - <10ms notification latency
-             *  - No polling overhead
-             *  - 50% less traffic vs broadcast to all miners
-             **/
-            PRIME_BLOCK_AVAILABLE = 217,  // 0xd9 - node -> miner: New Prime block available (channel 1 only)
-
-            /** HASH_BLOCK_AVAILABLE (218 / 0xda) - Hash Block Notification
-             *
-             *  Node → Miner: New Hash block has been validated (channel 2 only).
-             *  
-             *  SERVER-INITIATED: Sent automatically when a Hash block is added to blockchain.
-             *  
-             *  CHANNEL FILTERING:
-             *  - Only sent to miners subscribed to Hash channel (2)
-             *  - Prime miners (channel 1) never receive this
-             *  - Server-side filtering ensures no wasted bandwidth
-             *  
-             *  PAYLOAD FORMAT (12 bytes, big-endian):
-             *    [0-3]   uint32_t nUnifiedHeight   - Current blockchain height (all channels)
-             *    [4-7]   uint32_t nHashHeight      - Hash channel height
-             *    [8-11]  uint32_t nDifficulty      - Current Hash difficulty
-             *  
-             *  TRIGGER:
-             *  - Called from BlockState::SetBest() after Hash block indexing
-             *  - Only when GetChannel() returns 2 (Hash)
-             *  
-             *  MINER ACTION:
-             *  - Detect template staleness (if mining)
-             *  - Request new template via GET_BLOCK
-             *  - Compare heights to avoid unnecessary refreshes
-             *  
-             *  PERFORMANCE:
-             *  - <10ms notification latency
-             *  - No polling overhead
-             *  - 50% less traffic vs broadcast to all miners
-             *  
-             *  NOTE ON STAKE BLOCKS:
-             *  - Stake blocks (channel 0) do NOT trigger any notifications
-             *  - Stake uses Proof-of-Stake, not stateless mining
-             *  - No STAKE_BLOCK_AVAILABLE opcode exists (not needed)
-             **/
-            HASH_BLOCK_AVAILABLE  = 218,  // 0xda - node -> miner: New Hash block available (channel 2 only)
-
-            /** GENERIC **/
-            PING           = 253,
-            CLOSE          = 254
-        };
+    public:
+        /* Protocol message opcodes from centralized LLP Opcodes Registry.
+         * For documentation on each opcode, see LLP/include/llp_opcodes.h
+         */
+        static constexpr auto BLOCK_DATA             = Opcodes::Legacy::BLOCK_DATA;
+        static constexpr auto SUBMIT_BLOCK           = Opcodes::Legacy::SUBMIT_BLOCK;
+        static constexpr auto BLOCK_HEIGHT           = Opcodes::Legacy::BLOCK_HEIGHT;
+        static constexpr auto SET_CHANNEL            = Opcodes::Legacy::SET_CHANNEL;
+        static constexpr auto BLOCK_REWARD           = Opcodes::Legacy::BLOCK_REWARD;
+        static constexpr auto SET_COINBASE           = Opcodes::Legacy::SET_COINBASE;
+        static constexpr auto GOOD_BLOCK             = Opcodes::Legacy::GOOD_BLOCK;
+        static constexpr auto ORPHAN_BLOCK           = Opcodes::Legacy::ORPHAN_BLOCK;
+        static constexpr auto CHECK_BLOCK            = Opcodes::Legacy::CHECK_BLOCK;
+        static constexpr auto SUBSCRIBE              = Opcodes::Legacy::SUBSCRIBE;
+        static constexpr auto GET_BLOCK              = Opcodes::Legacy::GET_BLOCK;
+        static constexpr auto GET_HEIGHT             = Opcodes::Legacy::GET_HEIGHT;
+        static constexpr auto GET_REWARD             = Opcodes::Legacy::GET_REWARD;
+        static constexpr auto CLEAR_MAP              = Opcodes::Legacy::CLEAR_MAP;
+        static constexpr auto GET_ROUND              = Opcodes::Legacy::GET_ROUND;
+        static constexpr auto BLOCK_ACCEPTED         = Opcodes::Legacy::BLOCK_ACCEPTED;
+        static constexpr auto BLOCK_REJECTED         = Opcodes::Legacy::BLOCK_REJECTED;
+        static constexpr auto COINBASE_SET           = Opcodes::Legacy::COINBASE_SET;
+        static constexpr auto COINBASE_FAIL          = Opcodes::Legacy::COINBASE_FAIL;
+        static constexpr auto NEW_ROUND              = Opcodes::Legacy::NEW_ROUND;
+        static constexpr auto OLD_ROUND              = Opcodes::Legacy::OLD_ROUND;
+        static constexpr auto CHANNEL_ACK            = Opcodes::Legacy::CHANNEL_ACK;
+        static constexpr auto MINER_AUTH_INIT        = Opcodes::Legacy::MINER_AUTH_INIT;
+        static constexpr auto MINER_AUTH_CHALLENGE   = Opcodes::Legacy::MINER_AUTH_CHALLENGE;
+        static constexpr auto MINER_AUTH_RESPONSE    = Opcodes::Legacy::MINER_AUTH_RESPONSE;
+        static constexpr auto MINER_AUTH_RESULT      = Opcodes::Legacy::MINER_AUTH_RESULT;
+        static constexpr auto SESSION_START          = Opcodes::Legacy::SESSION_START;
+        static constexpr auto SESSION_KEEPALIVE      = Opcodes::Legacy::SESSION_KEEPALIVE;
+        static constexpr auto MINER_SET_REWARD       = Opcodes::Legacy::MINER_SET_REWARD;
+        static constexpr auto MINER_REWARD_RESULT    = Opcodes::Legacy::MINER_REWARD_RESULT;
+        static constexpr auto MINER_READY            = Opcodes::Legacy::MINER_READY;
+        static constexpr auto PRIME_BLOCK_AVAILABLE  = Opcodes::Legacy::PRIME_BLOCK_AVAILABLE;
+        static constexpr auto HASH_BLOCK_AVAILABLE   = Opcodes::Legacy::HASH_BLOCK_AVAILABLE;
+        static constexpr auto PING                   = Opcodes::Legacy::PING;
+        static constexpr auto CLOSE                  = Opcodes::Legacy::CLOSE;
 
     private:
 
