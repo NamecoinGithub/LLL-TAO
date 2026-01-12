@@ -38,6 +38,13 @@ namespace TAO
         const uint32_t TESTNET_TRANSACTION_CURRENT_VERSION = 5;
 
 
+        /* Minimum transaction version supported during transition period.
+         * This allows backward compatibility with older network versions (v3/v4)
+         * while the node code is prepared for v5 hardfork.
+         * TODO: After v5 hardfork fully activated, consider removing this constant. */
+        const uint32_t TRANSACTION_MINIMUM_SUPPORTED_VERSION = 3;
+
+
          /* Activated test network at timestamp. */
         const uint32_t NEXUS_TESTNET_TIMELOCK = 1421250000;        //--- Nexus Testnet Activation:     1/14/2015 08:38:00 GMT - 7
 
@@ -262,6 +269,24 @@ namespace TAO
             /* Version is inactive if before starting timestamp */
             if(nTimestamp < nStart)
                 return false;
+
+            /* DUAL-VERSION SUPPORT FOR TRANSITION PERIOD:
+             * Accept both Version 3, 4, and 5 (current) transactions to allow:
+             * - Node to sync with current v3 network (for testing/development)
+             * - Node to accept v4 transactions (post-hardfork)
+             * - Node to be ready for v5 hardfork activation (when deployed)
+             * 
+             * This bypasses the 1-hour grace period check for v3 and v4, allowing
+             * the node to work with the existing network while being prepared for
+             * upcoming hardforks.
+             * 
+             * TODO: After v5 hardfork is fully activated on all networks, 
+             * restore the original 1-hour grace period validation. */
+            if(nVersion >= TRANSACTION_MINIMUM_SUPPORTED_VERSION && nVersion < nCurrent)
+            {
+                /* Accept v3 and v4 without strict timelock enforcement during transition */
+                return true;
+            }
 
             /* Version is inactive if more than one hour after ending timestamp */
             if((nVersion < nCurrent) && (nTimestamp - 3600) > nEnd)
