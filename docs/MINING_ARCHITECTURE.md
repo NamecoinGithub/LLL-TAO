@@ -281,3 +281,15 @@ ProcessPacket : MinerLLP: SUBMIT_BLOCK sign block failed
 Block Rejected by Nexus Network.
 ```
 
+---
+
+## Related Documentation
+
+For complete protocol specifications and implementation details:
+
+- **[STATELESS_MINING_PROTOCOL.md](STATELESS_MINING_PROTOCOL.md)** - Complete protocol specification with all phases
+- **[TEMPLATE_FORMAT.md](TEMPLATE_FORMAT.md)** - Detailed 216-byte template wire format
+- **[PUSH_NOTIFICATION_PROTOCOL.md](PUSH_NOTIFICATION_PROTOCOL.md)** - Push notification implementation
+- **[MIGRATION_GET_ROUND_TO_GETBLOCK.md](MIGRATION_GET_ROUND_TO_GETBLOCK.md)** - Migration guide from legacy protocol
+- **[archive/GET_ROUND_PROTOCOL.md](archive/GET_ROUND_PROTOCOL.md)** - Legacy protocol (deprecated)
+
