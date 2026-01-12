@@ -755,7 +755,7 @@ namespace TAO
         uint1024_t ClientBlock::SignatureHash() const
         {
             /* Signature hash for version 7+ blocks. */
-            if(State::UsesModernRetarget(nVersion))
+            if(State::UsesModernSignatureHash(nVersion))
             {
                 /* Create a data stream to get the hash. */
                 DataStream ss(SER_GETHASH, LLP::PROTOCOL_VERSION);

@@ -214,6 +214,24 @@ TEST_CASE("State Version Helpers", "[version][state][retarget]")
         REQUIRE(State::UsesModernRetarget(9) == true);
     }
 
+    SECTION("UsesTritiumCoinstake() identifies v7+ states")
+    {
+        REQUIRE(State::UsesTritiumCoinstake(5) == false);
+        REQUIRE(State::UsesTritiumCoinstake(6) == false);
+        REQUIRE(State::UsesTritiumCoinstake(7) == true);
+        REQUIRE(State::UsesTritiumCoinstake(8) == true);
+        REQUIRE(State::UsesTritiumCoinstake(9) == true);
+    }
+
+    SECTION("UsesModernSignatureHash() identifies v7+ states")
+    {
+        REQUIRE(State::UsesModernSignatureHash(5) == false);
+        REQUIRE(State::UsesModernSignatureHash(6) == false);
+        REQUIRE(State::UsesModernSignatureHash(7) == true);
+        REQUIRE(State::UsesModernSignatureHash(8) == true);
+        REQUIRE(State::UsesModernSignatureHash(9) == true);
+    }
+
     SECTION("UsesV7StakeRules() identifies v7-v8 states")
     {
         REQUIRE(State::UsesV7StakeRules(6) == false);

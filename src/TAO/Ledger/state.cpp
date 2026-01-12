@@ -1489,8 +1489,8 @@ namespace TAO
                     uint64_t nTrust = 0;
                     uint64_t nStake = 0;
 
-                    /* Handle for version 7+ blocks. */
-                    if(State::UsesModernRetarget(nVersion))
+                    /* Handle for version 7+ blocks (Tritium coinstake). */
+                    if(State::UsesTritiumCoinstake(nVersion))
                     {
                         /* Get the producer. */
                         Transaction tx;
@@ -1656,7 +1656,7 @@ namespace TAO
         uint1024_t BlockState::SignatureHash() const
         {
             /* Signature hash for version 7+ blocks. */
-            if(State::UsesModernRetarget(nVersion))
+            if(State::UsesModernSignatureHash(nVersion))
             {
                 /* Create a data stream to get the hash. */
                 DataStream ss(SER_GETHASH, LLP::PROTOCOL_VERSION);
@@ -1683,7 +1683,7 @@ namespace TAO
         uint1024_t BlockState::StakeHash() const
         {
             /* Version 7 or later stake block should have Tritium coinstake producer, stored as last tx in vtx */
-            if(State::UsesModernRetarget(nVersion) && vtx.back().first == TRANSACTION::TRITIUM)
+            if(State::UsesTritiumCoinstake(nVersion) && vtx.back().first == TRANSACTION::TRITIUM)
             {
                 /* Get the tritium transaction from the database*/
                 TAO::Ledger::Transaction tx;
@@ -1698,7 +1698,7 @@ namespace TAO
             }
 
             /* pre-version 7 should have Legacy coinstake stored as vtx[0] */
-            else if(!State::UsesModernRetarget(nVersion) && vtx[0].first == TRANSACTION::LEGACY)
+            else if(!State::UsesTritiumCoinstake(nVersion) && vtx[0].first == TRANSACTION::LEGACY)
             {
                 /* Get the legacy transaction from the database. */
                 Legacy::Transaction tx;

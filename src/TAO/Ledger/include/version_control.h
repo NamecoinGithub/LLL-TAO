@@ -204,26 +204,53 @@ namespace Versions
 
     /** State Version Critical Boundaries
      *
-     *  State versions control retarget algorithm behavior and stake rules.
-     *  Replaces ~50 hardcoded "7" checks in retarget.cpp and stake.cpp.
+     *  State versions control multiple independent features that changed at different versions.
+     *  Each feature has its own semantic helper to allow independent evolution.
      *
      *  CRITICAL BOUNDARIES:
      *  - v5: Baseline Tritium state version
-     *  - v7: Modern retarget algorithm activated (reduced difficulty oscillation)
+     *  - v7: Multiple features activated (retarget, coinstake, signature hash)
      *  - v9: New stake rules activated (Proof-of-Stake consensus)
+     *
+     *  IMPORTANT: Version 7 introduced multiple independent features. Each has its own
+     *  helper function to allow future versions to change features independently.
      **/
     namespace State
     {
         constexpr uint32_t BASELINE_TRITIUM = 5;
         constexpr uint32_t MODERN_RETARGET  = 7;  // Key boundary: retarget algorithm change
+        constexpr uint32_t TRITIUM_COINSTAKE = 7; // Key boundary: Tritium coinstake format
+        constexpr uint32_t MODERN_SIGNATURE = 7;  // Key boundary: modern signature hash
         constexpr uint32_t NEW_STAKE_RULES  = 9;  // Key boundary: PoS activation
 
-        /** State version helpers (replaces scattered >= 7 checks) **/
+        /** Difficulty retarget algorithm version check
+         *  Controls which difficulty retarget algorithm is used.
+         *  Can be changed independently of other v7 features in future versions.
+         **/
         inline bool UsesModernRetarget(uint32_t nVersion)
         {
             return nVersion >= MODERN_RETARGET;
         }
 
+        /** Coinstake format version check
+         *  Controls whether block uses Tritium coinstake (v7+) or Legacy coinstake (pre-v7).
+         *  Can be changed independently of other v7 features in future versions.
+         **/
+        inline bool UsesTritiumCoinstake(uint32_t nVersion)
+        {
+            return nVersion >= TRITIUM_COINSTAKE;
+        }
+
+        /** Signature hash format version check
+         *  Controls which signature hash algorithm is used.
+         *  Can be changed independently of other v7 features in future versions.
+         **/
+        inline bool UsesModernSignatureHash(uint32_t nVersion)
+        {
+            return nVersion >= MODERN_SIGNATURE;
+        }
+
+        /** Stake rules version checks **/
         inline bool UsesV7StakeRules(uint32_t nVersion)
         {
             return nVersion >= MODERN_RETARGET && nVersion < NEW_STAKE_RULES;
