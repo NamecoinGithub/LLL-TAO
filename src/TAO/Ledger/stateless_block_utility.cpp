@@ -73,23 +73,30 @@ namespace TAO::Ledger
         
         if (bTryCache)
         {
-            pBlock = new TritiumBlock();
-            if (GetCachedTemplate(nChannel, *pBlock))
+            /* Check if cache is valid before allocating memory */
+            if (IsTemplateCacheFresh(nChannel))
             {
-                debug::log(1, FUNCTION, "✓ Using cached template (30× faster)");
-                return pBlock;
+                pBlock = new TritiumBlock();
+                if (GetCachedTemplate(nChannel, *pBlock))
+                {
+                    debug::log(1, FUNCTION, "✓ Using cached template (30× faster)");
+                    return pBlock;
+                }
+                
+                /* Cache retrieval failed despite being marked fresh - fall through to create new block */
+                delete pBlock;
+                pBlock = nullptr;
+                debug::log(1, FUNCTION, "Cache retrieval failed - creating fresh template");
             }
-            
-            /* Cache miss - will create fresh template below */
-            delete pBlock;
-            pBlock = nullptr;
-            debug::log(1, FUNCTION, "Cache miss - creating fresh template");
+            else
+            {
+                debug::log(1, FUNCTION, "Cache miss or stale - creating fresh template");
+            }
         }
         else
         {
             /* Prime channel with nExtraNonce > PRIME_CACHE_MAX_EXTRANONCE: Skip cache for prime_mod variation */
-            debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, 
-                       ") - creating varied template");
+            debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, ") for varied template");
         }
         
         /* All blocks MUST be wallet-signed per Nexus consensus */

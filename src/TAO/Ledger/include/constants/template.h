@@ -75,8 +75,15 @@ namespace TemplateConstants
     /** PRIME_CACHE_MAX_EXTRANONCE
      *
      *  Maximum nExtraNonce value for using cached templates on Prime channel.
-     *  Prime channel mining uses prime_mod optimization that requires varied templates.
-     *  Cache is used for initial requests (nExtraNonce <= 1), fresh blocks for retries.
+     *  
+     *  Prime channel mining uses prime_mod optimization that requires varied templates
+     *  to find blocks matching specific bit patterns. The cache is used when:
+     *    nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE  (i.e., nExtraNonce <= 1)
+     *  
+     *  This allows initial requests to benefit from cache while retry loops
+     *  (with nExtraNonce > 1) get fresh templates with varied merkle roots.
+     *  
+     *  Hash channel always uses cache regardless of nExtraNonce.
      **/
     constexpr uint64_t PRIME_CACHE_MAX_EXTRANONCE = 1;
     
