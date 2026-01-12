@@ -42,8 +42,6 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
-        /* Use version control constants for cleaner code. */
-        using namespace Versions;
 
         /** The default constructor. Sets block state to Null. **/
         Block::Block()
@@ -305,7 +303,7 @@ namespace TAO
         uint1024_t Block::GetHash() const
         {
             /* Pre-Version 5 rule of being block hash (legacy PoW). */
-            if(Block::IsLegacyPoW(nVersion))
+            if(TAO::Ledger::Versions::Block::IsLegacyPoW(nVersion))
                 return ProofHash();
 
             return SignatureHash();
@@ -513,7 +511,7 @@ namespace TAO
                 }
                 
                 /* Check prime minimum origins for Tritium blocks. */
-                if(Block::IsTritium(nVersion) && ProofHash() < bnPrimeMinOrigins.getuint1024())
+                if(TAO::Ledger::Versions::Block::IsTritium(nVersion) && ProofHash() < bnPrimeMinOrigins.getuint1024())
                 {
                     if(fTrainingWheels)
                     {
