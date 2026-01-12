@@ -42,6 +42,8 @@ namespace TAO::Ledger
         const uint64_t nExtraNonce,
         const uint256_t& hashRewardAddress)
     {
+        using namespace TemplateConstants;
+        
         /* Validate input nChannel parameter (defense in depth) */
         if(nChannel == 0)
         {
@@ -50,7 +52,7 @@ namespace TAO::Ledger
             return nullptr;
         }
         
-        if(nChannel != 1 && nChannel != 2)
+        if(nChannel != Channels::PRIME && nChannel != Channels::HASH)
         {
             debug::error(FUNCTION, "❌ Invalid input: nChannel = ", nChannel);
             debug::error(FUNCTION, "   Valid channels: 1 (Prime), 2 (Hash)");
@@ -60,14 +62,14 @@ namespace TAO::Ledger
         /* TRY TEMPLATE CACHE FIRST (fast path)
          * 
          * Cache strategy:
-         * - Hash channel (2): Always use cache regardless of nExtraNonce
+         * - Hash channel: Always use cache regardless of nExtraNonce
          *   (prime_mod check always passes for hash channel, so same template is fine)
          * 
-         * - Prime channel (1): Use cache only for initial requests (nExtraNonce <= 1)
+         * - Prime channel: Use cache only for initial requests (nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE)
          *   (prime_mod optimization needs varied templates, so skip cache for retries)
          */
         TritiumBlock* pBlock = nullptr;
-        bool bTryCache = (nChannel == 2) || (nExtraNonce <= 1);
+        bool bTryCache = (nChannel == Channels::HASH) || (nExtraNonce <= PRIME_CACHE_MAX_EXTRANONCE);
         
         if (bTryCache)
         {
@@ -85,7 +87,7 @@ namespace TAO::Ledger
         }
         else
         {
-            /* Prime channel with nExtraNonce > 1: Skip cache for prime_mod variation */
+            /* Prime channel with nExtraNonce > PRIME_CACHE_MAX_EXTRANONCE: Skip cache for prime_mod variation */
             debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, 
                        ") - creating varied template");
         }
