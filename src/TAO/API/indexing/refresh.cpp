@@ -20,6 +20,8 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/state.h>
 #include <TAO/Ledger/types/transaction.h>
 
+#include <unordered_map>
+
 /* Global TAO namespace. */
 namespace TAO::API
 {
@@ -41,7 +43,8 @@ namespace TAO::API
             }
 
             /* Our list of transactions to read. */
-            std::map<uint512_t, TAO::Ledger::Transaction> mapTransactions;
+            std::unordered_map<uint512_t, TAO::Ledger::Transaction> mapTransactions;
+            mapTransactions.reserve(1000); // Reserve space for batch reads
 
             /* Start a timer to track. */
             runtime::timer timer;
