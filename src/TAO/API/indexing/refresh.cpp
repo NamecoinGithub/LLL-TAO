@@ -269,7 +269,7 @@ namespace TAO::API
                 }
             }
 
-            debug::log(0, FUNCTION, "Complated scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
+            debug::log(0, FUNCTION, "Completed scanning ", nScannedCount, " tx in ", timer.Elapsed(), " seconds");
         }
         catch(const std::exception& e)
         {
