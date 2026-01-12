@@ -179,9 +179,21 @@ namespace LLP
          **/
         namespace TimeSynchronization
         {
-            constexpr uint16_t TIME_REQUEST        = 0x2000;  // Request time from peers
-            constexpr uint16_t TIME_RESPONSE       = 0x2001;  // Time sync response
-            constexpr uint16_t TIME_OFFSET         = 0x2002;  // Time offset adjustment
+            /* Data packets */
+            constexpr uint16_t TIME_DATA           = 0x2000;  // Time data response (0)
+            constexpr uint16_t ADDRESS_DATA        = 0x2001;  // Address data (1)
+            constexpr uint16_t TIME_OFFSET         = 0x2002;  // Time offset adjustment (2)
+            
+            /* Data requests */
+            constexpr uint16_t GET_OFFSET          = 0x2040;  // Get time offset (64)
+            
+            /* Request packets */
+            constexpr uint16_t GET_TIME            = 0x2081;  // Request time from peers (129)
+            constexpr uint16_t GET_ADDRESS         = 0x2082;  // Request address (130)
+            
+            /* Generic */
+            constexpr uint16_t PING                = 0x20FD;  // Ping (253)
+            constexpr uint16_t CLOSE               = 0x20FE;  // Close connection (254)
         }
 
         /** Stateless Mining Protocol (0xD000 - 0xDFFF)
@@ -371,9 +383,14 @@ namespace LLP
         /* Time sync protocol (0x2000 - 0x2FFF) */
         if (nOpcode >= 0x2000 && nOpcode <= 0x2FFF) {
             switch(nOpcode) {
-                case Opcodes::TimeSynchronization::TIME_REQUEST:  return "TIME_REQUEST";
-                case Opcodes::TimeSynchronization::TIME_RESPONSE: return "TIME_RESPONSE";
+                case Opcodes::TimeSynchronization::TIME_DATA:     return "TIME_DATA";
+                case Opcodes::TimeSynchronization::ADDRESS_DATA:  return "ADDRESS_DATA";
                 case Opcodes::TimeSynchronization::TIME_OFFSET:   return "TIME_OFFSET";
+                case Opcodes::TimeSynchronization::GET_OFFSET:    return "GET_OFFSET";
+                case Opcodes::TimeSynchronization::GET_TIME:      return "GET_TIME";
+                case Opcodes::TimeSynchronization::GET_ADDRESS:   return "GET_ADDRESS";
+                case Opcodes::TimeSynchronization::PING:          return "PING";
+                case Opcodes::TimeSynchronization::CLOSE:         return "CLOSE";
                 default: return "TIMESYNC_UNKNOWN";
             }
         }

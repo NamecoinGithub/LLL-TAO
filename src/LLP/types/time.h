@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #define NEXUS_LLP_TYPES_TIME_H
 
 #include <LLP/templates/connection.h>
+#include <LLP/include/llp_opcodes.h>
 
 #include <Util/templates/containers.h>
 
@@ -23,27 +24,20 @@ namespace LLP
 
     class TimeNode : public Connection
     {
-        /* Protocol messages based on Default Packet. */
-        enum : Packet::message_t
-        {
-            /** DATA PACKETS **/
-            TIME_DATA     = 0,
-            ADDRESS_DATA  = 1,
-            TIME_OFFSET   = 2,
+    public:
+        /* Protocol message opcodes from centralized LLP Opcodes Registry.
+         * For documentation on each opcode, see LLP/include/llp_opcodes.h
+         */
+        static constexpr auto TIME_DATA     = Opcodes::TimeSynchronization::TIME_DATA;
+        static constexpr auto ADDRESS_DATA  = Opcodes::TimeSynchronization::ADDRESS_DATA;
+        static constexpr auto TIME_OFFSET   = Opcodes::TimeSynchronization::TIME_OFFSET;
+        static constexpr auto GET_OFFSET    = Opcodes::TimeSynchronization::GET_OFFSET;
+        static constexpr auto GET_TIME      = Opcodes::TimeSynchronization::GET_TIME;
+        static constexpr auto GET_ADDRESS   = Opcodes::TimeSynchronization::GET_ADDRESS;
+        static constexpr auto PING          = Opcodes::TimeSynchronization::PING;
+        static constexpr auto CLOSE         = Opcodes::TimeSynchronization::CLOSE;
 
-            /** DATA REQUESTS **/
-            GET_OFFSET    = 64,
-
-
-            /** REQUEST PACKETS **/
-            GET_TIME      = 129,
-            GET_ADDRESS   = 130,
-
-
-            /** GENERIC **/
-            PING          = 253,
-            CLOSE         = 254
-        };
+    private:
 
 
         /** Store the samples in a majority object. */
