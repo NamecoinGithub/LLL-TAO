@@ -210,21 +210,24 @@ namespace TAO::API
                                         /* Grab contract reference. */
                                         const TAO::Operation::Contract& rContract = rTX[nContract];
 
+                                        /* Copy REGISTERED set once with lock, then iterate without lock */
+                                        std::vector<std::string> vCommands;
                                         {
                                             LOCK(REGISTERED_MUTEX);
+                                            vCommands.assign(REGISTERED.begin(), REGISTERED.end());
+                                        }
 
-                                            /* Loop through registered commands. */
-                                            for(const auto& strCommands : REGISTERED)
+                                        /* Loop through registered commands. */
+                                        for(const auto& strCommands : vCommands)
+                                        {
+                                            try
                                             {
-                                                try
-                                                {
-                                                    Commands::Instance(strCommands)->Index(rContract, nContract);
-                                                }
-                                                catch(const std::exception& e)
-                                                {
-                                                    debug::error(FUNCTION, "Exception in ", strCommands, 
-                                                               " index handler: ", e.what());
-                                                }
+                                                Commands::Instance(strCommands)->Index(rContract, nContract);
+                                            }
+                                            catch(const std::exception& e)
+                                            {
+                                                debug::error(FUNCTION, "Exception in ", strCommands, 
+                                                           " index handler: ", e.what());
                                             }
                                         }
                                     }
