@@ -194,6 +194,19 @@ namespace LLP
          **/
         void SendChannelNotification();
 
+        /** SendMiningTemplate
+         *
+         *  Send a 216-byte block template to the miner.
+         *  Called after MINER_READY subscription or when NEW_BLOCK is available.
+         *
+         *  Creates a fresh template using existing block creation logic,
+         *  serializes it to 216 bytes, and sends via BLOCK_DATA opcode.
+         *
+         *  @return True if template was sent successfully, false otherwise.
+         *
+         **/
+        bool SendMiningTemplate();
+
     private:
         /** respond
          *

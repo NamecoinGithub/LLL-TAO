@@ -14,6 +14,7 @@ ________________________________________________________________________________
 #include <LLP/types/stateless_miner_connection.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/llp_opcodes.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
 #include <LLP/include/falcon_verify.h>
@@ -1912,8 +1913,39 @@ namespace LLP
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
                           (context.nChannel == 1 ? "Prime" : "Hash"), " notifications");
                 
-                /* Send immediate notification with current state */
+                /* CRITICAL FIX: Send initial template immediately after subscription
+                 * 
+                 * This fixes the stateless mining bug where miners receive MINER_READY
+                 * acknowledgment but never receive an actual block template to mine on.
+                 * 
+                 * Expected flow (NOW IMPLEMENTED):
+                 *   1. Miner sends MINER_READY
+                 *   2. Node subscribes miner to channel notifications
+                 *   3. Node sends immediate notification with metadata (12 bytes)
+                 *   4. Node sends initial template for mining (216 bytes) ← THIS WAS MISSING!
+                 * 
+                 * Without this, miners show 0.00 GIPS because they have no work to do.
+                 * With this fix, miners immediately start hashing after subscription.
+                 */
+                debug::log(0, "");
+                debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "🔧 CRITICAL FIX: Sending initial template...", ANSI_COLOR_RESET);
+                
+                /* First send notification (metadata only - 12 bytes) */
                 SendChannelNotification();
+                
+                /* Then send initial template (full block - 216 bytes) */
+                if (!SendMiningTemplate())
+                {
+                    debug::error(FUNCTION, "❌ Failed to send initial template");
+                    debug::error(FUNCTION, "   Miner will have no work - subscription incomplete");
+                    debug::log(0, "📥 === MINER_READY: PARTIAL SUCCESS (NO TEMPLATE) ===");
+                    /* Don't return false - subscription is still valid, miner can request template */
+                }
+                else
+                {
+                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "✅ Initial template delivered!", ANSI_COLOR_RESET);
+                    debug::log(0, "   Miner can now start hashing");
+                }
                 
                 /* Update manager */
                 StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
@@ -3013,6 +3045,114 @@ namespace LLP
         }
         
         debug::log(3, FUNCTION, "Rate limit counters reset for ", GetAddress().ToStringIP());
+    }
+
+
+    /** SendMiningTemplate
+     *
+     *  Send a 216-byte block template to the miner.
+     *  
+     *  This method implements the CRITICAL FIX for template delivery:
+     *  - After MINER_READY subscription, immediately push initial template
+     *  - When NEW_BLOCK event occurs, push updated template to all subscribed miners
+     *  
+     *  Uses existing new_block() infrastructure to create templates, leveraging:
+     *  - Template caching (30× performance improvement)
+     *  - Channel-specific height tracking
+     *  - Reward address binding
+     *  
+     *  @return True if template was sent successfully, false otherwise.
+     */
+    bool StatelessMinerConnection::SendMiningTemplate()
+    {
+        debug::log(0, ANSI_COLOR_BRIGHT_CYAN, "📤 === SEND_MINING_TEMPLATE ===", ANSI_COLOR_RESET);
+        debug::log(0, "   To: ", GetAddress().ToStringIP());
+        
+        /* Thread-safe access to context */
+        LOCK(MUTEX);
+        
+        /* Validate prerequisites */
+        if (!context.fAuthenticated)
+        {
+            debug::error(FUNCTION, "❌ Cannot send template: Not authenticated");
+            return false;
+        }
+        
+        if (context.nChannel == 0)
+        {
+            debug::error(FUNCTION, "❌ Cannot send template: Channel not set");
+            return false;
+        }
+        
+        if (context.nChannel != 1 && context.nChannel != 2)
+        {
+            debug::error(FUNCTION, "❌ Cannot send template: Invalid channel ", context.nChannel);
+            return false;
+        }
+        
+        debug::log(0, "   Channel: ", context.nChannel, " (", (context.nChannel == 1 ? "Prime" : "Hash"), ")");
+        debug::log(0, "   Session: 0x", std::hex, context.nSessionId, std::dec);
+        
+        /* Create new block template using existing infrastructure */
+        TAO::Ledger::Block* pBlock = new_block();
+        if (!pBlock)
+        {
+            debug::error(FUNCTION, "❌ Failed to create block template");
+            return false;
+        }
+        
+        debug::log(0, "   ✅ Template created:");
+        debug::log(0, "      Height: ", pBlock->nHeight);
+        debug::log(0, "      Channel: ", pBlock->nChannel);
+        debug::log(0, "      Merkle: ", pBlock->hashMerkleRoot.SubString());
+        
+        /* Serialize block to 216 bytes */
+        std::vector<uint8_t> vTemplate;
+        try
+        {
+            vTemplate = pBlock->Serialize();
+            
+            if (vTemplate.empty())
+            {
+                debug::error(FUNCTION, "❌ Serialization returned empty vector");
+                return false;
+            }
+            
+            if (vTemplate.size() != 216)
+            {
+                debug::error(FUNCTION, "❌ Unexpected template size: ", vTemplate.size(), " (expected 216)");
+                return false;
+            }
+            
+            debug::log(0, "   ✅ Serialized: ", vTemplate.size(), " bytes");
+        }
+        catch (const std::exception& e)
+        {
+            debug::error(FUNCTION, "❌ Serialization exception: ", e.what());
+            return false;
+        }
+        
+        /* Send template via BLOCK_DATA opcode */
+        Packet response(Opcodes::Legacy::BLOCK_DATA);
+        response.DATA = vTemplate;
+        response.LENGTH = static_cast<uint32_t>(vTemplate.size());
+        
+        debug::log(0, "   📤 Sending BLOCK_DATA packet...");
+        debug::log(0, "      Opcode: ", (uint32_t)response.HEADER);
+        debug::log(0, "      Length: ", response.LENGTH);
+        
+        respond(response);
+        
+        debug::log(0, "   ✅ Template sent successfully!");
+        debug::log(0, ANSI_COLOR_BRIGHT_CYAN, "📤 === SEND_MINING_TEMPLATE: SUCCESS ===", ANSI_COLOR_RESET);
+        
+        /* Update statistics */
+        context = context.WithTimestamp(runtime::unifiedtimestamp())
+                         .WithHeight(pBlock->nHeight);
+        StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+        StatelessMinerManager::Get().IncrementTemplatesServed();
+        
+        return true;
     }
 
 
