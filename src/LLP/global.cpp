@@ -50,6 +50,11 @@ namespace LLP
     /*  Initialize the LLP. */
     bool Initialize()
     {
+        /* Initialize the underlying network resources (sockets, etc.) FIRST.
+         * This MUST happen before any server initialization (API, TIME, TRITIUM, etc.)
+         * because server constructors bind to sockets, which requires network init. */
+        if(!NetworkInitialize())
+            return debug::error(FUNCTION, "NetworkInitialize: Failed initializing network resources.");
 
         /* Get our current hostname. */
         char chHostname[128];
