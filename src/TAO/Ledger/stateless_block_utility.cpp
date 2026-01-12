@@ -96,7 +96,8 @@ namespace TAO::Ledger
         else
         {
             /* Prime channel with nExtraNonce > PRIME_CACHE_MAX_EXTRANONCE: Skip cache for prime_mod variation */
-            debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, ") for varied template");
+            debug::log(2, FUNCTION, "Skipping cache (Prime channel, nExtraNonce=", nExtraNonce, 
+                       " > ", PRIME_CACHE_MAX_EXTRANONCE, ") for varied template");
         }
         
         /* All blocks MUST be wallet-signed per Nexus consensus */
