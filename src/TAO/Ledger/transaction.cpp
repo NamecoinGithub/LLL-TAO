@@ -414,7 +414,7 @@ namespace TAO
                     return debug::error(FUNCTION, "contract is empty");
 
                 /* Version 5+ rule to check the conditions are not malformed. */
-                if(Transaction::IsTritium(nVersion) && nVersion >= Transaction::TRITIUM_V5 && !contract.Valid())
+                if(nVersion >= Transaction::TRITIUM_V5 && !contract.Valid())
                     return debug::error(FUNCTION, "conditions byte-code contains invalid instruction: ", debug::GetLastError());
 
                 /* Skip over fees as counting against total contracts. */
