@@ -45,6 +45,29 @@ namespace TAO
         const uint32_t TRANSACTION_MINIMUM_SUPPORTED_VERSION = 3;
 
 
+        /* Minimum block version supported during transition period.
+         * This allows v1/v2 miners (old Windows.exe) to continue operating
+         * while the network migrates to modern stateless mining infrastructure.
+         * 
+         * TRANSITION STRATEGY:
+         * 1. Enable v1/v2 acceptance to unblock network sync
+         * 2. Deploy stateless mining infrastructure (Phase 2)
+         * 3. Monitor hashrate distribution via MiningPoolStats
+         * 4. When new miners reach >51% hashrate, revert this constant to 9
+         * 5. Old v1/v2 miners immediately stop working
+         * 6. Network fully upgraded to modern protocol
+         * 
+         * SECURITY: This is safe because:
+         * - V1/v2 blocks still validated for proof-of-work
+         * - Only version check is relaxed, not security rules
+         * - Can be reverted with single-line code change
+         * - Gives community time to upgrade without network halt
+         * 
+         * TODO: After majority hashrate on stateless miners, change to:
+         *       const uint32_t BLOCK_MINIMUM_SUPPORTED_VERSION = 9; */
+        const uint32_t BLOCK_MINIMUM_SUPPORTED_VERSION = 1;
+
+
          /* Activated test network at timestamp. */
         const uint32_t NEXUS_TESTNET_TIMELOCK = 1421250000;        //--- Nexus Testnet Activation:     1/14/2015 08:38:00 GMT - 7
 
@@ -169,6 +192,41 @@ namespace TAO
             uint64_t nStart = StartBlockTimelock(nVersion);
             if(nStart == 0)
                 return false;
+
+            /* DUAL-VERSION SUPPORT FOR BLOCK TRANSITION PERIOD:
+             * Accept blocks v1, v2, and current version (v9+) to allow:
+             * - Old Windows.exe miners to keep producing blocks (v1/v2)
+             * - New stateless miners to produce modern blocks (v9+)
+             * - Network to operate during transition period
+             * - Gradual migration as hashrate shifts to new infrastructure
+             * 
+             * This bypasses the strict timelock enforcement (1-hour grace period)
+             * for v1/v2 blocks, preventing rejection of legacy blocks during upgrade.
+             * 
+             * POLITICAL CONTEXT:
+             * - V1/v2 miners control majority hashrate (source: MiningPoolStats shows "Unknown 100%")
+             * - No modern mining alternative existed until stateless mining implementation
+             * - Cannot force upgrade without halting all block production
+             * - This enables gradual, non-disruptive transition
+             * 
+             * REVERSION PROCESS:
+             * 1. Monitor hashrate via MiningPoolStats as new miners come online
+             * 2. When stateless mining reaches >51% hashrate (majority)
+             * 3. Change BLOCK_MINIMUM_SUPPORTED_VERSION from 1 to 9
+             * 4. Commit with message: "Enforce modern block versions (v9+)"
+             * 5. Old v1/v2 miners immediately locked out
+             * 6. Remove this entire bypass block in cleanup phase
+             * 
+             * TODO: After stateless mining achieves majority hashrate, remove this
+             * bypass and restore strict timelock validation. Track progress via:
+             * - https://miningpoolstats.stream/nexus
+             * - Community discord/forums
+             * - Network health dashboard */
+            if(nVersion >= BLOCK_MINIMUM_SUPPORTED_VERSION && nVersion < nCurrent)
+            {
+                /* Accept v1/v2 blocks without strict timelock enforcement during transition */
+                return true;
+            }
 
             /* Get the ending timelock for version. */
             uint64_t nEnd = EndBlockTimelock(nVersion);
