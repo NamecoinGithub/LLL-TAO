@@ -63,7 +63,7 @@ namespace LLP
 
         /* NOTE: TAO::API::Initialize() is called in main.cpp BEFORE LLP::Initialize().
          * Do NOT call it again here to avoid double initialization crashes!
-         * See main.cpp line ~269 for the correct initialization order. */
+         * See main.cpp line ~294 for the correct initialization order. */
 
         /* Initialize Falcon Auth for mining authentication. */
         FalconAuth::Initialize();
