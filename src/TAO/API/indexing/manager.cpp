@@ -43,59 +43,110 @@ namespace TAO::API
         std::mutex CONDITION_MUTEX;
         while(!config::fShutdown.load())
         {
-            /* Wait for entries in the queue. */
-            std::unique_lock<std::mutex> CONDITION_LOCK(CONDITION_MUTEX);
-            CONDITION.wait(CONDITION_LOCK,
-            []
+            try
             {
+                /* Wait for entries in the queue. */
+                std::unique_lock<std::mutex> CONDITION_LOCK(CONDITION_MUTEX);
+                CONDITION.wait(CONDITION_LOCK,
+                []
+                {
+                    /* Check for shutdown. */
+                    if(config::fShutdown.load())
+                        return true;
+
+                    /* Check for suspended state. */
+                    if(config::fSuspended.load())
+                        return false;
+
+                    return Indexing::DISPATCH->size() != 0;
+                });
+
                 /* Check for shutdown. */
                 if(config::fShutdown.load())
-                    return true;
+                    return;
 
-                /* Check for suspended state. */
-                if(config::fSuspended.load())
-                    return false;
+                /* Grab the next entry in the queue. */
+                const uint512_t hashTx = DISPATCH->front();
+                DISPATCH->pop();
 
-                return Indexing::DISPATCH->size() != 0;
-            });
-
-            /* Check for shutdown. */
-            if(config::fShutdown.load())
-                return;
-
-            /* Grab the next entry in the queue. */
-            const uint512_t hashTx = DISPATCH->front();
-            DISPATCH->pop();
-
-            /* Check if handling legacy or tritium. */
-            if(hashTx.GetType() == TAO::Ledger::TRITIUM)
-            {
-                /* Index our sessions code when syncing here in seperate thread. */
-                if(TAO::Ledger::ChainState::Synchronizing())
-                    IndexSession(hashTx);
-
-                /* Make sure the transaction is on disk. */
-                TAO::Ledger::Transaction tx;
-                if(LLD::Ledger->ReadTx(hashTx, tx, TAO::Ledger::FLAGS::MEMPOOL))
+                /* Check if handling legacy or tritium. */
+                if(hashTx.GetType() == TAO::Ledger::TRITIUM)
                 {
+                    /* Index session in main thread if syncing */
+                    try
+                    {
+                        if(TAO::Ledger::ChainState::Synchronizing())
+                            IndexSession(hashTx);
+                    }
+                    catch(const std::exception& e)
+                    {
+                        debug::error(FUNCTION, "Exception indexing session for ", hashTx.SubString(), ": ", e.what());
+                    }
+
+                    /* Make sure the transaction is on disk. */
+                    TAO::Ledger::Transaction tx;
+                    if(!LLD::Ledger->ReadTx(hashTx, tx, TAO::Ledger::FLAGS::MEMPOOL))
+                    {
+                        debug::warning(FUNCTION, "Transaction ", hashTx.SubString(), " not found for indexing");
+                        continue;
+                    }
+
                     /* Iterate the transaction contracts. */
                     for(uint32_t nContract = 0; nContract < tx.Size(); nContract++)
                     {
-                        /* Grab contract reference. */
-                        const TAO::Operation::Contract& rContract = tx[nContract];
-
+                        try
                         {
-                            LOCK(REGISTERED_MUTEX);
+                            /* Grab contract reference. */
+                            const TAO::Operation::Contract& rContract = tx[nContract];
+
+                            /* Copy REGISTERED set once with lock, then iterate without lock */
+                            std::vector<std::string> vCommands;
+                            {
+                                LOCK(REGISTERED_MUTEX);
+                                vCommands.assign(REGISTERED.begin(), REGISTERED.end());
+                            }
 
                             /* Loop through registered commands. */
-                            for(const auto& strCommands : REGISTERED)
-                                Commands::Instance(strCommands)->Index(rContract, nContract);
+                            for(const auto& strCommands : vCommands)
+                            {
+                                try
+                                {
+                                    Commands::Instance(strCommands)->Index(rContract, nContract);
+                                }
+                                catch(const std::exception& e)
+                                {
+                                    debug::error(FUNCTION, "Exception in ", strCommands, 
+                                               " index handler: ", e.what());
+                                }
+                            }
+                        }
+                        catch(const std::exception& e)
+                        {
+                            debug::error(FUNCTION, "Exception processing contract ", nContract, 
+                                       " in tx ", hashTx.SubString(), ": ", e.what());
                         }
                     }
 
                     /* Write our last index now. */
-                    LLD::Logical->WriteLastIndex(hashTx);
+                    try
+                    {
+                        LLD::Logical->WriteLastIndex(hashTx);
+                    }
+                    catch(const std::exception& e)
+                    {
+                        debug::error(FUNCTION, "Exception writing last index: ", e.what());
+                    }
                 }
+            }
+            catch(const std::exception& e)
+            {
+                debug::error(FUNCTION, "Exception in Manager main loop: ", e.what());
+                // Continue running - don't terminate thread
+            }
+            catch(...)
+            {
+                debug::error(FUNCTION, "Unknown exception in Manager main loop");
+                // Continue running - don't terminate thread
             }
         }
     }
