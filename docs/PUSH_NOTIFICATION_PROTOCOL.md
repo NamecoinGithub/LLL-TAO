@@ -1,5 +1,8 @@
 # Push Notification Protocol for Stateless Mining
 
+> **📖 For Complete Protocol Documentation:**  
+> This document focuses on push notification implementation details. For a comprehensive protocol guide including authentication, configuration, and complete workflow, see **[STATELESS_MINING_PROTOCOL.md](STATELESS_MINING_PROTOCOL.md)**.
+
 ## Overview
 
 This document specifies the push notification protocol for Nexus stateless mining, replacing the legacy polling-based GET_ROUND mechanism with server-initiated push notifications.
@@ -732,10 +735,17 @@ void NotifyChannelMiners(uint32_t nChannel)
 
 ## References
 
-- **Protocol Specification:** This document
-- **Implementation:** See `src/LLP/` and `src/TAO/Ledger/state.cpp`
-- **Opcodes:** See `src/LLP/types/miner.h`
-- **Testing:** See `tests/unit/LLP/`
+### Related Documentation
+- [STATELESS_MINING_PROTOCOL.md](STATELESS_MINING_PROTOCOL.md) - **Complete protocol specification (RECOMMENDED)**
+- [TEMPLATE_FORMAT.md](TEMPLATE_FORMAT.md) - Wire format details for 216-byte templates
+- [MIGRATION_GET_ROUND_TO_GETBLOCK.md](MIGRATION_GET_ROUND_TO_GETBLOCK.md) - Migration guide from GET_ROUND
+- [archive/GET_ROUND_PROTOCOL.md](archive/GET_ROUND_PROTOCOL.md) - Legacy GET_ROUND protocol (deprecated)
+
+### Implementation
+- **Protocol Implementation:** `src/LLP/stateless_miner_connection.cpp`
+- **Opcode Definitions:** `src/LLP/include/llp_opcodes.h` (lines 199-293)
+- **BlockState Integration:** `src/TAO/Ledger/state.cpp`
+- **Unit Tests:** `tests/unit/LLP/`
 
 ---
 
