@@ -153,6 +153,7 @@ namespace Versions
         // Mining block version override (from -miningblockversion config)
         // Used for testing compatibility scenarios
         // Default is 0 (use current network version)
+        // Declared extern here, defined in implementation file
         extern uint32_t MINING_OVERRIDE_VERSION;
 
         /** Block version validation helpers **/
@@ -443,30 +444,28 @@ namespace Versions
             Config() = default;
         };
 
-        /** Apply hardfork configuration (updates global state) **/
+        /** Apply hardfork configuration (updates global state)
+         *
+         *  NOTE: This function provides the FRAMEWORK for centralized hardfork control.
+         *  The actual implementation will be added in future refactoring PRs as existing
+         *  code is migrated to use this utility.
+         *
+         *  Current status: STUB - Structure defined, implementation pending migration.
+         *  
+         *  Future implementation will update global constants in timelocks.cpp and other
+         *  subsystems based on hardfork flags. This allows ONE-LINE hardfork execution:
+         *      Upgrade::Config hardfork;
+         *      hardfork.ENFORCE_V9_POS_ONLY = true;
+         *      Upgrade::ApplyHardfork(hardfork);
+         *  
+         *  Once migration is complete, this will propagate changes to all 100+ version
+         *  checks across the codebase automatically.
+         **/
         inline void ApplyHardfork(const Config& config)
         {
-            // Update minimum supported versions based on hardfork flags
-            if(config.ENFORCE_TX_V5_ONLY)
-            {
-                // This would update TRANSACTION_MINIMUM_SUPPORTED_VERSION
-                // Implementation in future PR when refactoring timelocks.cpp
-            }
-
-            if(config.ENFORCE_TRITIUM_BLOCKS_ONLY)
-            {
-                // This would update BLOCK_MINIMUM_SUPPORTED_VERSION to 5
-                // Implementation in future PR when refactoring timelocks.cpp
-            }
-
-            if(config.ENFORCE_V9_POS_ONLY)
-            {
-                // This would update BLOCK_MINIMUM_SUPPORTED_VERSION to 9
-                // Implementation in future PR when refactoring timelocks.cpp
-            }
-
-            // Note: Full implementation will be added in refactoring PRs
-            // This structure provides the framework for centralized hardfork control
+            // STUB: Implementation will be added during refactoring PRs
+            // This provides the framework for future centralized hardfork control
+            (void)config; // Suppress unused parameter warning
         }
 
         /** Pre-configured hardfork scenarios for testing **/
@@ -550,27 +549,6 @@ namespace Versions
         }
     }
 
-} // namespace Versions
-} // namespace Ledger
-} // namespace TAO
-
-
-//===========================================================================================
-// GLOBAL VERSION OVERRIDE (for testing scenarios)
-//===========================================================================================
-
-namespace TAO
-{
-namespace Ledger
-{
-namespace Versions
-{
-namespace Block
-{
-    // Mining block version override (defined here, initialized in implementation)
-    // Can be set via -miningblockversion config parameter
-    uint32_t MINING_OVERRIDE_VERSION = 0;
-}
 } // namespace Versions
 } // namespace Ledger
 } // namespace TAO

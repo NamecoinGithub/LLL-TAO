@@ -646,6 +646,7 @@ OBJS+=  build/LLC_base_uint.o \
 		build/Ledger_transaction.o \
 		build/Ledger_tritium.o \
 		build/Ledger_tritium_minter.o \
+		build/Ledger_version_control.o \
 		build/Util_args.o \
 		build/Util_base58.o \
 		build/Util_base64.o \
