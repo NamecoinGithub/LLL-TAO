@@ -39,7 +39,6 @@ namespace LLP
 
     private:
 
-
         /** Store the samples in a majority object. */
         majority<int32_t> nSamples;
 

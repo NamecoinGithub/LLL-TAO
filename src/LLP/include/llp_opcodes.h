@@ -135,9 +135,9 @@ namespace LLP
             constexpr uint16_t MINER_REWARD_RESULT  = 0x00D6;  // Reward result (214)
             
             /* Push notifications */
-            constexpr uint16_t MINER_READY         = 0x00D8;  // Miner ready for updates (216)
-            constexpr uint16_t PRIME_BLOCK_AVAILABLE = 0x00D9; // Prime block available (217)
-            constexpr uint16_t HASH_BLOCK_AVAILABLE  = 0x00DA; // Hash block available (218)
+            constexpr uint16_t MINER_READY           = 0x00D8;  // Miner ready for updates (216)
+            constexpr uint16_t PRIME_BLOCK_AVAILABLE = 0x00D9;  // Prime block available (217)
+            constexpr uint16_t HASH_BLOCK_AVAILABLE  = 0x00DA;  // Hash block available (218)
             
             /* Generic */
             constexpr uint16_t PING                = 0x00FD;  // Ping (253)
