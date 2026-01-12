@@ -28,8 +28,6 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
-        /* Use version control constants for cleaner code. */
-        using namespace Versions;
 
         /** Hash to start a hybrid Blockchain. **/
         uint1024_t hashGenesisHybrid;
@@ -43,7 +41,7 @@ namespace TAO
 
             /* Apply legacy interval for all versions prior to version 7.  If the caller is not able to provide a block to base
                this calculation off, then we will use the tStateBest instead */
-            if(!State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
+            if(!TAO::Ledger::Versions::State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
                 return NEXUS_MATURITY_LEGACY;
 
             return NEXUS_MATURITY_COINBASE;
@@ -58,7 +56,7 @@ namespace TAO
 
             /* Apply legacy interval for all versions prior to version 7.  If the caller is not able to provide a block to base
                this calculation off, then we will use the tStateBest instead */
-            if(!State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
+            if(!TAO::Ledger::Versions::State::UsesModernRetarget((!block.IsNull() ? block.nVersion : TAO::Ledger::ChainState::tStateBest.load().nVersion)))
                 return NEXUS_MATURITY_LEGACY;
 
             return NEXUS_MATURITY_COINSTAKE;
