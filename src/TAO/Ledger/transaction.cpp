@@ -48,6 +48,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/stake.h>
 #include <TAO/Ledger/include/stake_change.h>
 #include <TAO/Ledger/include/timelocks.h>
+#include <TAO/Ledger/include/version_control.h>
 #include <TAO/Ledger/types/merkle.h>
 #include <TAO/Ledger/types/mempool.h>
 
@@ -61,6 +62,8 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        /* Use version control constants for cleaner code. */
+        using namespace Versions;
 
         /* Default Constructor. */
         Transaction::Transaction()
@@ -410,8 +413,8 @@ namespace TAO
                 if(contract.Empty(TAO::Operation::Contract::OPERATIONS))
                     return debug::error(FUNCTION, "contract is empty");
 
-                /* Version 5 rule to check the conditions are not malformed. */
-                if(nVersion >= 5 && !contract.Valid())
+                /* Version 5+ rule to check the conditions are not malformed. */
+                if(nVersion >= Transaction::TRITIUM_V5 && !contract.Valid())
                     return debug::error(FUNCTION, "conditions byte-code contains invalid instruction: ", debug::GetLastError());
 
                 /* Skip over fees as counting against total contracts. */
@@ -421,8 +424,8 @@ namespace TAO
                 /* For the first transaction. */
                 if(IsFirst())
                 {
-                    /* Check for transaction version 3. */
-                    if(!(nFlags & TAO::Ledger::FLAGS::LOOKUP) && nVersion >= 3 && LLD::Ledger->HasFirst(hashGenesis))
+                    /* Check for Tritium transaction version 3+. */
+                    if(!(nFlags & TAO::Ledger::FLAGS::LOOKUP) && Transaction::IsTritium(nVersion) && LLD::Ledger->HasFirst(hashGenesis))
                         return debug::error(FUNCTION, "duplicate genesis-id ", hashGenesis.SubString());
 
                     /* Reset the contract operation stream */
@@ -499,7 +502,7 @@ namespace TAO
                     #endif
 
                     /* We want to be explicit here to keep genesis transactions consistent. */
-                    if(nVersion >= 5)
+                    if(nVersion >= Transaction::TRITIUM_V5)
                     {
                         /* Check that the there are not more than the allowable default contracts */
                         if(vContracts.size() != 5 || nNames != 2 || nTrust != 1 || nAccounts != 1 || nCrypto != 1)
@@ -747,7 +750,7 @@ namespace TAO
                 nStakeApplied += nStakeChange;
 
             /* Check the stake balance. */
-            if(pblock->nVersion < 9 && nStakeApplied == 0) //we want to allow stake to go to zero
+            if(!State::UsesV9StakeRules(pblock->nVersion) && nStakeApplied == 0) //we want to allow stake to go to zero
                 return debug::error(FUNCTION, "cannot stake if stake balance is zero");
 
             /* Calculate the energy efficiency thresholds. */
@@ -902,8 +905,8 @@ namespace TAO
             /* Check for first. */
             if(IsFirst())
             {
-                /* Check for transaction version 3. */
-                if(nVersion >= 3 && LLD::Ledger->HasFirst(hashGenesis))
+                /* Check for Tritium transaction version 3+. */
+                if(Transaction::IsTritium(nVersion) && LLD::Ledger->HasFirst(hashGenesis))
                     return debug::error(FUNCTION, "duplicate genesis-id ", hashGenesis.SubString());
 
                 /* Check ambassador sigchains based on all versions, not the smaller subset of versions. */

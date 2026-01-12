@@ -38,6 +38,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/include/timelocks.h>
 #include <TAO/Ledger/include/retarget.h>
+#include <TAO/Ledger/include/version_control.h>
 
 #include <TAO/Ledger/types/genesis.h>
 #include <TAO/Ledger/types/mempool.h>
@@ -53,6 +54,8 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        /* Use version control constants for cleaner code. */
+        using namespace Versions;
 
         /* Get the block state object. */
         bool GetLastState(ClientBlock &state, const uint32_t nChannel)
@@ -500,7 +503,7 @@ namespace TAO
                 return debug::error(FUNCTION, "block state failed to write");
 
             /* Signal to set the best chain. */
-            if(nVersion >= 7 && !IsHybrid())
+            if(State::UsesModernRetarget(nVersion) && !IsHybrid())
             {
                 /* Set the chain trust. */
                 uint8_t nEquals  = 0;
@@ -751,8 +754,8 @@ namespace TAO
         /* Get the Signarture Hash of the block. Used to verify work claims. */
         uint1024_t ClientBlock::SignatureHash() const
         {
-            /* Signature hash for version 7 blocks. */
-            if(nVersion >= 7)
+            /* Signature hash for version 7+ blocks. */
+            if(State::UsesModernSignatureHash(nVersion))
             {
                 /* Create a data stream to get the hash. */
                 DataStream ss(SER_GETHASH, LLP::PROTOCOL_VERSION);

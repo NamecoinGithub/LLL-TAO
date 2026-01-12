@@ -14,6 +14,8 @@ ________________________________________________________________________________
 #include <TAO/Register/types/state.h>
 #include <TAO/Register/include/enum.h>
 
+#include <TAO/Ledger/include/version_control.h>
+
 #include <Util/templates/datastream.h>
 
 /* Global TAO namespace. */
@@ -243,8 +245,8 @@ namespace TAO
             if(nModified > runtime::unifiedtimestamp() + runtime::maxdrift())
                 return debug::error(FUNCTION, "modified timestamp too far in the future");
 
-            /* Check register version. */
-            if(nVersion != 1) //TODO: make this a global constant
+            /* Check register version. ✅ NOW IT IS A GLOBAL CONSTANT! */
+            if(!TAO::Ledger::Versions::Register::IsValid(nVersion))
                 return debug::error(FUNCTION, "register can't have version other than 1");
 
             /* System register specific checks. */

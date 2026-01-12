@@ -12,6 +12,7 @@
 ____________________________________________________________________________________________*/
 
 #include <TAO/Ledger/include/timelocks.h>
+#include <TAO/Ledger/include/version_control.h>
 
 #include <Util/include/args.h>
 
@@ -22,30 +23,36 @@ namespace TAO
     namespace Ledger
     {
 
-        /* The network current block version. */
-        const uint32_t NETWORK_BLOCK_CURRENT_VERSION = 9;
+        /* The network current block version.
+         * Now references centralized version_control.h constant. */
+        const uint32_t NETWORK_BLOCK_CURRENT_VERSION = Versions::Block::MAINNET_CURRENT;
 
 
-        /* The testnet current block version. */
-        const uint32_t TESTNET_BLOCK_CURRENT_VERSION = 9;
+        /* The testnet current block version.
+         * Now references centralized version_control.h constant. */
+        const uint32_t TESTNET_BLOCK_CURRENT_VERSION = Versions::Block::TESTNET_CURRENT;
 
 
-        /* The network current transaction version. */
-        const uint32_t NETWORK_TRANSACTION_CURRENT_VERSION = 5;
+        /* The network current transaction version.
+         * Now references centralized version_control.h constant. */
+        const uint32_t NETWORK_TRANSACTION_CURRENT_VERSION = Versions::Transaction::MAINNET_CURRENT;
 
 
-        /* The testnet current transaction version. */
-        const uint32_t TESTNET_TRANSACTION_CURRENT_VERSION = 5;
+        /* The testnet current transaction version.
+         * Now references centralized version_control.h constant. */
+        const uint32_t TESTNET_TRANSACTION_CURRENT_VERSION = Versions::Transaction::TESTNET_CURRENT;
 
 
         /* Minimum transaction version supported during transition period.
+         * Now references centralized version_control.h constant.
          * This allows backward compatibility with older network versions (v3/v4)
          * while the node code is prepared for v5 hardfork.
          * TODO: After v5 hardfork fully activated, consider removing this constant. */
-        const uint32_t TRANSACTION_MINIMUM_SUPPORTED_VERSION = 3;
+        const uint32_t TRANSACTION_MINIMUM_SUPPORTED_VERSION = Versions::Transaction::MINIMUM_SUPPORTED;
 
 
         /* Minimum block version supported during transition period.
+         * Now references centralized version_control.h constant.
          * This allows v1/v2 miners (old Windows.exe) to continue operating
          * while the network migrates to modern stateless mining infrastructure.
          * 
@@ -71,7 +78,7 @@ namespace TAO
          * 
          * TODO: After majority hashrate on stateless miners, change to:
          *       const uint32_t BLOCK_MINIMUM_SUPPORTED_VERSION = 9; */
-        const uint32_t BLOCK_MINIMUM_SUPPORTED_VERSION = 1;
+        const uint32_t BLOCK_MINIMUM_SUPPORTED_VERSION = Versions::Block::MINIMUM_SUPPORTED;
 
 
          /* Activated test network at timestamp. */

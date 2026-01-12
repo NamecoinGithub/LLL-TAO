@@ -22,6 +22,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/timelocks.h>
 #include <TAO/Ledger/include/chainstate.h>
+#include <TAO/Ledger/include/version_control.h>
 #include <TAO/Ledger/types/state.h>
 #include <TAO/Ledger/types/tritium.h>
 
@@ -41,6 +42,8 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        /* Use version control constants for cleaner code. */
+        using namespace Versions;
 
         /* Retrieve the setting for maximum block age (time since last stake before trust decay begins. */
         uint64_t MaxBlockAge()
@@ -63,11 +66,11 @@ namespace TAO
                 return TAO::Ledger::TESTNET_MINIMUM_INTERVAL;
 
             /* Apply legacy interval for all versions prior to v7 */
-            else if(block.nVersion < 7)
+            else if(!State::UsesModernRetarget(block.nVersion))
                 return TAO::Ledger::MAINNET_MINIMUM_INTERVAL_LEGACY;
 
             /* Apply original Tritium interval if prior to v9 when pooled staking implemented */
-            else if(block.nVersion < 9)
+            else if(!State::UsesV9StakeRules(block.nVersion))
                 return TAO::Ledger::MAINNET_MINIMUM_INTERVAL_PREPOOL;
 
             return TAO::Ledger::MAINNET_MINIMUM_INTERVAL;
@@ -136,8 +139,8 @@ namespace TAO
                 if(nUnstake < nStake)
                     nStakeNew = nStake - nUnstake;
 
-                /* Check for version 8. */
-                if(nVersion > 7)
+                /* Check for version 8+ (uses 128-bit arithmetic). */
+                if(nVersion > State::MODERN_RETARGET)
                 {
                     /* Build new score with 128-bit arithmatic to prevent overflows. */
                     uint128_t nScoreNew = (nStakeNew * uint128_t(nScore)) / nStake;
@@ -220,7 +223,7 @@ namespace TAO
              *  26% Do not increase stake rate at all.
              *
              */
-            if(nVersion >= 9) //this is for block version 9 and above
+            if(State::UsesV9StakeRules(nVersion)) //this is for block version 9 and above
             {
                 /* Keep track of our local timespan so we only calculate it once. */
                 static const uint32_t nTimespan =
@@ -261,7 +264,7 @@ namespace TAO
              *  26% Do not increase stake rate at all.
              *
              */
-            if(nVersion >= 9) //this is for block version 9 and above
+            if(State::UsesV9StakeRules(nVersion)) //this is for block version 9 and above
                 return (nStake * nStakeRate * nStakeTime) / TAO::Ledger::FULL_YEAR; //we want to adjust to use FULL_YEAR here
 
             /* Legacy calculation for sub verion 5 protocols. */

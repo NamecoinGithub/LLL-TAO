@@ -30,6 +30,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/difficulty.h>
 #include <TAO/Ledger/include/retarget.h>
 #include <TAO/Ledger/include/supply.h>
+#include <TAO/Ledger/include/version_control.h>
 #include <TAO/Ledger/types/tritium.h>
 #include <TAO/Ledger/types/credentials.h>
 
@@ -62,7 +63,7 @@ namespace TAO::API
 
         /* The hash that was relevant for Proof of Stake or Proof of Work (depending on block version) */
         result["proofhash"]  =
-                                block.nVersion < 5 ? block.GetHash().GetHex() :
+                                TAO::Ledger::Versions::Block::IsLegacyPoW(block.nVersion) ? block.GetHash().GetHex() :
                                 ((block.nChannel == 0) ? block.StakeHash().GetHex() : block.ProofHash().GetHex());
 
         /* Body of the block with relevant data. */
