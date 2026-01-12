@@ -35,6 +35,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/process.h>
+#include <TAO/Ledger/include/version_control.h>
 
 #include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/locator.h>
@@ -1786,7 +1787,7 @@ namespace LLP
                             if(LLD::Ledger->ReadBlock(hashBlock, state))
                             {
                                 /* Push legacy blocks for less than version 7. */
-                                if(state.nVersion < 7)
+                                if(!TAO::Ledger::Versions::State::UsesModernRetarget(state.nVersion))
                                 {
                                     /* Check for bad client requests. */
                                     if(fClient)
@@ -2646,7 +2647,7 @@ namespace LLP
                         ssPacket >> block;
 
                         /* Check version switch. */
-                        if(block.nVersion >= 7)
+                        if(TAO::Ledger::Versions::State::UsesModernRetarget(block.nVersion))
                         {
                             /* Build a tritium block from sync block. */
                             TAO::Ledger::TritiumBlock tritium(block);
@@ -3775,7 +3776,7 @@ namespace LLP
         else
         {
             /* Check for version to send correct type */
-            if(state.nVersion < 7)
+            if(!TAO::Ledger::Versions::State::UsesModernRetarget(state.nVersion))
             {
                 /* Build the legacy block from state. */
                 Legacy::LegacyBlock block(state);
