@@ -482,28 +482,25 @@ namespace LLP
 
             /* Handle block-related packets that require stateful block management */
             /* These are handled directly here instead of through StatelessMiner */
-            const uint8_t GET_BLOCK = 129;
-            const uint8_t GET_HEIGHT = 130;
-            const uint8_t GET_REWARD = 131;
-            const uint8_t GET_ROUND = 133;
-            const uint8_t SUBMIT_BLOCK = 1;
-            const uint8_t BLOCK_DATA = 0;
-            const uint8_t BLOCK_HEIGHT = 2;
-            const uint8_t BLOCK_REWARD = 4;
-            const uint8_t BLOCK_ACCEPTED = 200;
-            const uint8_t BLOCK_REJECTED = 201;
-            const uint8_t NEW_ROUND = 204;
-            const uint8_t OLD_ROUND = 205;
-            
-            /* Authentication packet types */
-            const uint8_t MINER_AUTH_INIT = 207;
-            const uint8_t MINER_AUTH_RESPONSE = 209;
-            const uint8_t MINER_AUTH_RESULT = 210;
-            
-            /* Push notification opcodes (defined in src/LLP/types/miner.h) */
-            const uint8_t MINER_READY = 216;
-            const uint8_t PRIME_BLOCK_AVAILABLE = 217;
-            const uint8_t HASH_BLOCK_AVAILABLE = 218;
+            /* Opcodes from centralized LLP Opcodes Registry (LLP/include/llp_opcodes.h) */
+            using Opcodes::Legacy::GET_BLOCK;
+            using Opcodes::Legacy::GET_HEIGHT;
+            using Opcodes::Legacy::GET_REWARD;
+            using Opcodes::Legacy::GET_ROUND;
+            using Opcodes::Legacy::SUBMIT_BLOCK;
+            using Opcodes::Legacy::BLOCK_DATA;
+            using Opcodes::Legacy::BLOCK_HEIGHT;
+            using Opcodes::Legacy::BLOCK_REWARD;
+            using Opcodes::Legacy::BLOCK_ACCEPTED;
+            using Opcodes::Legacy::BLOCK_REJECTED;
+            using Opcodes::Legacy::NEW_ROUND;
+            using Opcodes::Legacy::OLD_ROUND;
+            using Opcodes::Legacy::MINER_AUTH_INIT;
+            using Opcodes::Legacy::MINER_AUTH_RESPONSE;
+            using Opcodes::Legacy::MINER_AUTH_RESULT;
+            using Opcodes::Legacy::MINER_READY;
+            using Opcodes::Legacy::PRIME_BLOCK_AVAILABLE;
+            using Opcodes::Legacy::HASH_BLOCK_AVAILABLE;
             
             /* Block rejection reason codes (PR #122: Falcon Protocol Integration) */
             const uint8_t REJECT_PHYSICAL_SIGNATURE_FAILED = 0x10;  // Physical Falcon signature verification failed
