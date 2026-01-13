@@ -889,6 +889,10 @@ namespace LLP
          * and eventually remove the backward compatibility code path entirely.
          * 
          * This can be controlled via config: -minerauthrequirechallenge=true
+         * 
+         * NOTE: Config is read on each auth attempt (not cached) for simplicity.
+         * This happens once per miner connection, so performance impact is negligible.
+         * Caching would add complexity for a temporary workaround.
          */
         bool fRequireChallenge = config::GetBoolArg("-minerauthrequirechallenge", false);
         

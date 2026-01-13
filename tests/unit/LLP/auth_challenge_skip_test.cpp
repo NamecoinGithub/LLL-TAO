@@ -34,6 +34,23 @@ TEST_CASE("Authentication Challenge Skip Workaround", "[falcon][authentication][
     /* Initialize Falcon auth for testing */
     FalconAuth::Initialize();
 
+    /* Save original config state */
+    auto original_config = config::mapArgs.find("-minerauthrequirechallenge");
+    bool had_original = (original_config != config::mapArgs.end());
+    std::string original_value = had_original ? original_config->second : "";
+    
+    /* RAII cleanup helper */
+    struct ConfigCleanup {
+        bool had_original;
+        std::string original_value;
+        ~ConfigCleanup() {
+            config::mapArgs.erase("-minerauthrequirechallenge");
+            if (had_original) {
+                config::mapArgs["-minerauthrequirechallenge"] = original_value;
+            }
+        }
+    } cleanup{had_original, original_value};
+
     SECTION("Default behavior: Skip challenge-response (backward compatibility)")
     {
         /* Ensure config flag is not set (default false) */
@@ -155,9 +172,6 @@ TEST_CASE("Authentication Challenge Skip Workaround", "[falcon][authentication][
         /* Should have nonce stored for verification */
         REQUIRE(!initResult.context.vAuthNonce.empty());
         REQUIRE(initResult.context.hashGenesis == testGenesis);
-        
-        /* Clean up config */
-        config::mapArgs.erase("-minerauthrequirechallenge");
     }
 
     SECTION("Falcon-1024 works with challenge skip")
