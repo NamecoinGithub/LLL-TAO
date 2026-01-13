@@ -257,6 +257,13 @@ namespace LLP
     }
 
 
+    /** Disconnect - Provides parameterless Disconnect() to match base class signature **/
+    void StatelessMinerConnection::Disconnect()
+    {
+        Disconnect("");  // Call the version with reason
+    }
+
+
     /** Disconnect - Complete resource cleanup **/
     void StatelessMinerConnection::Disconnect(const std::string& strReason)
     {
