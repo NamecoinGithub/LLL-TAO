@@ -18,6 +18,8 @@ ________________________________________________________________________________
 #include <LLP/include/network.h>
 
 #include <type_traits>
+#include <chrono>
+#include <thread>
 
 #include <LLP/types/tritium.h>
 #include <LLP/types/time.h>
@@ -198,15 +200,89 @@ namespace LLP
     template <class ProtocolType>
     Server<ProtocolType>::~Server()
     {
-        /* Wait for address manager. */
+        /* Step 1: Disconnect all active connections */
+        debug::log(0, FUNCTION, "Shutting down ", ProtocolType::Name(), " server...");
+        debug::log(0, FUNCTION, "  Disconnecting active connections");
+        DisconnectAll();
+        
+        /* Step 2: Wait for connections to cleanup (with timeout) */
+        /* Only do this for StatelessMinerConnection which has IsCleanedUp() */
+        if constexpr (std::is_same_v<ProtocolType, StatelessMinerConnection>)
+        {
+            auto start = std::chrono::steady_clock::now();
+            constexpr auto SHUTDOWN_TIMEOUT = std::chrono::seconds(10);
+            
+            debug::log(0, FUNCTION, "  Waiting for connections to cleanup (max 10s)...");
+            
+            while(std::chrono::steady_clock::now() - start < SHUTDOWN_TIMEOUT)
+            {
+                /* Check all connections across all threads */
+                bool all_cleaned = true;
+                uint32_t remaining = 0;
+                
+                for(uint16_t nThread = 0; nThread < CONFIG.MAX_THREADS; ++nThread)
+                {
+                    auto connections = THREADS_DATA[nThread]->CONNECTIONS.load();
+                    if(connections)
+                    {
+                        for(const auto& pConnection : *connections)
+                        {
+                            if(pConnection && pConnection->Connected())
+                            {
+                                if(!pConnection->IsCleanedUp())
+                                {
+                                    all_cleaned = false;
+                                    remaining++;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if(all_cleaned)
+                {
+                    debug::log(0, FUNCTION, "  All connections cleaned up");
+                    break;
+                }
+                
+                debug::log(2, FUNCTION, "  Waiting for ", remaining, " connections to cleanup...");
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            /* Check for timeout */
+            uint32_t still_active = 0;
+            for(uint16_t nThread = 0; nThread < CONFIG.MAX_THREADS; ++nThread)
+            {
+                auto connections = THREADS_DATA[nThread]->CONNECTIONS.load();
+                if(connections)
+                {
+                    for(const auto& pConnection : *connections)
+                    {
+                        if(pConnection && pConnection->Connected() && !pConnection->IsCleanedUp())
+                            still_active++;
+                    }
+                }
+            }
+            
+            if(still_active > 0)
+            {
+                debug::log(0, FUNCTION, "  WARNING: Shutdown timeout with ", still_active, 
+                           " connections still active - forcing cleanup");
+            }
+        }
+        
+        /* Step 3: Wait for address manager. */
+        debug::log(0, FUNCTION, "  Stopping address manager");
         if(THREAD_MANAGER.joinable())
             THREAD_MANAGER.join();
 
-        /* Wait for meter thread. */
+        /* Step 4: Wait for meter thread. */
+        debug::log(0, FUNCTION, "  Stopping meter thread");
         if(THREAD_METER.joinable())
             THREAD_METER.join();
 
-        /* Check all registered listening threads. */
+        /* Step 5: Check all registered listening threads. */
+        debug::log(0, FUNCTION, "  Stopping listening threads");
         for(auto& THREAD : THREAD_LISTEN)
         {
             /* Wait on listening threads. */
@@ -215,7 +291,7 @@ namespace LLP
         }
 
 
-        /* Check all registered upnp threads. */
+        /* Step 6: Check all registered upnp threads. */
         for(auto& THREAD : THREAD_UPNP)
         {
             /* Wait on listening threads. */
@@ -224,14 +300,15 @@ namespace LLP
         }
 
 
-        /* Delete the data threads. */
+        /* Step 7: Delete the data threads. */
+        debug::log(0, FUNCTION, "  Deleting data threads");
         for(uint16_t nIndex = 0; nIndex < CONFIG.MAX_THREADS; ++nIndex)
         {
             delete THREADS_DATA[nIndex];
             THREADS_DATA[nIndex] = nullptr;
         }
 
-        /* Delete the DDOS entries. */
+        /* Step 8: Delete the DDOS entries. */
         for(auto it = DDOS_MAP->begin(); it != DDOS_MAP->end(); ++it)
         {
             /* Delete each DDOS entry if they are not set to nullptr. */
@@ -239,12 +316,14 @@ namespace LLP
                 delete it->second;
         }
 
-        /* Clear the address manager. */
+        /* Step 9: Clear the address manager. */
         if(pAddressManager)
         {
             delete pAddressManager;
             pAddressManager = nullptr;
         }
+        
+        debug::log(0, FUNCTION, ProtocolType::Name(), " server shutdown complete");
     }
 
 
