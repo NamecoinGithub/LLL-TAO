@@ -1079,8 +1079,9 @@ miningssl=1
 miningsslrequired=1
 
 # Whitelist specific miner keys (Falcon-1024)
-minerallowkey=a1b2c3d4e5f6... (1793 bytes / 3586 hex chars)
-minerallowkey=f6e5d4c3b2a1... (1793 bytes / 3586 hex chars)
+# Note: Real keys are 3586 hex characters. Export from miner: nexusminer --export-pubkey
+minerallowkey=a1b2c3d4e5f6...[3586_hex_chars]...f6e5d4c3b2a1
+minerallowkey=f6e5d4c3b2a1...[3586_hex_chars]...a1b2c3d4e5f6
 
 # SSL configuration
 sslcert=/etc/ssl/certs/nexus-hiperf-pool.crt

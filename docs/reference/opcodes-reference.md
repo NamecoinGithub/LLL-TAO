@@ -995,7 +995,7 @@ Total Size: 1+ bytes (depends on reason length)
 **Document Version:** 1.0  
 **Protocol Version:** Stateless Mining 1.0  
 **LLL-TAO Version:** 5.1.0+  
-**Compatibility:** Backward compatible with legacy GET_BLOCK (0x0081)  
+**Compatibility:** Backward compatible with legacy protocol (Opcodes::Legacy::GET_BLOCK)  
 **Last Updated:** 2026-01-13
 
 ---

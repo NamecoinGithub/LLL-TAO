@@ -6,7 +6,7 @@ This document describes the node-side implementation of Falcon signature verific
 
 **Security Level:** NIST Level 5 (256-bit quantum resistance)  
 **Algorithm:** Falcon-1024 (NIST PQC standardized)  
-**Version:** LLL-TAO 5.1.0+
+**LLL-TAO Version:** 5.1.0+
 
 ---
 
