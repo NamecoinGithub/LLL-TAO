@@ -178,7 +178,7 @@ TEST_CASE("Authentication Challenge Skip Workaround", "[falcon][authentication][
 
         /* Create test genesis hash */
         uint256_t testGenesis;
-        testGenesis.SetHex("c396123d05eb3e02dcf7510604d389ecef55f5376617gc0g67ce11c0520ef344");
+        testGenesis.SetHex("c396123d05eb3e02dcf7510604d389ecef55f5376617ac0a67ce11c0520ef344");
 
         /* Create MINER_AUTH_INIT packet with genesis FIRST */
         MiningContext ctx;

@@ -880,10 +880,13 @@ namespace LLP
          * The miner's challenge-response signing code is not yet implemented.
          * For now, accept authentication based on MINER_AUTH_INIT signature alone.
          * 
-         * TODO: Re-enable challenge-response when miner implements:
+         * TODO (NexusMiner): Re-enable challenge-response when miner implements:
          *   1. Signing challenge nonce with disposable key
          *   2. Sending MINER_AUTH_RESPONSE packet
          *   3. Handling authentication result
+         * 
+         * Once the miner supports challenge-response, change the default to true
+         * and eventually remove the backward compatibility code path entirely.
          * 
          * This can be controlled via config: -minerauthrequirechallenge=true
          */
