@@ -64,8 +64,6 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
-        /* Use version control constants for cleaner code. */
-        using namespace Versions;
 
         /* Get the block state object. */
         bool GetLastState(BlockState &state, uint32_t nChannel)
@@ -518,7 +516,7 @@ namespace TAO
             {
                 /* Calculate the coinbase rewards from the coinbase transaction. */
                 uint64_t nCoinbaseRewards[3] = { 0, 0, 0 };
-                if(!State::UsesModernRetarget(nVersion)) //legacy blocks
+                if(!TAO::Ledger::Versions::State::UsesModernRetarget(nVersion)) //legacy blocks
                 {
                     /* Get the coinbase from the memory pool. */
                     Legacy::Transaction tx;
@@ -758,7 +756,7 @@ namespace TAO
                 return debug::error(FUNCTION, "block state failed to write");
 
             /* Signal to set the best chain. */
-            if(State::UsesModernRetarget(nVersion) && !IsHybrid())
+            if(TAO::Ledger::Versions::State::UsesModernRetarget(nVersion) && !IsHybrid())
             {
                 /* Set the chain trust. */
                 uint8_t nEquals  = 0;
@@ -1285,7 +1283,7 @@ namespace TAO
                 else if(proof.first == TRANSACTION::LEGACY)
                 {
                     /* Check for legacy transaction blocks. */
-                    if(State::UsesV9StakeRules(nVersion))
+                    if(TAO::Ledger::Versions::State::UsesV9StakeRules(nVersion))
                         return debug::error(FUNCTION, "legacy transactions disabled after version 9");
 
                     /* Start the script stopwatch. */
@@ -1490,7 +1488,7 @@ namespace TAO
                     uint64_t nStake = 0;
 
                     /* Handle for version 7+ blocks (Tritium coinstake). */
-                    if(State::UsesTritiumCoinstake(nVersion))
+                    if(TAO::Ledger::Versions::State::UsesTritiumCoinstake(nVersion))
                     {
                         /* Get the producer. */
                         Transaction tx;
@@ -1510,7 +1508,7 @@ namespace TAO
                     }
 
                     /* Handle for version 5-6 blocks. */
-                    else if(Block::IsTritiumPoW(nVersion))
+                    else if(TAO::Ledger::Versions::Block::IsTritiumPoW(nVersion))
                     {
                         /* Get the coinstake. */
                         Legacy::Transaction tx;
@@ -1656,7 +1654,7 @@ namespace TAO
         uint1024_t BlockState::SignatureHash() const
         {
             /* Signature hash for version 7+ blocks. */
-            if(State::UsesModernSignatureHash(nVersion))
+            if(TAO::Ledger::Versions::State::UsesModernSignatureHash(nVersion))
             {
                 /* Create a data stream to get the hash. */
                 DataStream ss(SER_GETHASH, LLP::PROTOCOL_VERSION);
@@ -1683,7 +1681,7 @@ namespace TAO
         uint1024_t BlockState::StakeHash() const
         {
             /* Version 7 or later stake block should have Tritium coinstake producer, stored as last tx in vtx */
-            if(State::UsesTritiumCoinstake(nVersion) && vtx.back().first == TRANSACTION::TRITIUM)
+            if(TAO::Ledger::Versions::State::UsesTritiumCoinstake(nVersion) && vtx.back().first == TRANSACTION::TRITIUM)
             {
                 /* Get the tritium transaction from the database*/
                 TAO::Ledger::Transaction tx;
@@ -1691,14 +1689,14 @@ namespace TAO
                     return debug::error(FUNCTION, "transaction is not on disk");
 
                 /* Use alternative function for version 9 blocks. */
-                if(State::UsesV9StakeRules(nVersion))
+                if(TAO::Ledger::Versions::State::UsesV9StakeRules(nVersion))
                     return Block::StakeHash(tx.hashGenesis);
 
                 return Block::StakeHash(tx.IsGenesis(), tx.hashGenesis);
             }
 
             /* pre-version 7 should have Legacy coinstake stored as vtx[0] */
-            else if(!State::UsesTritiumCoinstake(nVersion) && vtx[0].first == TRANSACTION::LEGACY)
+            else if(!TAO::Ledger::Versions::State::UsesTritiumCoinstake(nVersion) && vtx[0].first == TRANSACTION::LEGACY)
             {
                 /* Get the legacy transaction from the database. */
                 Legacy::Transaction tx;

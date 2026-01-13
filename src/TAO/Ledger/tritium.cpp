@@ -55,8 +55,6 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
-        /* Use version control constants for cleaner code. */
-        using namespace Versions;
 
         /* Default constructor. */
         TritiumBlock::TritiumBlock()
@@ -183,7 +181,7 @@ namespace TAO
         , vtx       ( )
         {
             /* Check for version conversions. */
-            if(!State::UsesModernRetarget(block.nVersion))
+            if(!TAO::Ledger::Versions::State::UsesModernRetarget(block.nVersion))
                 throw debug::exception(FUNCTION, "invalid sync block version for tritium block");
 
             /* Loop through transctions. */
@@ -460,7 +458,7 @@ namespace TAO
                 if(vtx[i].first == TRANSACTION::LEGACY)
                 {
                     /* Check for legacy transaction blocks. */
-                    if(State::UsesV9StakeRules(nVersion))
+                    if(TAO::Ledger::Versions::State::UsesV9StakeRules(nVersion))
                         return debug::error(FUNCTION, "legacy transactions disabled after version 9");
 
                     /* Track our conflicted flags here. */
@@ -682,7 +680,7 @@ namespace TAO
                 else if(proof.first == TRANSACTION::LEGACY)
                 {
                     /* Check for legacy transaction blocks. */
-                    if(State::UsesV9StakeRules(nVersion))
+                    if(TAO::Ledger::Versions::State::UsesV9StakeRules(nVersion))
                         return debug::error(FUNCTION, "legacy transactions disabled after version 9");
 
                     /* Track our conflicted flags here. */
