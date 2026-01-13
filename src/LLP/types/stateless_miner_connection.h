@@ -255,7 +255,7 @@ namespace LLP
          *  Calls Disconnect(const std::string&) with empty reason.
          *
          **/
-        void Disconnect() override;
+        void Disconnect();
 
         /** Disconnect
          *
