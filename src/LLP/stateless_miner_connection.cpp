@@ -105,6 +105,9 @@ namespace LLP
     , SESSION_MUTEX()
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
+    , m_nConnectionState(ConnectionState::CONNECTING)
+    , m_tStateChanged(std::chrono::steady_clock::now())
+    , m_bCleanupComplete(false)
     {
         /* Create disposable Falcon wrapper instance */
         m_pFalconWrapper = LLP::DisposableFalcon::Create();
@@ -133,6 +136,9 @@ namespace LLP
     , SESSION_MUTEX()
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
+    , m_nConnectionState(ConnectionState::CONNECTING)
+    , m_tStateChanged(std::chrono::steady_clock::now())
+    , m_bCleanupComplete(false)
     {
         /* Create disposable Falcon wrapper instance */
         m_pFalconWrapper = LLP::DisposableFalcon::Create();
@@ -161,6 +167,9 @@ namespace LLP
     , SESSION_MUTEX()
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
+    , m_nConnectionState(ConnectionState::CONNECTING)
+    , m_tStateChanged(std::chrono::steady_clock::now())
+    , m_bCleanupComplete(false)
     {
         /* Create disposable Falcon wrapper instance */
         m_pFalconWrapper = LLP::DisposableFalcon::Create();
@@ -193,6 +202,107 @@ namespace LLP
         /* Clean up block map */
         LOCK(MUTEX);
         clear_map();
+    }
+
+
+    /** SetState - Set connection state and log transition **/
+    void StatelessMinerConnection::SetState(ConnectionState state)
+    {
+        m_nConnectionState = state;
+        m_tStateChanged = std::chrono::steady_clock::now();
+        
+        debug::log(2, FUNCTION, "Connection ", GetAddress().ToStringIP(), 
+                   " state changed to ", StateToString(state));
+    }
+
+
+    /** StateToString - Convert connection state to string **/
+    std::string StatelessMinerConnection::StateToString(ConnectionState state)
+    {
+        switch(state)
+        {
+            case ConnectionState::CONNECTING:     return "CONNECTING";
+            case ConnectionState::AUTHENTICATING: return "AUTHENTICATING";
+            case ConnectionState::AUTHENTICATED:  return "AUTHENTICATED";
+            case ConnectionState::DISCONNECTING:  return "DISCONNECTING";
+            case ConnectionState::CLOSED:         return "CLOSED";
+            default:                              return "UNKNOWN";
+        }
+    }
+
+
+    /** CheckAuthenticationTimeout - Check for stuck authentication **/
+    void StatelessMinerConnection::CheckAuthenticationTimeout()
+    {
+        /* Only check if in AUTHENTICATING state */
+        if(m_nConnectionState != ConnectionState::AUTHENTICATING)
+            return;
+        
+        /* Calculate time spent authenticating */
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - m_tStateChanged).count();
+        
+        /* Timeout after 30 seconds */
+        constexpr int64_t AUTHENTICATION_TIMEOUT_SECONDS = 30;
+        
+        if(elapsed >= AUTHENTICATION_TIMEOUT_SECONDS)
+        {
+            debug::log(0, FUNCTION, 
+                       "Authentication timeout for ", GetAddress().ToStringIP(), 
+                       " after ", elapsed, " seconds - disconnecting");
+            
+            Disconnect("Authentication timeout");
+        }
+    }
+
+
+    /** Disconnect - Complete resource cleanup **/
+    void StatelessMinerConnection::Disconnect(const std::string& strReason)
+    {
+        /* Prevent double-cleanup */
+        if(m_nConnectionState == ConnectionState::DISCONNECTING || 
+           m_nConnectionState == ConnectionState::CLOSED)
+        {
+            debug::log(2, FUNCTION, "Already disconnecting/closed for ", GetAddress().ToStringIP());
+            return;
+        }
+        
+        debug::log(0, FUNCTION, "Disconnecting ", GetAddress().ToStringIP(), 
+                   strReason.empty() ? "" : " reason: " + strReason);
+        
+        /* Set state to prevent new operations */
+        SetState(ConnectionState::DISCONNECTING);
+        
+        /* Step 1: Clear session data */
+        {
+            std::lock_guard<std::mutex> lock(SESSION_MUTEX);
+            mapSessionKeys.clear();
+            debug::log(2, FUNCTION, "  Session cleared for ", GetAddress().ToStringIP());
+        }
+        
+        /* Step 2: Clear block templates */
+        {
+            LOCK(MUTEX);
+            if(!mapBlocks.empty())
+            {
+                clear_map();
+                debug::log(2, FUNCTION, "  Templates cleared for ", GetAddress().ToStringIP());
+            }
+        }
+        
+        /* Step 3: Close socket using base class method */
+        if(Connected())
+        {
+            BaseConnection::Disconnect();  // Call base class disconnect
+            debug::log(2, FUNCTION, "  Socket closed for ", GetAddress().ToStringIP());
+        }
+        
+        /* Step 4: Mark as fully cleaned up */
+        SetState(ConnectionState::CLOSED);
+        m_bCleanupComplete.store(true);
+        
+        debug::log(0, FUNCTION, "Cleanup complete for ", GetAddress().ToStringIP());
     }
 
 
@@ -370,11 +480,18 @@ namespace LLP
 
             /* Handle for a Packet Data Read. */
             case EVENTS::PACKET:
+            {
+                /* Check for authentication timeout on every packet */
+                CheckAuthenticationTimeout();
                 return;
+            }
 
             /* On Connect Event, Initialize Context. */
             case EVENTS::CONNECT:
             {
+                /* Set initial state */
+                SetState(ConnectionState::CONNECTING);
+                
                 /* Check auto-expiring cooldown FIRST before accepting connection */
                 if (AutoCooldownManager::Get().IsInCooldown(GetAddress())) {
                     debug::log(0, FUNCTION, "Connection rejected - IP in cooldown: ", GetAddress().ToStringIP());
@@ -382,7 +499,7 @@ namespace LLP
                     debug::log(0, FUNCTION, "   Cooldown will auto-expire - try again later");
                     
                     /* Disconnect immediately */
-                    Disconnect();
+                    Disconnect("In cooldown");
                     return;
                 }
                 
@@ -423,7 +540,7 @@ namespace LLP
             /* On Disconnect Event */
             case EVENTS::DISCONNECT:
             {
-                /* Debug output. */
+                /* Build reason string */
                 uint32_t reason = LENGTH;
                 std::string strReason;
 
@@ -446,9 +563,6 @@ namespace LLP
                         break;
                 }
 
-                debug::log(0, FUNCTION, "MinerLLP: Disconnected from ", GetAddress().ToStringIP(),
-                           " reason: ", strReason);
-
                 /* Notify local pool if enabled */
                 if(PoolDiscovery::IsLocalPoolEnabled() && context.fAuthenticated && context.hashGenesis != 0)
                 {
@@ -460,6 +574,9 @@ namespace LLP
                     LOCK(MUTEX);
                     StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
+
+                /* Call our complete cleanup method */
+                Disconnect(strReason);
 
                 return;
             }
@@ -1993,6 +2110,18 @@ namespace LLP
                     }
                 }
                 
+                /* Update state based on authentication packets */
+                if(PACKET.HEADER == MINER_AUTH_INIT)
+                {
+                    /* Starting authentication flow */
+                    SetState(ConnectionState::AUTHENTICATING);
+                }
+                else if(PACKET.HEADER == MINER_AUTH_RESPONSE && result.context.fAuthenticated)
+                {
+                    /* Authentication successful */
+                    SetState(ConnectionState::AUTHENTICATED);
+                }
+                
                 context = result.context;
 
                 /* Update manager with new context after successful packet processing */
@@ -3012,8 +3141,8 @@ namespace LLP
             // Add to auto-expiring cooldown list
             AutoCooldownManager::Get().AddCooldown(GetAddress(), RateLimitConfig::COOLDOWN_DURATION_SECONDS);
             
-            // Disconnect the connection
-            Disconnect();
+            // Disconnect the connection with reason
+            Disconnect("Rate limit violations");
         }
     }
 
