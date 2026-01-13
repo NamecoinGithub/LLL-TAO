@@ -875,20 +875,55 @@ namespace LLP
             .WithTimestamp(runtime::unifiedtimestamp())
             .WithFalconVersion(detected);
 
-        /* Build challenge */
-        Packet response(MINER_AUTH_CHALLENGE);
-        uint16_t nNonceLen = static_cast<uint16_t>(vAuthNonce.size());
-        response.DATA.push_back(static_cast<uint8_t>(nNonceLen >> 8));
-        response.DATA.push_back(static_cast<uint8_t>(nNonceLen & 0xFF));
-        response.DATA.insert(response.DATA.end(), vAuthNonce.begin(), vAuthNonce.end());
-        response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+        /* TEMPORARY WORKAROUND: Skip challenge-response for backward compatibility
+         * 
+         * The miner's challenge-response signing code is not yet implemented.
+         * For now, accept authentication based on MINER_AUTH_INIT signature alone.
+         * 
+         * TODO: Re-enable challenge-response when miner implements:
+         *   1. Signing challenge nonce with disposable key
+         *   2. Sending MINER_AUTH_RESPONSE packet
+         *   3. Handling authentication result
+         * 
+         * This can be controlled via config: -minerauthrequirechallenge=true
+         */
+        bool fRequireChallenge = config::GetBoolArg("-minerauthrequirechallenge", false);
+        
+        if(fRequireChallenge)
+        {
+            /* Full challenge-response flow (when miner is ready) */
+            debug::log(0, FUNCTION, "Sending MINER_AUTH_CHALLENGE to ", context.strAddress);
+            
+            /* Build challenge */
+            Packet response(MINER_AUTH_CHALLENGE);
+            uint16_t nNonceLen = static_cast<uint16_t>(vAuthNonce.size());
+            response.DATA.push_back(static_cast<uint8_t>(nNonceLen >> 8));
+            response.DATA.push_back(static_cast<uint8_t>(nNonceLen & 0xFF));
+            response.DATA.insert(response.DATA.end(), vAuthNonce.begin(), vAuthNonce.end());
+            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
-        /* DEBUG: Log response packet */
-        debug::log(2, FUNCTION, "MINER_AUTH_CHALLENGE response: ", response.DebugString());
+            /* DEBUG: Log response packet */
+            debug::log(2, FUNCTION, "MINER_AUTH_CHALLENGE response: ", response.DebugString());
+            debug::log(0, FUNCTION, "Sending MINER_AUTH_CHALLENGE nonce_len=", vAuthNonce.size());
 
-        debug::log(0, FUNCTION, "Sending MINER_AUTH_CHALLENGE nonce_len=", vAuthNonce.size());
-
-        return ProcessResult::Success(newContext, response);
+            /* Continue to wait for MINER_AUTH_RESPONSE */
+            return ProcessResult::Success(newContext, response);
+        }
+        else
+        {
+            /* Simplified flow: accept immediately after INIT signature verification */
+            debug::log(0, FUNCTION, 
+                       "MINER_AUTH_INIT signature verified for ", context.strAddress,
+                       " - accepting without challenge (backward compatibility mode)");
+            
+            /* Mark as authenticated */
+            MiningContext authenticatedContext = newContext.WithAuth(true);
+            
+            debug::log(0, FUNCTION, "Authentication successful for ", context.strAddress);
+            
+            /* Return success with no response packet (skip challenge step) */
+            return ProcessResult::Success(authenticatedContext);
+        }
     }
 
 

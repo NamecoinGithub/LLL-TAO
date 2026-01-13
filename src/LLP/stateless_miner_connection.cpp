@@ -2130,8 +2130,18 @@ namespace LLP
                     if(m_nConnectionState == ConnectionState::CONNECTING || 
                        m_nConnectionState == ConnectionState::AUTHENTICATING)
                     {
-                        /* Starting authentication flow */
-                        SetState(ConnectionState::AUTHENTICATING);
+                        /* Check if authentication completed immediately (challenge-response skipped) */
+                        if(result.context.fAuthenticated)
+                        {
+                            /* Workaround mode: MINER_AUTH_INIT completed authentication without challenge */
+                            debug::log(0, FUNCTION, "MINER_AUTH_INIT completed authentication immediately (challenge-response skipped)");
+                            SetState(ConnectionState::AUTHENTICATED);
+                        }
+                        else
+                        {
+                            /* Normal flow: Starting authentication flow, waiting for MINER_AUTH_RESPONSE */
+                            SetState(ConnectionState::AUTHENTICATING);
+                        }
                     }
                     else
                     {
