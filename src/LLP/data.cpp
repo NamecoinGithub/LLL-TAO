@@ -60,18 +60,44 @@ namespace LLP
     template <class ProtocolType>
     DataThread<ProtocolType>::~DataThread()
     {
+        /* Signal threads to stop */
         fDestruct = true;
         CONDITION.notify_all();
-
-        /* Wait for all data threads. */
-        if(DATA_THREAD.joinable())
-            DATA_THREAD.join();
-
         FLUSH_CONDITION.notify_all();
 
-        /* Wait for any threads still flushing buffers. */
+        /* Note: We cannot implement a true timeout in join() because std::thread::join() 
+         * blocks indefinitely. The proper timeout handling is done in Server destructor 
+         * before DataThread is deleted. If we reach here and threads haven't exited, 
+         * we must either wait indefinitely (old behavior) or detach them (new behavior).
+         * We choose to detach to prevent indefinite hangs. */
+
+        /* Handle DATA_THREAD */
+        if(DATA_THREAD.joinable())
+        {
+            /* Give it a brief moment to exit naturally */
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            
+            /* If still joinable, detach to prevent blocking */
+            if(DATA_THREAD.joinable())
+            {
+                debug::log(1, FUNCTION, "DataThread ", ID, " DATA_THREAD being detached in destructor");
+                DATA_THREAD.detach();
+            }
+        }
+
+        /* Handle FLUSH_THREAD */
         if(FLUSH_THREAD.joinable())
-            FLUSH_THREAD.join();
+        {
+            /* Give it a brief moment to exit naturally */
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            
+            /* If still joinable, detach to prevent blocking */
+            if(FLUSH_THREAD.joinable())
+            {
+                debug::log(1, FUNCTION, "DataThread ", ID, " FLUSH_THREAD being detached in destructor");
+                FLUSH_THREAD.detach();
+            }
+        }
     }
 
 

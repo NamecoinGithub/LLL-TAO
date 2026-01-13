@@ -29,12 +29,55 @@ void Shutdown()
 /** Catch Signal Handler function **/
 void HandleSIGTERM(int signum)
 {
+    /* Static counter to track repeated signals (for emergency exit) */
+    static std::atomic<int> signal_count{0};
+    
 #ifndef WIN32
-    if(signum != SIGPIPE)
+    if(signum == SIGPIPE)
+        return;  // Ignore SIGPIPE
+    
+    /* Increment signal count */
+    int count = signal_count.fetch_add(1);
+    
+    if(count == 0)
+    {
+        /* First signal - normal graceful shutdown */
+        debug::log(0, "Shutdown signal received - shutting down gracefully...");
         Shutdown();
+    }
+    else if(count >= 1)
+    {
+        /* Second or subsequent signal - force immediate exit */
+        debug::log(0, "Emergency shutdown signal received - forcing immediate exit");
+        debug::log(0, "WARNING: This may leave resources in inconsistent state");
+        debug::Shutdown();  // Try to flush logs
+        std::_Exit(1);  // Immediate exit without cleanup
+    }
 #else
-    if(signum != SIGINT) //catch this signal so Windoze can't terminate our process
-        Shutdown();
+    if(signum == SIGINT)
+    {
+        /* Increment signal count */
+        int count = signal_count.fetch_add(1);
+        
+        if(count == 0)
+        {
+            /* First signal - normal graceful shutdown */
+            debug::log(0, "Shutdown signal received - shutting down gracefully...");
+            Shutdown();
+        }
+        else if(count >= 1)
+        {
+            /* Second or subsequent signal - force immediate exit */
+            debug::log(0, "Emergency shutdown signal received - forcing immediate exit");
+            debug::log(0, "WARNING: This may leave resources in inconsistent state");
+            debug::Shutdown();  // Try to flush logs
+            std::_Exit(1);  // Immediate exit without cleanup
+        }
+        return;  // Don't call Shutdown again on Windows for SIGINT
+    }
+    
+    /* For other signals, proceed with normal shutdown */
+    Shutdown();
 #endif
 }
 
