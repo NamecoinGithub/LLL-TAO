@@ -10,6 +10,215 @@ This document describes the node-side implementation of Falcon signature verific
 
 ---
 
+## Dual Signature Architecture
+
+### Overview
+
+Nexus uses a **dual Falcon signature system** for enhanced security and operational flexibility. This is a CRITICAL aspect of the protocol that separates session authentication from blockchain proof.
+
+### Signature Types
+
+| Type | Purpose | Lifetime | Storage | Used In |
+|------|---------|----------|---------|---------|
+| **Disposable** | Session authentication | 24h-7d (configurable) | Session cache (memory) | MINER_AUTH (0xD000) |
+| **Physical** | Blockchain proof | Permanent | Blockchain block data | SUBMIT_BLOCK (0x0005) |
+
+### Why Two Signatures?
+
+**Disposable Signature (Session Layer):**
+- **Rotatable:** Can be changed without blockchain transaction
+- **Revocable:** If compromised, revoke session and generate new key
+- **Hot storage:** Can be stored on mining machine
+- **Session-bound:** Only authenticates the miner for 24h-7d
+- **NOT in blockchain:** Never stored permanently
+
+**Physical Signature (Blockchain Layer):**
+- **Immutable:** Linked permanently to blockchain account (genesis hash)
+- **Proof of ownership:** Proves block came from legitimate account
+- **Cold storage:** Should be kept in hardware wallet or secure server
+- **Block-bound:** Required for every block submission
+- **IN blockchain:** Stored permanently in block data
+
+### Critical Security Property
+
+**The node MUST verify BOTH signatures in sequence:**
+
+1. **Disposable signature** → Authenticates miner session (MINER_AUTH)
+2. **Physical signature** → Validates block ownership (SUBMIT_BLOCK)
+
+**If either signature fails, the operation MUST be rejected.**
+
+### Operational Model
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Mining Machine (Hot Environment)                    │
+│                                                      │
+│ ┌────────────────┐                                  │
+│ │ Disposable Key │ ← Used frequently (every 24h)    │
+│ │ (Session Auth) │ ← Can be on disk/memory         │
+│ └────────────────┘                                  │
+│                                                      │
+│ ┌────────────────┐                                  │
+│ │ Remote Signer  │ → Calls secure signing service   │
+│ │ Client         │ → For physical signatures        │
+│ └────────────────┘                                  │
+└─────────────────────────────────────────────────────┘
+                    ↓ Network call
+┌─────────────────────────────────────────────────────┐
+│ Secure Server (Cold Environment)                    │
+│                                                      │
+│ ┌────────────────┐                                  │
+│ │ Physical Key   │ ← Used rarely (per block found)  │
+│ │ (Block Proof)  │ ← Hardware wallet or HSM         │
+│ └────────────────┘                                  │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Complete Dual Signature Flow
+
+### Authentication and Block Submission Sequence
+
+```mermaid
+sequenceDiagram
+    participant Miner
+    participant Node
+    participant SessionCache
+    participant Blockchain
+    
+    Note over Miner,Blockchain: CRITICAL: Dual Signature System - Always This Order
+    
+    rect rgb(255, 230, 230)
+        Note over Miner,SessionCache: STEP 1: Session Authentication (Disposable Signature)
+        
+        Miner->>Miner: Load disposable Falcon key
+        Note right of Miner: Hot key on mining machine<br/>Can be rotated anytime
+        
+        Miner->>Miner: Generate session signature
+        Note right of Miner: Sign with disposable private key
+        
+        Miner->>Node: MINER_AUTH (0xD000)
+        Note right of Miner: Contains:<br/>• Genesis hash (32 bytes)<br/>• Disposable Falcon pubkey (897/1793 bytes)<br/>• Disposable signature<br/>• Miner ID
+        
+        Node->>Node: Derive ChaCha20 key
+        Note left of Node: key = SHA256(domain ‖ genesis)
+        
+        Node->>Node: Decrypt disposable pubkey
+        Note left of Node: ChaCha20 decryption
+        
+        Node->>Node: Verify DISPOSABLE signature
+        Note left of Node: Falcon::Verify(disposable_pubkey,<br/>message, signature)
+        
+        alt Disposable Signature Valid
+            Node->>SessionCache: Cache disposable pubkey
+            Note over SessionCache: Store for 24h-7d<br/>In-memory cache<br/>Not persisted to disk
+            
+            Node->>Node: Generate session ID
+            Note left of Node: 32-byte random session ID
+            
+            Node-->>Miner: MINER_AUTH_RESPONSE (0xD001)
+            Note left of Node: SUCCESS + session_id
+            
+            Note over Miner,Node: Session authenticated<br/>Miner can now request templates
+        else Disposable Signature Invalid
+            Node-->>Miner: MINER_AUTH_RESPONSE (0xD001)
+            Note left of Node: REJECT + error code
+            
+            Note over Miner: Authentication failed<br/>Cannot proceed
+        end
+    end
+    
+    Note over Miner,Blockchain: Mining happens... (0-60 seconds typical)
+    
+    rect rgb(230, 255, 230)
+        Note over Miner,Blockchain: STEP 2: Block Submission (Physical Signature)
+        
+        Miner->>Miner: Solution found!
+        Note right of Miner: Valid nonce discovered
+        
+        Miner->>Miner: Construct block data
+        Note right of Miner: Block header + transactions
+        
+        Miner->>Miner: Load physical Falcon key
+        Note right of Miner: CRITICAL: Cold key from<br/>hardware wallet or<br/>remote signing service
+        
+        Miner->>Miner: Sign block with physical key
+        Note right of Miner: Falcon signature over<br/>block hash (32 bytes)
+        
+        Miner->>Node: SUBMIT_BLOCK (0x0005)
+        Note right of Miner: Contains:<br/>• Block header<br/>• Transactions<br/>• PHYSICAL Falcon signature<br/>• Physical Falcon pubkey<br/>• Genesis hash
+        
+        Node->>Node: Validate proof-of-work
+        Note left of Node: Verify hash < target<br/>Time: 5-10ms
+        
+        Node->>Node: Verify PHYSICAL signature
+        Note left of Node: Falcon::Verify(physical_pubkey,<br/>block_hash, physical_signature)<br/>Time: 10-20ms
+        
+        alt Physical Signature Invalid
+            Node-->>Miner: REJECT (0x00)
+            Note left of Node: CRITICAL: Block rejected<br/>even if PoW is valid!
+            
+            Note over Miner: Physical signature failed<br/>Block not accepted
+        end
+        
+        Node->>Blockchain: Check genesis account exists
+        Note over Blockchain: Verify account is registered<br/>on blockchain
+        
+        alt Genesis Account Not Found
+            Node-->>Miner: REJECT (0x00)
+            Note left of Node: Genesis hash not found<br/>Account doesn't exist
+        end
+        
+        Node->>Blockchain: Get account public key
+        Note over Blockchain: Retrieve registered<br/>Falcon pubkey from account
+        
+        Node->>Node: Compare physical pubkey
+        Note left of Node: Verify submitted pubkey<br/>matches blockchain account pubkey
+        
+        alt Physical Pubkey Mismatch
+            Node-->>Miner: REJECT (0x00)
+            Note left of Node: Physical pubkey doesn't match<br/>blockchain account
+        end
+        
+        Note over Node: ALL VALIDATIONS PASSED
+        
+        Node->>Blockchain: Add block to chain
+        Note over Blockchain: Block permanently stored<br/>with physical signature
+        
+        Node->>Blockchain: Broadcast to network
+        Note over Blockchain: P2P propagation
+        
+        Node-->>Miner: ACCEPT (0x01)
+        Note left of Node: Block accepted!<br/>Reward will be paid to genesis account
+        
+        Note over Miner,Blockchain: Block mined successfully<br/>Physical signature proves ownership
+    end
+    
+    Note over Miner,Blockchain: BOTH signatures verified:<br/>✓ Disposable (session auth)<br/>✓ Physical (blockchain proof)
+```
+
+### Key Points
+
+**Sequence is MANDATORY:**
+1. **FIRST:** Disposable signature authenticates session
+2. **SECOND:** Physical signature proves block ownership
+
+**Both signatures MUST be valid:**
+- Invalid disposable → No session → Cannot mine
+- Invalid physical → Block rejected → No reward
+
+**Security isolation:**
+- Disposable key compromise → Rotate key, no blockchain impact
+- Physical key compromise → Full account compromise
+
+**Operational efficiency:**
+- Disposable key used frequently (every session)
+- Physical key used rarely (per block found, ~1-2 per day typical)
+
+---
+
 ## Falcon-1024 Background
 
 ### What is Falcon?
@@ -351,7 +560,284 @@ bool VerifyFalconSignature(
 
 ---
 
+## Node Verification Implementation
+
+### Step 1: Disposable Signature Verification (Session Auth)
+
+**Location:** `src/LLP/miner.cpp` (MiningServer::ProcessAuth)
+
+```cpp
+/* Process MINER_AUTH packet - Verify disposable signature */
+bool MiningServer::ProcessAuth(Packet& packet)
+{
+    /* Extract components from MINER_AUTH packet */
+    std::vector<uint8_t> vGenesis(32);
+    std::memcpy(&vGenesis[0], &packet.DATA[0], 32);
+    uint256 hashGenesis = uint256(vGenesis);
+    
+    /* Extract disposable Falcon public key */
+    uint16_t nPubkeyLen = *(uint16_t*)&packet.DATA[32];
+    std::vector<uint8_t> vDisposablePubkey(nPubkeyLen);
+    std::memcpy(&vDisposablePubkey[0], &packet.DATA[34], nPubkeyLen);
+    
+    /* Derive ChaCha20 session key from genesis */
+    std::string strDomain = "nexus-mining-chacha20-v1";
+    std::vector<uint8_t> vKey(32);
+    LLC::Argon2_256(vKey, strDomain + hashGenesis.ToString());
+    
+    /* Decrypt disposable pubkey if wrapped */
+    std::vector<uint8_t> vDecryptedPubkey;
+    if(config.GetBoolArg("-chacha20wrapping", true))
+    {
+        std::vector<uint8_t> vNonce(12);
+        std::memcpy(&vNonce[0], &packet.DATA[34 + nPubkeyLen], 12);
+        
+        if(!LLC::ChaCha20::Decrypt(vDisposablePubkey, vKey, vNonce, vDecryptedPubkey))
+        {
+            return error("ProcessAuth: ChaCha20 decryption failed");
+        }
+    }
+    else
+    {
+        vDecryptedPubkey = vDisposablePubkey;
+    }
+    
+    /* CRITICAL: Verify disposable Falcon signature */
+    std::vector<uint8_t> vMessage = ConstructAuthMessage(hashGenesis);
+    std::vector<uint8_t> vDisposableSignature;
+    ExtractSignatureFromPacket(packet, vDisposableSignature);
+    
+    if(!LLC::Falcon::Verify(vDecryptedPubkey, vMessage, vDisposableSignature))
+    {
+        return error("ProcessAuth: Disposable Falcon signature verification FAILED");
+    }
+    
+    /* Disposable signature VALID - Create session */
+    uint256 hashSessionID;
+    hashSessionID.SetRandom();
+    
+    /* Store disposable pubkey in session cache */
+    SessionCache[hashSessionID].vDisposablePubkey = vDecryptedPubkey;
+    SessionCache[hashSessionID].hashGenesis = hashGenesis;
+    SessionCache[hashSessionID].nTimeout = runtime::timestamp() + (24 * 3600); // 24h
+    SessionCache[hashSessionID].nChannel = 0; // Will be set by SET_CHANNEL
+    
+    /* Send success response */
+    Packet response(MINER_AUTH_RESPONSE);
+    response.DATA.push_back(1); // Success
+    response.DATA.insert(response.DATA.end(), hashSessionID.begin(), hashSessionID.end());
+    response.LENGTH = response.DATA.size();
+    
+    WritePacket(response);
+    
+    debug("ProcessAuth: Disposable signature VALID - Session created: %s", 
+          hashSessionID.ToString().substr(0, 20).c_str());
+    
+    return true;
+}
+```
+
+---
+
+### Step 2: Physical Signature Verification (Block Submission)
+
+**Location:** `src/TAO/Ledger/tritium.cpp` (Block::Accept)
+
+```cpp
+/* Verify block acceptance - Includes physical Falcon signature check */
+bool Block::Accept() const
+{
+    /* ... Previous validation (PoW, structure, etc.) ... */
+    
+    /* CRITICAL: Verify physical Falcon signature */
+    std::vector<uint8_t> vPhysicalPubkey = vchPubKey;
+    std::vector<uint8_t> vPhysicalSignature = vchBlockSig;
+    
+    /* Check signature is present */
+    if(vPhysicalSignature.empty())
+    {
+        return error("Block::Accept: Physical Falcon signature missing");
+    }
+    
+    /* Verify physical signature over block hash */
+    uint1024_t hashBlock = GetHash();
+    std::vector<uint8_t> vMessage(hashBlock.begin(), hashBlock.end());
+    
+    if(!LLC::Falcon::Verify(vPhysicalPubkey, vMessage, vPhysicalSignature))
+    {
+        return error("Block::Accept: Physical Falcon signature verification FAILED");
+    }
+    
+    /* Physical signature VALID - Now verify it matches blockchain account */
+    
+    /* Get genesis hash from block */
+    uint256 hashGenesis = hashPrevBlock; // Simplified - actual code more complex
+    
+    /* Load account from blockchain */
+    TAO::Register::Object account;
+    if(!TAO::Register::DB::Read(hashGenesis, account))
+    {
+        return error("Block::Accept: Genesis account %s not found on blockchain", 
+                     hashGenesis.ToString().c_str());
+    }
+    
+    /* Extract registered public key from account */
+    std::vector<uint8_t> vRegisteredPubkey;
+    if(!account.get("pubkey", vRegisteredPubkey))
+    {
+        return error("Block::Accept: Account has no registered public key");
+    }
+    
+    /* CRITICAL: Verify physical pubkey matches blockchain account */
+    if(vPhysicalPubkey != vRegisteredPubkey)
+    {
+        return error("Block::Accept: Physical pubkey mismatch - "
+                     "Block pubkey doesn't match blockchain account");
+    }
+    
+    /* ALL CHECKS PASSED */
+    debug("Block::Accept: Physical signature VALID and matches blockchain account");
+    
+    /* ... Continue with block acceptance ... */
+    
+    return true;
+}
+```
+
+---
+
+### Verification Summary
+
+**Node performs TWO separate verifications:**
+
+| Step | Signature Type | Verifies | Result |
+|------|----------------|----------|--------|
+| **1** | Disposable | Session authentication | Session created or rejected |
+| **2** | Physical | Block ownership + blockchain proof | Block accepted or rejected |
+
+**Both MUST succeed for successful mining.**
+
+---
+
 ## Security Properties
+
+### Disposable Signature Compromise
+
+**Scenario:** Attacker steals disposable private key from mining machine
+
+**Impact:**
+- ✓ Attacker CAN authenticate sessions (create mining sessions)
+- ✗ Attacker CANNOT submit valid blocks (no physical key)
+- ✗ Attacker CANNOT steal rewards (physical key required for blockchain proof)
+- ✗ Attacker CANNOT impersonate on blockchain (physical key not compromised)
+
+**Mitigation:**
+1. Detect compromise (unauthorized sessions)
+2. Revoke compromised disposable key
+3. Generate new disposable key
+4. Re-authenticate with new key
+5. **No blockchain transaction needed**
+6. Physical key remains safe (offline/hardware wallet)
+
+**Recovery time:** < 5 minutes (no blockchain involvement)
+
+---
+
+### Physical Signature Compromise
+
+**Scenario:** Attacker steals physical private key
+
+**Impact:**
+- ✗ **CRITICAL:** Full account compromise
+- ✗ Attacker CAN submit blocks as you
+- ✗ Attacker CAN steal rewards
+- ✗ Attacker CAN impersonate your blockchain identity
+- ✗ Attacker CAN drain your account
+
+**Mitigation:**
+1. **Immediate:** Rotate physical key on blockchain (requires transaction)
+2. **Immediate:** Transfer funds to new account
+3. **Long-term:** Use hardware wallet or HSM for physical key
+4. **Long-term:** Implement multi-signature (future enhancement)
+
+**Recovery time:** Hours to days (blockchain transactions required)
+
+---
+
+### Why This Design Excels
+
+**Separation of Concerns:**
+- **Hot key (disposable):** Operational security, rotatable, session-only
+- **Cold key (physical):** Maximum security, rarely used, blockchain proof
+
+**Risk Isolation:**
+- Mining machine compromise → Only disposable key at risk
+- Physical key compromise → Rare due to cold storage
+
+**Operational Efficiency:**
+- Mining doesn't require cold key access (only per-block signature)
+- Can use remote signing service for physical signatures
+- Disposable key rotation without blockchain overhead
+
+**Security vs Usability Balance:**
+- Frequent operations (auth) → Hot key (convenient)
+- Critical operations (block proof) → Cold key (secure)
+
+---
+
+### Best Practice Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Mining Infrastructure                                │
+│                                                      │
+│ ┌────────────────────────────────────────────────┐  │
+│ │ Mining Machine (Public Network)                │  │
+│ │                                                 │  │
+│ │ ├── Disposable Key (filesystem)                │  │
+│ │ │   • Used for session auth                    │  │
+│ │ │   • Rotated monthly                          │  │
+│ │ │   • Low-value risk                           │  │
+│ │                                                 │  │
+│ │ ├── Remote Signer Client                       │  │
+│ │ │   • Sends block hash to signing service     │  │
+│ │ │   • Receives physical signature              │  │
+│ │ │   • No private key on disk                   │  │
+│ │                                                 │  │
+│ │ ├── Nexus Miner                                │  │
+│ │     • Uses disposable for auth                 │  │
+│ │     • Requests physical signature via client   │  │
+│ └────────────────────────────────────────────────┘  │
+│                           ↕                          │
+│                    TLS Connection                    │
+│                           ↕                          │
+│ ┌────────────────────────────────────────────────┐  │
+│ │ Signing Server (Private Network / VPN)         │  │
+│ │                                                 │  │
+│ │ ├── Physical Key (hardware wallet)             │  │
+│ │ │   • Never leaves secure environment          │  │
+│ │ │   • Signs block hashes only                  │  │
+│ │ │   • Logs all signing operations              │  │
+│ │                                                 │  │
+│ │ ├── Rate Limiting                              │  │
+│ │ │   • Max 1000 signatures/day                  │  │
+│ │ │   • Alert on unusual activity                │  │
+│ │                                                 │  │
+│ │ ├── Audit Log                                  │  │
+│ │     • Record every signature request            │  │
+│ │     • Monitor for compromise                    │  │
+│ └────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+**Security layers:**
+1. Mining machine can be compromised → Only disposable key lost
+2. Signing server is isolated → Physical key remains safe
+3. Hardware wallet → Physical key never in software
+4. Rate limiting → Limits damage if signing server compromised
+5. Audit logging → Detect compromise attempts
+
+---
 
 ### Post-Quantum Security
 
@@ -511,6 +997,19 @@ minerallowkey=<hex_string_897_or_1793_bytes>
 ---
 
 ## Cross-References
+
+**See also (Miner perspective):**
+- <a href="https://github.com/Nexusoft/NexusMiner/blob/main/docs/current/security/falcon-authentication.md">NexusMiner Falcon Authentication</a> - Miner-side dual signature implementation
+- <a href="https://github.com/Nexusoft/NexusMiner/blob/main/docs/current/getting-started/key-generation.md">NexusMiner Key Management</a> - How to generate and manage both key types
+
+**See also (Node documentation):**
+- <a>Stateless Mining Protocol</a> - Complete protocol flow including authentication
+- <a>Mining Server Architecture</a> - Session cache design and management
+- <a>Opcodes Reference</a> - MINER_AUTH and SUBMIT_BLOCK packet formats
+
+**See also (Security):**
+- <a>Quantum Resistance</a> - Falcon-1024 cryptographic properties
+- <a>Network Security</a> - Key whitelisting and DDoS protection
 
 **Related Documentation:**
 - [Genesis Verification](genesis-verification.md)
