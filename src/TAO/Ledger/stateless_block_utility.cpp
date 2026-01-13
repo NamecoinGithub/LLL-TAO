@@ -358,11 +358,20 @@ namespace TAO::Ledger
         auto start = std::chrono::high_resolution_clock::now();
         
         BlockState stateUnified = ChainState::tStateBest.load();
-        BlockState statePrev;  // Will be populated by GetLastState()
+        BlockState statePrev = stateUnified;  // Initialize with best state to search backwards from
         
+        /* GetLastState searches backwards from statePrev to find the last block in the specified channel.
+         * This is expected behavior when channels advance independently:
+         * - Prime blocks are found ~every 50 seconds
+         * - Hash blocks are found ~every 50 seconds
+         * - They are NOT synchronized
+         * When a Prime block is found, we still need to find the last Hash block to create its template.
+         * GetLastState will search backwards from the new Prime block to find the previous Hash block. */
         if (!GetLastState(statePrev, nChannel))
         {
-            debug::error(FUNCTION, "Failed to get state for channel ", nChannel);
+            /* This should only happen at genesis or with an invalid channel.
+             * In normal operation, GetLastState should always find a block for Prime/Hash channels. */
+            debug::log(0, FUNCTION, "Failed to get state for channel ", nChannel, " (genesis or invalid channel)");
             return false;
         }
         
