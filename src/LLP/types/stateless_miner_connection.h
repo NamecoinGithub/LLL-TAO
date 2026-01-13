@@ -21,6 +21,7 @@ ________________________________________________________________________________
 #include <LLP/include/channel_state_manager.h>
 #include <TAO/Ledger/types/block.h>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <map>
 #include <memory>
@@ -71,6 +72,29 @@ namespace LLP
         /** Channel state managers for fork-aware mining (PR #136) **/
         std::unique_ptr<PrimeStateManager> m_pPrimeState;
         std::unique_ptr<HashStateManager> m_pHashState;
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // CONNECTION LIFECYCLE STATE MANAGEMENT (Resource Cleanup Fix)
+        // ═══════════════════════════════════════════════════════════════════════
+        
+        /** Connection lifecycle states **/
+        enum class ConnectionState : uint8_t
+        {
+            CONNECTING = 0,      // Socket opened, not yet processing
+            AUTHENTICATING = 1,  // Processing authentication (MINER_AUTH_* flow)
+            AUTHENTICATED = 2,   // Authentication complete, can mine
+            DISCONNECTING = 3,   // Disconnect initiated, cleanup in progress
+            CLOSED = 4           // Fully cleaned up, ready for deletion
+        };
+        
+        /** Current connection state **/
+        ConnectionState m_nConnectionState;
+        
+        /** Time when state last changed **/
+        std::chrono::steady_clock::time_point m_tStateChanged;
+        
+        /** Flag indicating cleanup is complete **/
+        std::atomic<bool> m_bCleanupComplete;
 
         // ═══════════════════════════════════════════════════════════════════════
         // AUTOMATED RATE LIMITING (Layer 2 Protection)
@@ -207,7 +231,62 @@ namespace LLP
          **/
         bool SendMiningTemplate();
 
+        /** GetState
+         *
+         *  Get the current connection state.
+         *
+         *  @return Current connection state
+         *
+         **/
+        ConnectionState GetState() const { return m_nConnectionState; }
+
+        /** IsCleanedUp
+         *
+         *  Check if connection cleanup is complete.
+         *
+         *  @return True if cleanup is complete
+         *
+         **/
+        bool IsCleanedUp() const { return m_bCleanupComplete.load(); }
+
     private:
+        /** SetState
+         *
+         *  Set connection state and log the transition.
+         *
+         *  @param[in] state New connection state
+         *
+         **/
+        void SetState(ConnectionState state);
+
+        /** StateToString
+         *
+         *  Convert connection state to string for logging.
+         *
+         *  @param[in] state Connection state to convert
+         *  @return String representation of state
+         *
+         **/
+        static std::string StateToString(ConnectionState state);
+
+        /** CheckAuthenticationTimeout
+         *
+         *  Check if connection has been stuck in AUTHENTICATING state too long.
+         *  Disconnects connection if authentication timeout (30 seconds) is exceeded.
+         *
+         **/
+        void CheckAuthenticationTimeout();
+
+        /** Disconnect
+         *
+         *  Override base class Disconnect to perform complete resource cleanup.
+         *  Clears session data, closes socket, stops threads, and marks as CLOSED.
+         *
+         *  @param[in] strReason Reason for disconnect (for logging)
+         *
+         **/
+        void Disconnect(const std::string& strReason = "");
+
         /** respond
          *
          *  Sends a packet response.
