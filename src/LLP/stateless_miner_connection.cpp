@@ -257,6 +257,13 @@ namespace LLP
     }
 
 
+    /** Disconnect - Override base class Disconnect() with no parameters **/
+    void StatelessMinerConnection::Disconnect()
+    {
+        Disconnect("");  // Call the version with reason
+    }
+
+
     /** Disconnect - Complete resource cleanup **/
     void StatelessMinerConnection::Disconnect(const std::string& strReason)
     {

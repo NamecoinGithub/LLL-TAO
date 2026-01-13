@@ -249,6 +249,24 @@ namespace LLP
          **/
         bool IsCleanedUp() const { return m_bCleanupComplete.load(); }
 
+        /** Disconnect
+         *
+         *  Override base class Disconnect() to perform complete cleanup.
+         *  Calls Disconnect(const std::string&) with empty reason.
+         *
+         **/
+        void Disconnect() override;
+
+        /** Disconnect
+         *
+         *  Performs complete resource cleanup with logging reason.
+         *  Clears session data, closes socket, and marks as CLOSED.
+         *
+         *  @param[in] strReason Reason for disconnect (for logging)
+         *
+         **/
+        void Disconnect(const std::string& strReason);
+
     private:
         /** SetState
          *
@@ -276,16 +294,6 @@ namespace LLP
          *
          **/
         void CheckAuthenticationTimeout();
-
-        /** Disconnect
-         *
-         *  Override base class Disconnect to perform complete resource cleanup.
-         *  Clears session data, closes socket, stops threads, and marks as CLOSED.
-         *
-         *  @param[in] strReason Reason for disconnect (for logging)
-         *
-         **/
-        void Disconnect(const std::string& strReason = "");
 
         /** respond
          *
