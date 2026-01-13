@@ -228,19 +228,32 @@ namespace LLP
                 
                 for(uint16_t nThread = 0; nThread < CONFIG.MAX_THREADS; ++nThread)
                 {
-                    auto connections = THREADS_DATA[nThread]->CONNECTIONS.load();
-                    if(connections)
+                    /* Get connection count using correct pattern */
+                    const uint16_t nSize = 
+                        static_cast<uint16_t>(THREADS_DATA[nThread]->CONNECTIONS->size());
+                    
+                    /* Loop through all connections by index */
+                    for(uint16_t nIndex = 0; nIndex < nSize; ++nIndex)
                     {
-                        for(const auto& pConnection : *connections)
+                        try
                         {
-                            if(pConnection && pConnection->Connected())
+                            /* Access connection using ->at(index) pattern */
+                            std::shared_ptr<ProtocolType> pConnection = 
+                                THREADS_DATA[nThread]->CONNECTIONS->at(nIndex);
+                            
+                            if(!pConnection)
+                                continue;
+                            
+                            /* Check if connection is still active and not cleaned up */
+                            if(pConnection->Connected() && !pConnection->IsCleanedUp())
                             {
-                                if(!pConnection->IsCleanedUp())
-                                {
-                                    all_cleaned = false;
-                                    remaining++;
-                                }
+                                all_cleaned = false;
+                                remaining++;
                             }
+                        }
+                        catch(const std::exception& e)
+                        {
+                            /* Connection may have been removed during iteration - ignore */
                         }
                     }
                 }
@@ -255,17 +268,26 @@ namespace LLP
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             
-            /* Check for timeout */
+            /* Check for timeout - count remaining connections */
             uint32_t still_active = 0;
             for(uint16_t nThread = 0; nThread < CONFIG.MAX_THREADS; ++nThread)
             {
-                auto connections = THREADS_DATA[nThread]->CONNECTIONS.load();
-                if(connections)
+                const uint16_t nSize = 
+                    static_cast<uint16_t>(THREADS_DATA[nThread]->CONNECTIONS->size());
+                
+                for(uint16_t nIndex = 0; nIndex < nSize; ++nIndex)
                 {
-                    for(const auto& pConnection : *connections)
+                    try
                     {
+                        std::shared_ptr<ProtocolType> pConnection = 
+                            THREADS_DATA[nThread]->CONNECTIONS->at(nIndex);
+                        
                         if(pConnection && pConnection->Connected() && !pConnection->IsCleanedUp())
                             still_active++;
+                    }
+                    catch(const std::exception& e)
+                    {
+                        /* Ignore exceptions during final count */
                     }
                 }
             }
