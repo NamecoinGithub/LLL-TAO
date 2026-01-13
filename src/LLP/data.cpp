@@ -71,11 +71,14 @@ namespace LLP
          * we must either wait indefinitely (old behavior) or detach them (new behavior).
          * We choose to detach to prevent indefinite hangs. */
 
+        /* Brief grace period to allow threads to exit naturally */
+        constexpr auto GRACE_PERIOD = std::chrono::milliseconds(100);
+
         /* Handle DATA_THREAD */
         if(DATA_THREAD.joinable())
         {
             /* Give it a brief moment to exit naturally */
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(GRACE_PERIOD);
             
             /* If still joinable, detach to prevent blocking */
             if(DATA_THREAD.joinable())
@@ -89,7 +92,7 @@ namespace LLP
         if(FLUSH_THREAD.joinable())
         {
             /* Give it a brief moment to exit naturally */
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(GRACE_PERIOD);
             
             /* If still joinable, detach to prevent blocking */
             if(FLUSH_THREAD.joinable())

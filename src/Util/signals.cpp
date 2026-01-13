@@ -45,13 +45,12 @@ void HandleSIGTERM(int signum)
         debug::log(0, "Shutdown signal received - shutting down gracefully...");
         Shutdown();
     }
-    else if(count >= 1)
+    else
     {
         /* Second or subsequent signal - force immediate exit */
         debug::log(0, "Emergency shutdown signal received - forcing immediate exit");
         debug::log(0, "WARNING: This may leave resources in inconsistent state");
-        debug::Shutdown();  // Try to flush logs
-        std::_Exit(1);  // Immediate exit without cleanup
+        std::_Exit(1);  // Immediate exit without cleanup (no debug::Shutdown to avoid conflicts)
     }
 #else
     if(signum == SIGINT)
@@ -65,13 +64,12 @@ void HandleSIGTERM(int signum)
             debug::log(0, "Shutdown signal received - shutting down gracefully...");
             Shutdown();
         }
-        else if(count >= 1)
+        else
         {
             /* Second or subsequent signal - force immediate exit */
             debug::log(0, "Emergency shutdown signal received - forcing immediate exit");
             debug::log(0, "WARNING: This may leave resources in inconsistent state");
-            debug::Shutdown();  // Try to flush logs
-            std::_Exit(1);  // Immediate exit without cleanup
+            std::_Exit(1);  // Immediate exit without cleanup (no debug::Shutdown to avoid conflicts)
         }
         return;  // Don't call Shutdown again on Windows for SIGINT
     }

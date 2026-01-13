@@ -344,16 +344,20 @@ namespace LLP
             THREADS_DATA[nIndex]->CONDITION.notify_all();
             THREADS_DATA[nIndex]->FLUSH_CONDITION.notify_all();
             
-            /* Wait up to 5 seconds for threads to become ready for deletion 
-             * We use a flag to track if delete completed successfully */
-            std::atomic<bool> delete_complete{false};
-            std::thread deleter([this, nIndex, &delete_complete]() {
+            /* Use shared pointer to keep the flag alive even after scope ends */
+            auto delete_complete = std::make_shared<std::atomic<bool>>(false);
+            
+            /* Capture the thread pointer to delete */
+            DataThread<ProtocolType>* pThread = THREADS_DATA[nIndex];
+            
+            /* Start deletion in background thread */
+            std::thread deleter([pThread, delete_complete]() {
                 try {
-                    delete THREADS_DATA[nIndex];
-                    delete_complete.store(true);
+                    delete pThread;
+                    delete_complete->store(true);
                 }
                 catch(const std::exception& e) {
-                    debug::error(FUNCTION, "Exception deleting thread ", nIndex, ": ", e.what());
+                    debug::error(FUNCTION, "Exception deleting thread: ", e.what());
                 }
             });
             
@@ -361,13 +365,13 @@ namespace LLP
             auto start = std::chrono::steady_clock::now();
             constexpr auto THREAD_TIMEOUT = std::chrono::seconds(5);
             
-            while(!delete_complete.load() && 
+            while(!delete_complete->load() && 
                   (std::chrono::steady_clock::now() - start < THREAD_TIMEOUT))
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             
-            if(delete_complete.load())
+            if(delete_complete->load())
             {
                 debug::log(2, FUNCTION, "      Thread ", nIndex, " stopped gracefully");
                 deleter.join();
@@ -381,7 +385,8 @@ namespace LLP
                 /* Detach the deleter thread - it will continue trying to delete in background */
                 deleter.detach();
                 
-                /* Mark as null even though delete hasn't completed to prevent double-delete */
+                /* Mark as null to prevent double-delete attempt later
+                 * Note: This intentionally leaks memory if thread is stuck, but prevents crashes */
                 THREADS_DATA[nIndex] = nullptr;
             }
         }

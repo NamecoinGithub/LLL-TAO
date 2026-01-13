@@ -369,7 +369,8 @@ int main(int argc, char** argv)
             {
                 debug::log(0, "CRITICAL: Shutdown exceeded 30 seconds - forcing exit");
                 debug::log(0, "This indicates stuck threads or deadlock");
-                debug::Shutdown();  // Try to flush logs
+                /* Use _Exit instead of exit() to skip destructors and atexit handlers */
+                /* This prevents potential deadlocks from calling debug::Shutdown() twice */
                 std::_Exit(1);  // Immediate exit without cleanup
             }
         });
