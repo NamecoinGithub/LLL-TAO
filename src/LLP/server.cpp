@@ -206,7 +206,13 @@ namespace LLP
         DisconnectAll();
         
         /* Step 2: Wait for connections to cleanup (with timeout) */
-        /* Only do this for StatelessMinerConnection which has IsCleanedUp() */
+        /* Only do this for StatelessMinerConnection which has IsCleanedUp() 
+         * Note: Using std::is_same_v for exact type matching is appropriate here because:
+         * 1. StatelessMinerConnection is a final implementation class, not designed for inheritance
+         * 2. The IsCleanedUp() method is specific to mining connection lifecycle management
+         * 3. Other protocol types (Tritium, API, etc.) don't need this cleanup waiting
+         * 4. This ensures we only add overhead where it's needed (mining server)
+         */
         if constexpr (std::is_same_v<ProtocolType, StatelessMinerConnection>)
         {
             auto start = std::chrono::steady_clock::now();

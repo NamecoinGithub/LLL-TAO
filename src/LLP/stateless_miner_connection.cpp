@@ -260,7 +260,13 @@ namespace LLP
     /** Disconnect - Complete resource cleanup **/
     void StatelessMinerConnection::Disconnect(const std::string& strReason)
     {
-        /* Prevent double-cleanup */
+        /* Prevent double-cleanup 
+         * Note: This check-then-set pattern is safe because:
+         * 1. Disconnect() is only called from single-threaded packet processing context
+         * 2. Once DISCONNECTING/CLOSED is set, no further packet processing occurs
+         * 3. The atomic m_bCleanupComplete flag provides additional safety
+         * 4. The Connection base class manages thread safety for socket operations
+         */
         if(m_nConnectionState == ConnectionState::DISCONNECTING || 
            m_nConnectionState == ConnectionState::CLOSED)
         {
@@ -2110,16 +2116,38 @@ namespace LLP
                     }
                 }
                 
-                /* Update state based on authentication packets */
+                /* Update state based on authentication packets with validation */
                 if(PACKET.HEADER == MINER_AUTH_INIT)
                 {
-                    /* Starting authentication flow */
-                    SetState(ConnectionState::AUTHENTICATING);
+                    /* Can start authentication from CONNECTING or AUTHENTICATING state */
+                    if(m_nConnectionState == ConnectionState::CONNECTING || 
+                       m_nConnectionState == ConnectionState::AUTHENTICATING)
+                    {
+                        /* Starting authentication flow */
+                        SetState(ConnectionState::AUTHENTICATING);
+                    }
+                    else
+                    {
+                        debug::warning(FUNCTION, "MINER_AUTH_INIT received in invalid state: ", 
+                                     StateToString(m_nConnectionState));
+                    }
                 }
                 else if(PACKET.HEADER == MINER_AUTH_RESPONSE && result.context.fAuthenticated)
                 {
-                    /* Authentication successful */
-                    SetState(ConnectionState::AUTHENTICATED);
+                    /* Must be in AUTHENTICATING state to complete authentication */
+                    if(m_nConnectionState == ConnectionState::AUTHENTICATING)
+                    {
+                        /* Authentication successful */
+                        SetState(ConnectionState::AUTHENTICATED);
+                    }
+                    else
+                    {
+                        debug::warning(FUNCTION, "MINER_AUTH_RESPONSE received in invalid state: ", 
+                                     StateToString(m_nConnectionState), 
+                                     " - authentication bypassed, disconnecting");
+                        Disconnect("Authentication protocol violation");
+                        return false;
+                    }
                 }
                 
                 context = result.context;
