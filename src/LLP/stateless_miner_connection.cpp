@@ -257,7 +257,7 @@ namespace LLP
     }
 
 
-    /** Disconnect - Override base class Disconnect() with no parameters **/
+    /** Disconnect - Provides parameterless Disconnect() to match base class signature **/
     void StatelessMinerConnection::Disconnect()
     {
         Disconnect("");  // Call the version with reason

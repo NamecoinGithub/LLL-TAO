@@ -251,7 +251,7 @@ namespace LLP
 
         /** Disconnect
          *
-         *  Override base class Disconnect() to perform complete cleanup.
+         *  Provides parameterless Disconnect() to match base class signature.
          *  Calls Disconnect(const std::string&) with empty reason.
          *
          **/
