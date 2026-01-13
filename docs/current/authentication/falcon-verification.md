@@ -18,15 +18,16 @@ Nexus uses a **dual Falcon signature system** for enhanced security and operatio
 
 ### Signature Types
 
-| Type | Purpose | Lifetime | Storage | Used In |
-|------|---------|----------|---------|---------|
-| **Disposable** | Session authentication + block verification | 24h-7d (configurable) | Session cache (memory) | MINER_AUTH (0xD000) + SUBMIT_BLOCK (0x0005) |
-| **Physical** | Blockchain proof (permanent record) | Permanent | Blockchain block data | SUBMIT_BLOCK (0x0005) - embedded after Disposable |
+| Type | Purpose | Lifetime | Storage | Used In | Default |
+|------|---------|----------|---------|---------|---------|
+| **Disposable** | Session authentication + block verification | 24h-7d (configurable) | Session cache (memory) | MINER_AUTH (0xD000) + SUBMIT_BLOCK (0x0005) | **Always ON** |
+| **Physical** | Blockchain proof (permanent record) | Permanent | Blockchain block data | SUBMIT_BLOCK (0x0005) - embedded after Disposable | **OFF** (optional) |
 
 ### Why Two Signatures?
 
 **Disposable Signature (Session + Block Verification Layer):**
-- **MANDATORY:** Enabled by default, matches miner's Falcon size (809 or 1577 bytes)
+- **ALWAYS ON:** Cannot be disabled, always enabled by default
+- **Matches miner's Falcon size:** 809 bytes (Falcon-512) or 1577 bytes (Falcon-1024)
 - **Used in two places:** MINER_AUTH (session auth) + SUBMIT_BLOCK (block verification)
 - **Rotatable:** Can be changed without blockchain transaction
 - **Revocable:** If compromised, revoke session and generate new key
@@ -35,26 +36,30 @@ Nexus uses a **dual Falcon signature system** for enhanced security and operatio
 - **Verified then discarded:** Used in SUBMIT_BLOCK for verification, NOT stored in blockchain
 
 **Physical Signature (Blockchain Layer):**
-- **MANDATORY:** Required for every block submission
-- **Comes AFTER Disposable:** Embedded after Disposable signature in sequence
+- **OPTIONAL:** Disabled by default, must be enabled via config (`physicalsigner=1`)
+- **When enabled:** Provides permanent blockchain proof of authorship
+- **Comes AFTER Disposable:** When present, embedded after Disposable signature in sequence
 - **Immutable:** Linked permanently to blockchain account (genesis hash)
 - **Proof of ownership:** Proves block came from legitimate account
 - **Cold storage:** Should be kept in hardware wallet or secure server
-- **Block-bound:** Required for every block submission
-- **IN blockchain:** Stored permanently in block data (809 or 1577 bytes)
+- **Block-bound:** When enabled, required for every block submission
+- **IN blockchain:** When enabled, stored permanently in block data (809 or 1577 bytes overhead)
 
 ### Critical Security Property
 
-**The node MUST verify BOTH signatures in sequence for SUBMIT_BLOCK:**
+**The node verifies Disposable signature in SUBMIT_BLOCK (always), and Physical signature if enabled:**
 
-1. **Disposable signature** → Verifies block was signed by authenticated session
-2. **Physical signature** → Validates block ownership and stores in blockchain
+1. **Disposable signature** → Verifies block was signed by authenticated session (ALWAYS verified)
+2. **Physical signature** → When enabled, validates block ownership and stores in blockchain (OPTIONAL)
 
-**SUBMIT_BLOCK packet contains BOTH signatures in order:**
-- FIRST: Disposable Falcon signature (verified, then discarded)
-- SECOND: Physical Falcon signature (verified, then stored in blockchain)
+**SUBMIT_BLOCK packet structure:**
+- **ALWAYS present:** Disposable Falcon signature (verified, then discarded)
+- **When enabled:** Physical Falcon signature (verified, then stored in blockchain)
+- **Sequence when Physical enabled:** Disposable FIRST, Physical SECOND
 
-**If either signature fails, the block MUST be rejected.**
+**Configuration:**
+- **Disposable:** Always enabled, cannot be disabled
+- **Physical:** Enable with `physicalsigner=1` in config (disabled by default)
 
 ### Operational Model
 
@@ -141,7 +146,7 @@ sequenceDiagram
     Note over Miner,Blockchain: Mining happens... (0-60 seconds typical)
     
     rect rgb(230, 255, 230)
-        Note over Miner,Blockchain: STEP 2: Block Submission (BOTH Signatures)
+        Note over Miner,Blockchain: STEP 2: Block Submission (Disposable ALWAYS + Physical OPTIONAL)
         
         Miner->>Miner: Solution found!
         Note right of Miner: Valid nonce discovered
@@ -150,18 +155,20 @@ sequenceDiagram
         Note right of Miner: Block header + transactions
         
         Miner->>Miner: Sign block with disposable key
-        Note right of Miner: FIRST: Disposable signature<br/>over block hash<br/>(from session key)
+        Note right of Miner: ALWAYS: Disposable signature<br/>over block hash<br/>(from session key)
         
-        Miner->>Miner: Sign block with physical key
-        Note right of Miner: SECOND: Physical signature<br/>over block hash<br/>(cold storage key)
+        opt Physical Falcon Enabled (physicalsigner=1)
+            Miner->>Miner: Sign block with physical key
+            Note right of Miner: OPTIONAL: Physical signature<br/>over block hash<br/>(cold storage key)
+        end
         
         Miner->>Node: SUBMIT_BLOCK (0x0005)
-        Note right of Miner: Contains (in order):<br/>• Block header<br/>• Transactions<br/>• DISPOSABLE signature (FIRST)<br/>• PHYSICAL signature (SECOND)<br/>• Physical Falcon pubkey<br/>• Genesis hash
+        Note right of Miner: Contains:<br/>• Block header<br/>• Transactions<br/>• DISPOSABLE signature (ALWAYS)<br/>• PHYSICAL signature (if enabled)<br/>• Physical Falcon pubkey (if enabled)<br/>• Genesis hash
         
         Node->>Node: Validate proof-of-work
         Note left of Node: Verify hash < target<br/>Time: 5-10ms
         
-        Node->>Node: Verify DISPOSABLE signature (FIRST)
+        Node->>Node: Verify DISPOSABLE signature (ALWAYS)
         Note left of Node: Falcon::Verify(disposable_pubkey,<br/>block_hash, disposable_signature)<br/>Matches cached session key<br/>Time: 10-20ms
         
         alt Disposable Signature Invalid
@@ -171,33 +178,35 @@ sequenceDiagram
             Note over Miner: Disposable signature failed<br/>Block not accepted
         end
         
-        Node->>Node: Verify PHYSICAL signature (SECOND)
-        Note left of Node: Falcon::Verify(physical_pubkey,<br/>block_hash, physical_signature)<br/>Time: 10-20ms
-        
-        alt Physical Signature Invalid
-            Node-->>Miner: REJECT (0x00)
-            Note left of Node: CRITICAL: Block rejected<br/>Physical signature verification failed!
+        opt Physical Falcon Enabled
+            Node->>Node: Verify PHYSICAL signature (OPTIONAL)
+            Note left of Node: Falcon::Verify(physical_pubkey,<br/>block_hash, physical_signature)<br/>Time: 10-20ms
             
-            Note over Miner: Physical signature failed<br/>Block not accepted
-        end
+            alt Physical Signature Invalid
+                Node-->>Miner: REJECT (0x00)
+                Note left of Node: CRITICAL: Block rejected<br/>Physical signature verification failed!
+                
+                Note over Miner: Physical signature failed<br/>Block not accepted
+            end
         
-        Node->>Blockchain: Check genesis account exists
-        Note over Blockchain: Verify account is registered<br/>on blockchain
-        
-        alt Genesis Account Not Found
-            Node-->>Miner: REJECT (0x00)
-            Note left of Node: Genesis hash not found<br/>Account doesn't exist
-        end
-        
-        Node->>Blockchain: Get account public key
-        Note over Blockchain: Retrieve registered<br/>Falcon pubkey from account
-        
-        Node->>Node: Compare physical pubkey
-        Note left of Node: Verify submitted pubkey<br/>matches blockchain account pubkey
-        
-        alt Physical Pubkey Mismatch
-            Node-->>Miner: REJECT (0x00)
-            Note left of Node: Physical pubkey doesn't match<br/>blockchain account
+            Node->>Blockchain: Check genesis account exists
+            Note over Blockchain: Verify account is registered<br/>on blockchain
+            
+            alt Genesis Account Not Found
+                Node-->>Miner: REJECT (0x00)
+                Note left of Node: Genesis hash not found<br/>Account doesn't exist
+            end
+            
+            Node->>Blockchain: Get account public key
+            Note over Blockchain: Retrieve registered<br/>Falcon pubkey from account
+            
+            Node->>Node: Compare physical pubkey
+            Note left of Node: Verify submitted pubkey<br/>matches blockchain account pubkey
+            
+            alt Physical Pubkey Mismatch
+                Node-->>Miner: REJECT (0x00)
+                Note left of Node: Physical pubkey doesn't match<br/>blockchain account
+            end
         end
         
         Note over Node: ALL VALIDATIONS PASSED
@@ -206,7 +215,7 @@ sequenceDiagram
         Note left of Node: Disposable signature verified<br/>but NOT stored in blockchain
         
         Node->>Blockchain: Add block to chain
-        Note over Blockchain: Block permanently stored<br/>with ONLY physical signature<br/>(disposable discarded)
+        Note over Blockchain: Block permanently stored<br/>Physical signature stored if enabled<br/>Disposable always discarded
         
         Node->>Blockchain: Broadcast to network
         Note over Blockchain: P2P propagation
@@ -214,38 +223,40 @@ sequenceDiagram
         Node-->>Miner: ACCEPT (0x01)
         Note left of Node: Block accepted!<br/>Reward will be paid to genesis account
         
-        Note over Miner,Blockchain: Block mined successfully<br/>Physical signature proves ownership<br/>Disposable signature was discarded
+        Note over Miner,Blockchain: Block mined successfully<br/>Disposable signature always verified and discarded<br/>Physical signature optional (if enabled)
     end
     
-    Note over Miner,Blockchain: BOTH signatures verified in SUBMIT_BLOCK:<br/>✓ Disposable (FIRST - verified, discarded)<br/>✓ Physical (SECOND - verified, stored)
+    Note over Miner,Blockchain: Disposable signature ALWAYS verified in SUBMIT_BLOCK<br/>✓ Disposable (ALWAYS - verified, discarded)<br/>✓ Physical (OPTIONAL - if enabled, verified and stored)
 ```
 
 ### Key Points
 
-**Sequence is MANDATORY in SUBMIT_BLOCK:**
-1. **FIRST:** Disposable signature verified (matches session)
-2. **SECOND:** Physical signature verified (matches blockchain account)
+**Disposable signature is ALWAYS verified in SUBMIT_BLOCK:**
+- **ALWAYS ON:** Cannot be disabled, always verified
+- **Verified then discarded:** Not stored in blockchain (0 bytes overhead)
 
-**Both signatures MUST be valid:**
-- Invalid disposable → Block rejected (even if physical is valid)
-- Invalid physical → Block rejected (even if disposable is valid)
+**Physical signature is OPTIONAL in SUBMIT_BLOCK:**
+- **OFF by default:** Enable with `physicalsigner=1` config
+- **When enabled:** Verified then stored in blockchain (809 or 1577 bytes overhead)
+- **Sequence when enabled:** Disposable FIRST, Physical SECOND
 
-**Storage difference:**
-- Disposable signature: Verified then **discarded** (not stored in blockchain)
-- Physical signature: Verified then **stored** (permanent blockchain record)
+**Validation rules:**
+- Invalid disposable → Block always rejected (disposable always required)
+- Invalid physical (when enabled) → Block rejected
+- Physical disabled → Only disposable verified, block accepted without physical signature
 
 **Size:**
 - Both signatures match miner's Falcon variant: 809 bytes (Falcon-512) or 1577 bytes (Falcon-1024)
-- Disposable signature overhead: 0 bytes (discarded)
-- Physical signature overhead: 809 or 1577 bytes (stored in blockchain)
+- Disposable signature overhead: 0 bytes (always discarded)
+- Physical signature overhead: 0 bytes (if disabled) or 809/1577 bytes (if enabled and stored)
 
 **Security isolation:**
 - Disposable key compromise → Rotate key, no blockchain impact
-- Physical key compromise → Full account compromise
+- Physical key compromise → Full account compromise (only relevant if enabled)
 
 **Operational efficiency:**
 - Disposable key used frequently (every session, every block)
-- Physical key used frequently (every block) but kept in cold storage
+- Physical key used only when enabled (every block if enabled) but kept in cold storage
 
 ---
 
@@ -284,13 +295,14 @@ Falcon (Fast Fourier Lattice-based Compact Signatures) is a NIST-standardized po
 
 Nexus uses **two types** of Falcon signatures:
 
-#### 1. Disposable Falcon (Session + Block Verification - MANDATORY)
+#### 1. Disposable Falcon (Session + Block Verification - ALWAYS ON)
 
 **Purpose:** Real-time mining protocol authentication + block verification  
 **Lifetime:** Single mining session (24h-7d configurable)  
 **Storage:** Session cache only (NOT stored on blockchain)  
 **Used in:** MINER_AUTH opcode + SUBMIT_BLOCK opcode (verified then discarded)  
-**Verified during:** Session establishment + block submission
+**Verified during:** Session establishment + block submission  
+**Default:** Always enabled, cannot be disabled
 
 **Workflow:**
 ```
@@ -300,32 +312,37 @@ Nexus uses **two types** of Falcon signatures:
 4. Node creates session bound to this key
 5. Disposable signature used for:
    a) Session authentication (MINER_AUTH)
-   b) Block verification (SUBMIT_BLOCK - FIRST signature)
+   b) Block verification (SUBMIT_BLOCK - ALWAYS verified)
 6. Session expires after 24 hours (default)
 7. Disposable signature verified in SUBMIT_BLOCK, then discarded
 8. Zero blockchain storage overhead
 ```
 
-#### 2. Physical Falcon (Blockchain Proof - MANDATORY)
+#### 2. Physical Falcon (Blockchain Proof - OPTIONAL, OFF by default)
 
 **Purpose:** Permanent proof of block authorship  
 **Lifetime:** Stored forever on blockchain  
 **Storage:** Stored in block (809 or 1577 bytes overhead)  
-**Used in:** SUBMIT_BLOCK opcode (mandatory, comes AFTER Disposable)  
-**Verified during:** Block validation
+**Used in:** SUBMIT_BLOCK opcode (optional, comes AFTER Disposable)  
+**Verified during:** Block validation (when enabled)  
+**Default:** Disabled by default, enable with `physicalsigner=1`
 
 **Workflow:**
 ```
-1. Miner signs solved block with physical Falcon key
-2. Miner includes BOTH signatures in SUBMIT_BLOCK (Disposable FIRST, Physical SECOND)
-3. Node verifies Disposable signature matches session key
-4. Node verifies Physical signature matches blockchain account
-5. Node discards Disposable signature
-6. Physical signature stored in block permanently
-7. Provides long-term authorship proof
+1. Enable Physical Falcon with physicalsigner=1 in config
+2. Miner signs solved block with physical Falcon key
+3. Miner includes BOTH signatures in SUBMIT_BLOCK (Disposable FIRST, Physical SECOND)
+4. Node verifies Disposable signature (always required)
+5. Node verifies Physical signature (when enabled)
+6. Node verifies Physical signature matches blockchain account
+7. Node discards Disposable signature
+8. Physical signature stored in block permanently
+9. Provides long-term authorship proof
 ```
 
-**Key Bonding:** Both signatures must use keys from the authenticated session.
+**Configuration:**
+- **To enable:** Set `physicalsigner=1` in nexus.conf or command line
+- **To disable (default):** Set `physicalsigner=0` or omit setting
 
 ---
 
@@ -489,9 +506,9 @@ SendAuthResponse(true, nSessionId);
 
 ## Dual Falcon Verification (SUBMIT_BLOCK)
 
-### SUBMIT_BLOCK Dual Signature Check
+### SUBMIT_BLOCK Signature Verification
 
-When a miner submits a solved block, the packet contains BOTH Falcon signatures in sequence:
+When a miner submits a solved block, the packet ALWAYS contains Disposable signature, and optionally Physical signature:
 
 ```cpp
 // src/LLP/stateless_miner_connection.cpp
@@ -499,7 +516,7 @@ void StatelessMinerConnection::ProcessSubmitBlock(const Packet& packet)
 {
     // ... extract and validate block ...
     
-    // FIRST: Extract and verify Disposable Falcon signature
+    // ALWAYS: Extract and verify Disposable Falcon signature
     uint16_t nDisposableSigLen;
     packet >> nDisposableSigLen;
     
@@ -517,7 +534,7 @@ void StatelessMinerConnection::ProcessSubmitBlock(const Packet& packet)
     std::vector<uint8_t> vDisposableSignature(nDisposableSigLen);
     packet >> vDisposableSignature;
     
-    // Verify disposable signature (FIRST check)
+    // Verify disposable signature (ALWAYS required)
     uint1024_t hashBlock = block.GetHash();
     if(!VerifyFalconSignature(vDisposableSignature, ctx.vMinerPubKey, hashBlock)) {
         SendBlockRejected("Invalid Disposable Falcon signature");
@@ -526,30 +543,40 @@ void StatelessMinerConnection::ProcessSubmitBlock(const Packet& packet)
     
     debug::log(1, "Disposable Falcon signature verified (", nDisposableSigLen, " bytes) - will be discarded");
     
-    // SECOND: Extract and verify Physical Falcon signature
-    uint16_t nPhysicalSigLen;
-    packet >> nPhysicalSigLen;
+    // OPTIONAL: Check if Physical Falcon is enabled
+    bool fPhysicalEnabled = config::GetBoolArg("-physicalsigner", false);
     
-    // Validate physical signature length matches Falcon version
-    if(nPhysicalSigLen != nExpectedLen) {
-        SendBlockRejected("Invalid Physical Falcon signature length");
-        return;
+    if(fPhysicalEnabled) {
+        // Extract and verify Physical Falcon signature
+        uint16_t nPhysicalSigLen;
+        packet >> nPhysicalSigLen;
+        
+        // Validate physical signature length matches Falcon version
+        if(nPhysicalSigLen != nExpectedLen) {
+            SendBlockRejected("Invalid Physical Falcon signature length");
+            return;
+        }
+        
+        // Extract physical signature bytes
+        std::vector<uint8_t> vPhysicalSignature(nPhysicalSigLen);
+        packet >> vPhysicalSignature;
+        
+        // Verify physical signature
+        if(!VerifyFalconSignature(vPhysicalSignature, ctx.vMinerPubKey, hashBlock)) {
+            SendBlockRejected("Invalid Physical Falcon signature");
+            return;
+        }
+        
+        // Attach physical signature to block (permanent storage)
+        block.vchBlockSig = vPhysicalSignature;
+        
+        debug::log(1, "Physical Falcon signature verified (", nPhysicalSigLen, " bytes) - will be stored in blockchain");
+    }
+    else {
+        debug::log(1, "Physical Falcon disabled - block will not have permanent signature");
     }
     
-    // Extract physical signature bytes
-    std::vector<uint8_t> vPhysicalSignature(nPhysicalSigLen);
-    packet >> vPhysicalSignature;
-    
-    // Verify physical signature (SECOND check)
-    if(!VerifyFalconSignature(vPhysicalSignature, ctx.vMinerPubKey, hashBlock)) {
-        SendBlockRejected("Invalid Physical Falcon signature");
-        return;
-    }
-    
-    // Attach ONLY physical signature to block (disposable is discarded)
-    block.vchBlockSig = vPhysicalSignature;
-    
-    debug::log(1, "Physical Falcon signature verified (", nPhysicalSigLen, " bytes) - will be stored in blockchain");
+    // Disposable signature always discarded (not stored)
     
     // Continue with block acceptance...
 }
@@ -690,17 +717,17 @@ bool MiningServer::ProcessAuth(Packet& packet)
 
 ---
 
-### Step 2: Dual Signature Verification (Block Submission)
+### Step 2: Disposable + Optional Physical Verification (Block Submission)
 
 **Location:** `src/LLP/miner.cpp` (MiningServer::ProcessSubmitBlock)
 
 ```cpp
-/* Process SUBMIT_BLOCK packet - Verify BOTH Falcon signatures in sequence */
+/* Process SUBMIT_BLOCK packet - Verify Disposable (always) + Physical (if enabled) */
 bool MiningServer::ProcessSubmitBlock(Packet& packet)
 {
     /* ... Previous validation (PoW, structure, etc.) ... */
     
-    /* STEP 1: Verify DISPOSABLE Falcon signature (FIRST) */
+    /* STEP 1: Verify DISPOSABLE Falcon signature (ALWAYS) */
     uint16_t nDisposableSigLen;
     std::memcpy(&nDisposableSigLen, &packet.DATA[offset], 2);
     offset += 2;
@@ -724,53 +751,62 @@ bool MiningServer::ProcessSubmitBlock(Packet& packet)
     debug("ProcessSubmitBlock: Disposable signature VALID (%d bytes) - will be discarded", 
           nDisposableSigLen);
     
-    /* STEP 2: Verify PHYSICAL Falcon signature (SECOND) */
-    uint16_t nPhysicalSigLen;
-    std::memcpy(&nPhysicalSigLen, &packet.DATA[offset], 2);
-    offset += 2;
+    /* STEP 2: Check if PHYSICAL Falcon is enabled (OPTIONAL) */
+    bool fPhysicalEnabled = config::GetBoolArg("-physicalsigner", false);
     
-    std::vector<uint8_t> vPhysicalSignature(nPhysicalSigLen);
-    std::memcpy(&vPhysicalSignature[0], &packet.DATA[offset], nPhysicalSigLen);
-    offset += nPhysicalSigLen;
-    
-    /* Extract physical public key */
-    std::vector<uint8_t> vPhysicalPubkey;
-    ExtractPubkeyFromPacket(packet, offset, vPhysicalPubkey);
-    
-    /* Verify physical signature over block hash */
-    if(!LLC::Falcon::Verify(vPhysicalPubkey, vMessage, vPhysicalSignature))
+    if(fPhysicalEnabled)
     {
-        return error("ProcessSubmitBlock: Physical Falcon signature verification FAILED");
+        /* Extract Physical Falcon signature */
+        uint16_t nPhysicalSigLen;
+        std::memcpy(&nPhysicalSigLen, &packet.DATA[offset], 2);
+        offset += 2;
+        
+        std::vector<uint8_t> vPhysicalSignature(nPhysicalSigLen);
+        std::memcpy(&vPhysicalSignature[0], &packet.DATA[offset], nPhysicalSigLen);
+        offset += nPhysicalSigLen;
+        
+        /* Extract physical public key */
+        std::vector<uint8_t> vPhysicalPubkey;
+        ExtractPubkeyFromPacket(packet, offset, vPhysicalPubkey);
+        
+        /* Verify physical signature over block hash */
+        if(!LLC::Falcon::Verify(vPhysicalPubkey, vMessage, vPhysicalSignature))
+        {
+            return error("ProcessSubmitBlock: Physical Falcon signature verification FAILED");
+        }
+        
+        /* Verify physical pubkey matches blockchain account */
+        uint256 hashGenesis = SessionCache[hashSessionID].hashGenesis;
+        
+        TAO::Register::Object account;
+        if(!TAO::Register::DB::Read(hashGenesis, account))
+        {
+            return error("ProcessSubmitBlock: Genesis account %s not found on blockchain", 
+                         hashGenesis.ToString().c_str());
+        }
+        
+        std::vector<uint8_t> vRegisteredPubkey;
+        if(!account.get("pubkey", vRegisteredPubkey))
+        {
+            return error("ProcessSubmitBlock: Account has no registered public key");
+        }
+        
+        if(vPhysicalPubkey != vRegisteredPubkey)
+        {
+            return error("ProcessSubmitBlock: Physical pubkey mismatch - "
+                         "Block pubkey doesn't match blockchain account");
+        }
+        
+        /* Attach physical signature to block (permanent storage) */
+        block.vchBlockSig = vPhysicalSignature;
+        
+        debug("ProcessSubmitBlock: Physical signature VALID (%d bytes) - will be stored in blockchain", 
+              nPhysicalSigLen);
     }
-    
-    /* Verify physical pubkey matches blockchain account */
-    uint256 hashGenesis = SessionCache[hashSessionID].hashGenesis;
-    
-    TAO::Register::Object account;
-    if(!TAO::Register::DB::Read(hashGenesis, account))
+    else
     {
-        return error("ProcessSubmitBlock: Genesis account %s not found on blockchain", 
-                     hashGenesis.ToString().c_str());
+        debug("ProcessSubmitBlock: Physical Falcon disabled - no permanent signature stored");
     }
-    
-    std::vector<uint8_t> vRegisteredPubkey;
-    if(!account.get("pubkey", vRegisteredPubkey))
-    {
-        return error("ProcessSubmitBlock: Account has no registered public key");
-    }
-    
-    if(vPhysicalPubkey != vRegisteredPubkey)
-    {
-        return error("ProcessSubmitBlock: Physical pubkey mismatch - "
-                     "Block pubkey doesn't match blockchain account");
-    }
-    
-    /* ALL CHECKS PASSED - Attach ONLY physical signature to block */
-    block.vchBlockSig = vPhysicalSignature;
-    /* Disposable signature is discarded here - not stored in blockchain */
-    
-    debug("ProcessSubmitBlock: Physical signature VALID (%d bytes) - will be stored in blockchain", 
-          nPhysicalSigLen);
     debug("ProcessSubmitBlock: Disposable signature discarded (not stored in blockchain)");
     
     /* ... Continue with block acceptance ... */
@@ -783,22 +819,22 @@ bool MiningServer::ProcessSubmitBlock(Packet& packet)
 
 ### Verification Summary
 
-**Node performs THREE verifications across two stages:**
+**Node performs verifications in two stages:**
 
-| Stage | Step | Signature Type | Verifies | Result |
-|-------|------|----------------|----------|--------|
-| **Stage 1** | **1** | Disposable | Session authentication (MINER_AUTH) | Session created or rejected |
-| **Stage 2** | **2** | Disposable | Block authenticity (SUBMIT_BLOCK) | Block continues or rejected |
-| **Stage 2** | **3** | Physical | Block ownership + blockchain proof (SUBMIT_BLOCK) | Block accepted or rejected |
+| Stage | Step | Signature Type | Requirement | Verifies | Result |
+|-------|------|----------------|-------------|----------|--------|
+| **Stage 1** | **1** | Disposable | **Always** | Session authentication (MINER_AUTH) | Session created or rejected |
+| **Stage 2** | **2** | Disposable | **Always** | Block authenticity (SUBMIT_BLOCK) | Block continues or rejected |
+| **Stage 2** | **3** | Physical | **If enabled** | Block ownership + blockchain proof (SUBMIT_BLOCK) | Block accepted or rejected |
 
-**All THREE verifications MUST succeed for successful mining:**
-- Stage 1 failure → No session → Cannot mine
-- Stage 2 Disposable failure → Block rejected (even if physical is valid)
-- Stage 2 Physical failure → Block rejected (even if disposable is valid)
+**Validation rules:**
+- Disposable verification (Stage 1) → ALWAYS required, failure prevents mining
+- Disposable verification (Stage 2) → ALWAYS required, failure rejects block
+- Physical verification (Stage 2) → ONLY if enabled (`physicalsigner=1`), failure rejects block
 
 **Storage:**
-- Disposable signature in SUBMIT_BLOCK: Verified then **discarded** (0 bytes blockchain overhead)
-- Physical signature in SUBMIT_BLOCK: Verified then **stored** (809 or 1577 bytes blockchain overhead)
+- Disposable signature in SUBMIT_BLOCK: ALWAYS verified then **discarded** (0 bytes blockchain overhead)
+- Physical signature in SUBMIT_BLOCK: When enabled, verified then **stored** (809 or 1577 bytes blockchain overhead)
 
 ---
 
@@ -1001,9 +1037,36 @@ vChaChaKey = SHA256(vSeed)[0:32]
 
 ## Configuration
 
-### Enable Falcon Verification
+### Disposable Falcon (Always Enabled)
 
-Falcon verification is **always enabled** and cannot be disabled. No configuration needed.
+Disposable Falcon signature verification is **always enabled** and cannot be disabled. No configuration needed - it's automatically used for all mining sessions and block submissions.
+
+### Physical Falcon (Optional, Disabled by Default)
+
+Physical Falcon signature is **disabled by default** and must be explicitly enabled:
+
+```ini
+# In nexus.conf
+physicalsigner=1    # Enable Physical Falcon signatures (OFF by default)
+```
+
+**To enable Physical Falcon:**
+1. Add `physicalsigner=1` to nexus.conf, or
+2. Start node with `-physicalsigner=1` command line flag
+
+**To disable (default):**
+- Set `physicalsigner=0`, or
+- Omit the setting entirely (default is OFF)
+
+**When enabled:**
+- Every submitted block must include a Physical Falcon signature
+- Signature is verified against blockchain account
+- Signature is stored permanently in the block (809 or 1577 bytes overhead)
+
+**When disabled (default):**
+- Only Disposable Falcon signature is verified
+- No permanent signature stored in blockchain (0 bytes overhead)
+- Blocks are still secure via Disposable signature + PoW
 
 ### Optional: Key Whitelisting
 
