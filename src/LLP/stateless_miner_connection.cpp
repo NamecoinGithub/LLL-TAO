@@ -571,8 +571,9 @@ namespace LLP
                         opcode == LLP::Opcodes::Legacy::SET_CHANNEL
                     );
                     
-                    /* Reject unsupported legacy opcodes */
-                    if(isLegacyProtocol && !isSupportedLegacyOpcode && !isStatelessProtocol)
+                    /* Reject legacy opcodes that are NOT in the supported whitelist */
+                    /* Accept all stateless protocol opcodes (0xD000-0xDFFF) */
+                    if(isLegacyProtocol && !isSupportedLegacyOpcode)
                     {
                         debug::error(FUNCTION, "LEGACY OPCODE REJECTED on stateless port from ", 
                                     GetAddress().ToStringIP(), ":", GetAddress().GetPort());

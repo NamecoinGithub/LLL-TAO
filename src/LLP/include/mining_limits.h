@@ -74,8 +74,12 @@ namespace LLP
          *  No legitimate mining packet should ever exceed this.
          *  
          *  This catches cases like the reported 478113 byte header.
+         *  
+         *  Note: This is the maximum for the packet payload (LENGTH field),
+         *  not including the 6-byte LLP header (2-byte opcode + 4-byte length).
+         *  Total on-wire bytes would be 32762 + 6 = 32768 (32 KB).
          **/
-        constexpr uint32_t MAX_ANY_PACKET_LENGTH = 32768;  // 32 KB
+        constexpr uint32_t MAX_ANY_PACKET_LENGTH = 32762;  // 32 KB minus 6-byte header
     }
 
 } // namespace LLP
