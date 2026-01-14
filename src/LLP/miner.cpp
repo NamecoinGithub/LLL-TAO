@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <LLP/include/global.h>
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/stateless_miner.h>
+#include <LLP/include/mining_limits.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
 #include <LLP/types/miner.h>
@@ -167,13 +168,40 @@ namespace LLP
             /* Handle for a Packet Header Read. */
             case EVENTS::HEADER:
             {
-                /* Log packet header received */
+                /* Get packet info for validation and logging */
                 if(Incoming())
                 {
                     Packet PACKET   = this->INCOMING;
+                    
+                    /* Log packet header received */
                     debug::log(1, FUNCTION, "MinerLLP: HEADER from ", GetAddress().ToStringIP(), 
                                " header=0x", std::hex, uint32_t(PACKET.HEADER), std::dec, 
                                " length=", PACKET.LENGTH);
+                    
+                    /* =================================================================
+                     * DEFENSIVE LENGTH PARSING (Legacy Miner)
+                     * =================================================================
+                     * Add same safety check as stateless miner to catch bogus lengths.
+                     * This helps diagnose if legacy server ever receives malformed packets.
+                     */
+                    if(PACKET.LENGTH > MiningLimits::MAX_ANY_PACKET_LENGTH)
+                    {
+                        debug::error(FUNCTION, "INVALID PACKET LENGTH from ", GetAddress().ToStringIP());
+                        debug::error(FUNCTION, "  Header:   0x", std::hex, uint32_t(PACKET.HEADER), std::dec,
+                                    " (", LLP::GetOpcodeName(PACKET.HEADER), ")");
+                        debug::error(FUNCTION, "  Length:   ", PACKET.LENGTH, " bytes (max: ", MiningLimits::MAX_ANY_PACKET_LENGTH, ")");
+                        
+                        /* Log hex dump of packet header for forensics */
+                        std::stringstream ss;
+                        ss << "  Raw header: " << std::hex << std::setfill('0');
+                        ss << std::setw(4) << PACKET.HEADER << " ";
+                        ss << std::setw(8) << PACKET.LENGTH;
+                        debug::error(FUNCTION, ss.str());
+                        
+                        /* Force disconnect */
+                        Disconnect();
+                        return;
+                    }
                 }
 
                 if(fDDOS.load() && Incoming())

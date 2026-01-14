@@ -103,7 +103,92 @@ miningthreads=4
 
 # Mining timeout (default: 30 seconds)
 miningtimeout=30
+
+# TLS/SSL Configuration (optional)
+# For localhost debugging, TLS is typically not needed
+# For production, use proper certificates
+
+# Enable SSL/TLS for mining connections
+miningssl=0  # Default: disabled (plaintext)
+
+# Require SSL (reject plaintext connections)
+miningsslrequired=0  # Default: SSL not required
+
+# SSL certificate and key (both required if using SSL)
+# If not specified, ephemeral self-signed cert will be auto-generated
+# sslcertificate=/path/to/cert.pem
+# sslcertificatekey=/path/to/key.pem
 ```
+
+### TLS/SSL Configuration Notes
+
+**For Localhost Debugging:**
+- Set `miningssl=0` (default) for plaintext connections
+- This avoids certificate complexity during development
+- Miner and node must both use plaintext
+
+**For Production:**
+- Set `miningssl=1` to enable TLS
+- Provide proper certificates via `sslcertificate` and `sslcertificatekey`
+- Or allow auto-generated self-signed cert (less secure)
+- Set `miningsslrequired=1` to reject plaintext connections
+
+**Common Configuration Errors:**
+- **TLS/Plaintext Mismatch**: Miner using TLS, node using plaintext (or vice versa)
+  - Symptom: Large bogus packet lengths (e.g., 478113)
+  - Solution: Ensure both miner and node use same protocol (both TLS or both plaintext)
+
+- **Missing Certificates**: `miningssl=1` without valid certificate files
+  - Node will auto-generate ephemeral cert with warning
+  - Or fail to start if `miningsslrequired=1`
+
+- **ChaCha20 Key Mismatch**: Using wrong genesis hash for encryption key
+  - Symptom: Framing errors, invalid packet lengths
+  - Solution: Ensure miner and node use same genesis block
+
+## Protocol Isolation
+
+The stateless miner server (`miningport`) operates in strict protocol isolation mode:
+
+**Accepted Opcodes:**
+- Phase 2 stateless opcodes: `0xD000-0xDFFF` range
+- Backward-compatible legacy opcodes:
+  - `GET_BLOCK (0x0081)`
+  - `SUBMIT_BLOCK (0x0001)`
+  - `GET_HEIGHT (0x0082)`
+  - `GET_REWARD (0x0083)`
+  - `GET_ROUND (0x0085)`
+  - `SET_CHANNEL (0x0003)`
+  - `MINER_AUTH_INIT (0x00CF)`
+  - `MINER_AUTH_RESPONSE (0x00D1)`
+  - `MINER_READY (0x00D8)`
+  - `SESSION_KEEPALIVE (0x00D4)`
+
+**Rejected Opcodes:**
+- Pure legacy opcodes not in the supported set
+- Attempting to use unsupported legacy opcodes will result in:
+  - Error log with opcode, protocol, length, and remote IP:port
+  - Immediate disconnection with explicit reason
+  - Diagnostic message suggesting correct protocol
+
+**Authentication Gate:**
+- Before Falcon authentication completes, only auth-related opcodes are accepted
+- Mining operations (GET_BLOCK, SUBMIT_BLOCK) require prior authentication
+- Unauthorized packets receive AUTH_REQUIRED response before disconnect
+
+**Defensive Packet Length Parsing:**
+- All packets are validated against maximum length limits before processing
+- Limits vary by packet type:
+  - General packets: 4 KB
+  - Auth packets: 8 KB (Falcon-1024 signatures)
+  - Block packets: 24 KB
+  - Absolute max: 32 KB for any packet
+- Packets exceeding limits trigger:
+  - Error log with hex dump of packet header
+  - Diagnostic hints (TLS mismatch, legacy opcode, framing error)
+  - Immediate disconnection
+
+These protections prevent protocol confusion and help diagnose misconfigurations.
 
 ## Logging
 

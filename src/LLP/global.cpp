@@ -25,6 +25,8 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/process.h>
 
+#include <fstream>
+
 
 
 namespace LLP
@@ -276,15 +278,139 @@ namespace LLP
             }
             else
             {
+                /* =================================================================
+                 * TLS/SSL MISCONFIGURATION DIAGNOSTICS
+                 * =================================================================
+                 * Check SSL configuration before starting mining server.
+                 * Fail fast if SSL is enabled but certificates are missing.
+                 */
+                bool fMiningSSL = config::GetBoolArg(std::string("-miningssl"), false);
+                bool fSSLRequired = config::GetBoolArg(std::string("-miningsslrequired"), false);
+                
+                if(fMiningSSL)
+                {
+                    /* Check if SSL certificates are configured */
+                    std::string strCert = config::GetArg("-sslcertificate", "");
+                    std::string strKey = config::GetArg("-sslcertificatekey", "");
+                    
+                    if(strCert.empty() && strKey.empty())
+                    {
+                        /* No external certificates - will use ephemeral self-signed cert */
+                        debug::warning(FUNCTION, "=== MINING SSL CONFIGURATION WARNING ===");
+                        debug::warning(FUNCTION, "Mining SSL enabled (-miningssl=1) without external certificates.");
+                        debug::warning(FUNCTION, "Server will use ephemeral self-signed certificate (auto-generated).");
+                        debug::warning(FUNCTION, "");
+                        debug::warning(FUNCTION, "For localhost testing: This is acceptable.");
+                        debug::warning(FUNCTION, "For production: Configure proper certificates:");
+                        debug::warning(FUNCTION, "  -sslcertificate=/path/to/cert.pem");
+                        debug::warning(FUNCTION, "  -sslcertificatekey=/path/to/key.pem");
+                        debug::warning(FUNCTION, "========================================");
+                    }
+                    else if(!strCert.empty() && !strKey.empty())
+                    {
+                        /* External certificates configured - verify they exist */
+                        std::ifstream certFile(strCert);
+                        std::ifstream keyFile(strKey);
+                        
+                        if(!certFile.good())
+                        {
+                            debug::error(FUNCTION, "=== MINING SSL CONFIGURATION ERROR ===");
+                            debug::error(FUNCTION, "SSL certificate file not found or not readable:");
+                            debug::error(FUNCTION, "  Path: ", strCert);
+                            debug::error(FUNCTION, "");
+                            
+                            if(fSSLRequired)
+                            {
+                                debug::error(FUNCTION, "SSL is REQUIRED (-miningsslrequired=1)");
+                                debug::error(FUNCTION, "Mining server will NOT start due to missing certificate.");
+                                debug::error(FUNCTION, "======================================");
+                                return false;  // Fail fast
+                            }
+                            else
+                            {
+                                debug::error(FUNCTION, "Disabling SSL for mining server.");
+                                debug::error(FUNCTION, "Server will accept plaintext connections only.");
+                                debug::error(FUNCTION, "======================================");
+                                fMiningSSL = false;  // Disable SSL and continue
+                            }
+                        }
+                        else if(!keyFile.good())
+                        {
+                            debug::error(FUNCTION, "=== MINING SSL CONFIGURATION ERROR ===");
+                            debug::error(FUNCTION, "SSL certificate key file not found or not readable:");
+                            debug::error(FUNCTION, "  Path: ", strKey);
+                            debug::error(FUNCTION, "");
+                            
+                            if(fSSLRequired)
+                            {
+                                debug::error(FUNCTION, "SSL is REQUIRED (-miningsslrequired=1)");
+                                debug::error(FUNCTION, "Mining server will NOT start due to missing key.");
+                                debug::error(FUNCTION, "======================================");
+                                return false;  // Fail fast
+                            }
+                            else
+                            {
+                                debug::error(FUNCTION, "Disabling SSL for mining server.");
+                                debug::error(FUNCTION, "Server will accept plaintext connections only.");
+                                debug::error(FUNCTION, "======================================");
+                                fMiningSSL = false;  // Disable SSL and continue
+                            }
+                        }
+                        else
+                        {
+                            debug::log(0, FUNCTION, "Mining SSL enabled with external certificates:");
+                            debug::log(0, FUNCTION, "  Certificate: ", strCert);
+                            debug::log(0, FUNCTION, "  Key: ", strKey);
+                        }
+                        
+                        certFile.close();
+                        keyFile.close();
+                    }
+                    else
+                    {
+                        /* One configured but not the other - invalid config */
+                        debug::error(FUNCTION, "=== MINING SSL CONFIGURATION ERROR ===");
+                        debug::error(FUNCTION, "Incomplete SSL certificate configuration:");
+                        debug::error(FUNCTION, "  Certificate: ", (strCert.empty() ? "<not set>" : strCert));
+                        debug::error(FUNCTION, "  Key: ", (strKey.empty() ? "<not set>" : strKey));
+                        debug::error(FUNCTION, "Both -sslcertificate and -sslcertificatekey must be set together.");
+                        debug::error(FUNCTION, "");
+                        
+                        if(fSSLRequired)
+                        {
+                            debug::error(FUNCTION, "SSL is REQUIRED (-miningsslrequired=1)");
+                            debug::error(FUNCTION, "Mining server will NOT start due to invalid config.");
+                            debug::error(FUNCTION, "======================================");
+                            return false;  // Fail fast
+                        }
+                        else
+                        {
+                            debug::error(FUNCTION, "Disabling SSL for mining server.");
+                            debug::error(FUNCTION, "======================================");
+                            fMiningSSL = false;  // Disable SSL and continue
+                        }
+                    }
+                }
+                else if(fSSLRequired)
+                {
+                    /* SSL required but not enabled - invalid config */
+                    debug::error(FUNCTION, "=== MINING SSL CONFIGURATION ERROR ===");
+                    debug::error(FUNCTION, "SSL is REQUIRED (-miningsslrequired=1) but not enabled (-miningssl=0)");
+                    debug::error(FUNCTION, "Set -miningssl=1 to enable SSL for mining connections.");
+                    debug::error(FUNCTION, "Mining server will NOT start.");
+                    debug::error(FUNCTION, "======================================");
+                    return false;  // Fail fast
+                }
+                
                 /* Generate our config object for stateless miner LLP server. */
                 LLP::Config CONFIG     = LLP::Config(GetMiningPort());
                 CONFIG.ENABLE_LISTEN   = true;
                 CONFIG.ENABLE_METERS   = false;
                 CONFIG.ENABLE_DDOS     = config::GetBoolArg(std::string("-miningddos"), false);
                 CONFIG.ENABLE_MANAGER  = false;
-                CONFIG.ENABLE_SSL      = config::GetBoolArg(std::string("-miningssl"), false);
+                CONFIG.ENABLE_SSL      = fMiningSSL;  // Use validated SSL flag
                 CONFIG.ENABLE_REMOTE   = true;
-                CONFIG.REQUIRE_SSL     = config::GetBoolArg(std::string("-miningsslrequired"), false);
+                CONFIG.REQUIRE_SSL     = fSSLRequired;
                 CONFIG.PORT_SSL        = 0;
                 CONFIG.MAX_INCOMING    = 128;
                 CONFIG.MAX_CONNECTIONS = 128;
@@ -299,6 +425,14 @@ namespace LLP
                 STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(CONFIG);
 
                 debug::log(0, FUNCTION, "Phase 2 Stateless Miner LLP server started on port ", GetMiningPort());
+                if(fMiningSSL)
+                {
+                    debug::log(0, FUNCTION, "  SSL/TLS: ENABLED");
+                }
+                else
+                {
+                    debug::log(0, FUNCTION, "  SSL/TLS: DISABLED (plaintext connections)");
+                }
             }
         }
 

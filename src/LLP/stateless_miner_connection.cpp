@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/llp_opcodes.h>
+#include <LLP/include/mining_limits.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
 #include <LLP/include/falcon_verify.h>
@@ -480,13 +481,151 @@ namespace LLP
             /* Handle for a Packet Header Read. */
             case EVENTS::HEADER:
             {
-                /* Log packet header received */
+                /* Get packet info for validation */
                 if(Incoming())
                 {
                     Packet PACKET = this->INCOMING;
+                    
+                    /* Log packet header received */
                     debug::log(2, FUNCTION, "MinerLLP: HEADER from ", GetAddress().ToStringIP(),
                                " header=0x", std::hex, uint32_t(PACKET.HEADER), std::dec,
                                " length=", PACKET.LENGTH);
+                    
+                    /* =================================================================
+                     * DEFENSIVE LENGTH PARSING
+                     * =================================================================
+                     * Check for absurd packet LENGTH values before processing.
+                     * Prevents bogus lengths like 478113 from reaching packet parser.
+                     * 
+                     * Context: Issue reports showed implausibly large header length 
+                     * values on stateless miner port, possibly due to protocol confusion
+                     * between legacy and stateless opcodes, or TLS framing issues.
+                     * 
+                     * This check catches obviously malformed packets early and logs
+                     * diagnostic information to help identify the root cause.
+                     */
+                    if(PACKET.LENGTH > MiningLimits::MAX_ANY_PACKET_LENGTH)
+                    {
+                        /* Log error with diagnostic information */
+                        debug::error(FUNCTION, "INVALID PACKET LENGTH from ", GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                        debug::error(FUNCTION, "  Header:   0x", std::hex, uint32_t(PACKET.HEADER), std::dec, 
+                                    " (", LLP::GetOpcodeName(PACKET.HEADER), ")");
+                        debug::error(FUNCTION, "  Protocol: ", LLP::GetProtocolName(PACKET.HEADER));
+                        debug::error(FUNCTION, "  Length:   ", PACKET.LENGTH, " bytes (max: ", MiningLimits::MAX_ANY_PACKET_LENGTH, ")");
+                        
+                        /* Log hex dump of raw header bytes for forensics */
+                        /* Packet format: BYTE 0-1: Header (16-bit), BYTE 2-5: Length (32-bit) */
+                        std::stringstream ss;
+                        ss << "  Raw header bytes: ";
+                        
+                        /* Try to get raw bytes if available - this helps diagnose framing issues */
+                        /* We'll show what we can from the parsed packet structure */
+                        ss << std::hex << std::setfill('0');
+                        ss << std::setw(4) << PACKET.HEADER << " ";  // Header as 16-bit hex
+                        ss << std::setw(8) << PACKET.LENGTH;          // Length as 32-bit hex
+                        
+                        debug::error(FUNCTION, ss.str());
+                        debug::error(FUNCTION, "  This may indicate:");
+                        debug::error(FUNCTION, "    - TLS/plaintext protocol mismatch");
+                        debug::error(FUNCTION, "    - Legacy opcode on stateless port");
+                        debug::error(FUNCTION, "    - Corrupted framing or ChaCha20 key mismatch");
+                        
+                        /* Disconnect with explicit reason */
+                        Disconnect("Invalid packet length exceeds maximum");
+                        return;
+                    }
+                    
+                    /* =================================================================
+                     * STRICT PROTOCOL ISOLATION
+                     * =================================================================
+                     * Stateless miner server should ONLY accept Phase 2 stateless
+                     * opcodes (0xD000-0xDFFF range) OR legacy opcodes that are
+                     * explicitly supported for backward compatibility.
+                     * 
+                     * Reject pure legacy opcodes (0x0000-0x0FFF) that aren't part of
+                     * the supported backward-compatible set. This prevents protocol
+                     * confusion between legacy MinerLLP and Phase 2 StatelessMinerLLP.
+                     * 
+                     * Supported opcodes for StatelessMinerConnection:
+                     * - Authentication: MINER_AUTH_INIT (0x00CF), MINER_AUTH_RESPONSE (0x00D1)
+                     * - Block ops: GET_BLOCK (0x0081), SUBMIT_BLOCK (0x0001)
+                     * - Status: GET_HEIGHT (0x0082), GET_REWARD (0x0083), GET_ROUND (0x0085)
+                     * - Subscription: MINER_READY (0x00D8)
+                     * - Phase 2 opcodes: All 0xD000-0xDFFF range
+                     */
+                    const uint16_t opcode = PACKET.HEADER;
+                    const bool isStatelessProtocol = (opcode >= 0xD000 && opcode <= 0xDFFF);
+                    const bool isLegacyProtocol = (opcode <= 0x0FFF);
+                    
+                    /* Whitelist of legacy opcodes that ARE supported on stateless port */
+                    const bool isSupportedLegacyOpcode = (
+                        opcode == LLP::Opcodes::Legacy::GET_BLOCK ||
+                        opcode == LLP::Opcodes::Legacy::SUBMIT_BLOCK ||
+                        opcode == LLP::Opcodes::Legacy::GET_HEIGHT ||
+                        opcode == LLP::Opcodes::Legacy::GET_REWARD ||
+                        opcode == LLP::Opcodes::Legacy::GET_ROUND ||
+                        opcode == LLP::Opcodes::Legacy::MINER_AUTH_INIT ||
+                        opcode == LLP::Opcodes::Legacy::MINER_AUTH_RESPONSE ||
+                        opcode == LLP::Opcodes::Legacy::MINER_READY ||
+                        opcode == LLP::Opcodes::Legacy::SESSION_KEEPALIVE ||
+                        opcode == LLP::Opcodes::Legacy::SET_CHANNEL
+                    );
+                    
+                    /* Reject unsupported legacy opcodes */
+                    if(isLegacyProtocol && !isSupportedLegacyOpcode && !isStatelessProtocol)
+                    {
+                        debug::error(FUNCTION, "LEGACY OPCODE REJECTED on stateless port from ", 
+                                    GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                        debug::error(FUNCTION, "  Header:   0x", std::hex, uint32_t(PACKET.HEADER), std::dec,
+                                    " (", LLP::GetOpcodeName(PACKET.HEADER), ")");
+                        debug::error(FUNCTION, "  Protocol: ", LLP::GetProtocolName(PACKET.HEADER));
+                        debug::error(FUNCTION, "  Length:   ", PACKET.LENGTH, " bytes");
+                        debug::error(FUNCTION, "  This opcode is not supported on the stateless miner port.");
+                        debug::error(FUNCTION, "  Stateless port accepts:");
+                        debug::error(FUNCTION, "    - Phase 2 opcodes: 0xD000-0xDFFF");
+                        debug::error(FUNCTION, "    - Backward-compatible legacy opcodes: GET_BLOCK, SUBMIT_BLOCK, etc.");
+                        debug::error(FUNCTION, "  Please ensure miner is using correct protocol version.");
+                        
+                        /* Disconnect with explicit reason */
+                        Disconnect("Unsupported legacy opcode on stateless port");
+                        return;
+                    }
+                    
+                    /* =================================================================
+                     * AUTHENTICATION GATE
+                     * =================================================================
+                     * Before authentication is complete, only accept auth-related
+                     * opcodes. This prevents unauthorized mining operations.
+                     */
+                    if(!context.fAuthenticated)
+                    {
+                        const bool isAuthOpcode = (
+                            opcode == LLP::Opcodes::Legacy::MINER_AUTH_INIT ||
+                            opcode == LLP::Opcodes::Legacy::MINER_AUTH_RESPONSE ||
+                            opcode == LLP::Opcodes::StatelessMining::MINER_AUTH ||
+                            opcode == LLP::Opcodes::StatelessMining::MINER_AUTH_RESPONSE
+                        );
+                        
+                        if(!isAuthOpcode)
+                        {
+                            debug::warning(FUNCTION, "Non-auth opcode received before authentication from ",
+                                         GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                            debug::warning(FUNCTION, "  Header:   0x", std::hex, uint32_t(PACKET.HEADER), std::dec,
+                                         " (", LLP::GetOpcodeName(PACKET.HEADER), ")");
+                            debug::warning(FUNCTION, "  Authentication required before mining operations.");
+                            
+                            /* Send auth required response instead of disconnecting immediately */
+                            /* This gives the miner a chance to authenticate properly */
+                            Packet response(LLP::Opcodes::Legacy::MINER_AUTH_RESULT);
+                            response.DATA.push_back(0x00);  // Auth required
+                            response.LENGTH = 1;
+                            WritePacket(response);
+                            
+                            /* Still disconnect after sending response for security */
+                            Disconnect("Authentication required");
+                            return;
+                        }
+                    }
                 }
                 break;
             }
