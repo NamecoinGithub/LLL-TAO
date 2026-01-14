@@ -3324,21 +3324,14 @@ namespace LLP
         uint32_t nChannelHeight = info.nNextChannelHeight;  // Next block in channel
         uint32_t nDifficulty = pBlock->nBits;
         
-        // Serialize as big-endian (network byte order)
-        vPacketData.push_back((nUnifiedHeight >> 24) & 0xFF);
-        vPacketData.push_back((nUnifiedHeight >> 16) & 0xFF);
-        vPacketData.push_back((nUnifiedHeight >> 8) & 0xFF);
-        vPacketData.push_back(nUnifiedHeight & 0xFF);
+        // Serialize metadata using utility function (big-endian/network byte order)
+        std::vector<uint8_t> vHeightBytes = convert::uint2bytes(nUnifiedHeight);
+        std::vector<uint8_t> vChannelBytes = convert::uint2bytes(nChannelHeight);
+        std::vector<uint8_t> vDifficultyBytes = convert::uint2bytes(nDifficulty);
         
-        vPacketData.push_back((nChannelHeight >> 24) & 0xFF);
-        vPacketData.push_back((nChannelHeight >> 16) & 0xFF);
-        vPacketData.push_back((nChannelHeight >> 8) & 0xFF);
-        vPacketData.push_back(nChannelHeight & 0xFF);
-        
-        vPacketData.push_back((nDifficulty >> 24) & 0xFF);
-        vPacketData.push_back((nDifficulty >> 16) & 0xFF);
-        vPacketData.push_back((nDifficulty >> 8) & 0xFF);
-        vPacketData.push_back(nDifficulty & 0xFF);
+        vPacketData.insert(vPacketData.end(), vHeightBytes.begin(), vHeightBytes.end());
+        vPacketData.insert(vPacketData.end(), vChannelBytes.begin(), vChannelBytes.end());
+        vPacketData.insert(vPacketData.end(), vDifficultyBytes.begin(), vDifficultyBytes.end());
         
         // Block template (216 bytes)
         vPacketData.insert(vPacketData.end(), vBlockTemplate.begin(), vBlockTemplate.end());
