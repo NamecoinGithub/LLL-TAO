@@ -62,6 +62,8 @@ ________________________________________________________________________________
 #include <Util/include/hex.h>
 
 #include <cstring>
+#include <sstream>
+#include <iomanip>
 
 
 namespace LLP
