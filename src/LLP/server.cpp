@@ -328,12 +328,67 @@ namespace LLP
         }
 
 
-        /* Step 7: Delete the data threads. */
+        /* Step 7: Delete the data threads with timeout */
         debug::log(0, FUNCTION, "  Deleting data threads");
         for(uint16_t nIndex = 0; nIndex < CONFIG.MAX_THREADS; ++nIndex)
         {
-            delete THREADS_DATA[nIndex];
-            THREADS_DATA[nIndex] = nullptr;
+            if(!THREADS_DATA[nIndex])
+                continue;
+            
+            debug::log(2, FUNCTION, "    Stopping data thread ", nIndex);
+            
+            /* Signal thread to stop */
+            THREADS_DATA[nIndex]->fDestruct.store(true);
+            
+            /* Notify thread to wake up if waiting on condition variable */
+            THREADS_DATA[nIndex]->CONDITION.notify_all();
+            THREADS_DATA[nIndex]->FLUSH_CONDITION.notify_all();
+            
+            /* Use shared pointer to keep the flag alive even after scope ends */
+            auto delete_complete = std::make_shared<std::atomic<bool>>(false);
+            
+            /* Capture the thread pointer to delete */
+            DataThread<ProtocolType>* pThread = THREADS_DATA[nIndex];
+            
+            /* Start deletion in background thread */
+            std::thread deleter([pThread, delete_complete]() {
+                try {
+                    delete pThread;
+                    delete_complete->store(true);
+                }
+                catch(const std::exception& e) {
+                    debug::error(FUNCTION, "Exception deleting thread: ", e.what());
+                }
+            });
+            
+            /* Wait up to 5 seconds for deletion to complete */
+            auto start = std::chrono::steady_clock::now();
+            constexpr auto THREAD_TIMEOUT = std::chrono::seconds(5);
+            
+            while(!delete_complete->load() && 
+                  (std::chrono::steady_clock::now() - start < THREAD_TIMEOUT))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            if(delete_complete->load())
+            {
+                debug::log(2, FUNCTION, "      Thread ", nIndex, " stopped gracefully");
+                deleter.join();
+                THREADS_DATA[nIndex] = nullptr;
+            }
+            else
+            {
+                debug::log(0, FUNCTION, "      WARNING: Thread ", nIndex, 
+                           " did not stop within 5 seconds - detaching");
+                
+                /* Detach the deleter thread - it will continue trying to delete in background */
+                deleter.detach();
+                
+                /* Mark as null to prevent double-delete attempt later
+                 * Note: This intentionally leaks memory if thread is stuck, but prevents crashes */
+                THREADS_DATA[nIndex] = nullptr;
+            }
         }
 
         /* Step 8: Delete the DDOS entries. */

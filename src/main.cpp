@@ -276,6 +276,10 @@ int main(int argc, char** argv)
 
     /* Check for failures or shutdown. */
     bool fFailed = config::fShutdown.load();
+    
+    /* Shutdown watchdog flag - declare here so it's accessible throughout shutdown process */
+    std::atomic<bool> shutdown_complete{false};
+    
     if(!fFailed)
     {
         /* Initialize LLD. */
@@ -348,6 +352,31 @@ int main(int argc, char** argv)
         }
 
 
+        /* Start shutdown watchdog thread (30 second timeout) */
+        std::thread watchdog([&shutdown_complete]() {
+            /* Wait for up to 30 seconds for shutdown to complete */
+            auto start = std::chrono::steady_clock::now();
+            constexpr auto SHUTDOWN_TIMEOUT = std::chrono::seconds(30);
+            
+            while(!shutdown_complete.load() && 
+                  (std::chrono::steady_clock::now() - start < SHUTDOWN_TIMEOUT))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            
+            /* If shutdown didn't complete in time, force exit */
+            if(!shutdown_complete.load())
+            {
+                debug::log(0, "CRITICAL: Shutdown exceeded 30 seconds - forcing exit");
+                debug::log(0, "This indicates stuck threads or deadlock");
+                /* Use _Exit instead of exit() to skip destructors and atexit handlers */
+                /* This prevents potential deadlocks from calling debug::Shutdown() twice */
+                std::_Exit(1);  // Immediate exit without cleanup
+            }
+        });
+        watchdog.detach();  // Let it run independently
+
+
         /* Wait for our startup thread to finish. */
         tStartup.join();
 
@@ -396,6 +425,10 @@ int main(int argc, char** argv)
 
     /* Startup performance metric. */
     debug::log(0, FUNCTION, "Closed in ", timer.ElapsedMilliseconds(), "ms");
+
+
+    /* Signal watchdog that shutdown completed successfully */
+    shutdown_complete.store(true);
 
 
     /* Close the debug log file once and for all. */
