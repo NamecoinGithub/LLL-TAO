@@ -49,11 +49,15 @@ namespace LLP
     {
 
         /* Handle Reading Packet Type Header. */
-        if(Available() >= 1 && INCOMING.IsNull())
+        if(Available() >= 2 && INCOMING.IsNull())
         {
-            std::vector<uint8_t> HEADER(1, 255);
-            if(Read(HEADER, 1) == 1)
-                INCOMING.HEADER = HEADER[0];
+            std::vector<uint8_t> HEADER(2, 0xFF);
+            if(Read(HEADER, 2) == 2)
+            {
+                // Deserialize 16-bit header from big-endian (network byte order)
+                INCOMING.HEADER = (static_cast<uint16_t>(HEADER[0]) << 8) | 
+                                 static_cast<uint16_t>(HEADER[1]);
+            }
         }
 
         /* At this point we need to check agin whether the packet is considered complete as some
