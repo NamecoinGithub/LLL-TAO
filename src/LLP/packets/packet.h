@@ -38,11 +38,11 @@ namespace LLP
     {
     public:
         /* Message typedef. */
-        typedef uint8_t message_t;
+        typedef uint16_t message_t;
 
 
         /** The packet message. **/
-        uint8_t                 HEADER;
+        uint16_t                HEADER;
 
 
         /** The length of the packet data. **/
@@ -55,7 +55,7 @@ namespace LLP
 
         /** Default Constructor **/
         Packet()
-        : HEADER (255)
+        : HEADER (0xFFFF)
         , LENGTH (0)
         , DATA   ( )
         {
@@ -125,7 +125,7 @@ namespace LLP
          **/
         void SetNull()
         {
-            HEADER   = 255;
+            HEADER   = 0xFFFF;
             LENGTH   = 0;
 
             DATA.clear();
@@ -139,7 +139,7 @@ namespace LLP
          **/
         bool IsNull() const
         {
-            return (HEADER == 255);
+            return (HEADER == 0xFFFF);
         }
 
 
@@ -293,7 +293,12 @@ namespace LLP
          **/
         std::vector<uint8_t> GetBytes() const
         {
-            std::vector<uint8_t> BYTES(1, HEADER);
+            std::vector<uint8_t> BYTES;
+            BYTES.reserve(2);  // Reserve space for 16-bit header
+            
+            // Serialize 16-bit header in big-endian (network byte order)
+            BYTES.push_back(static_cast<uint8_t>(HEADER >> 8));
+            BYTES.push_back(static_cast<uint8_t>(HEADER & 0xFF));
 
             /* Handle packets that carry data payloads (traditional data packets,
              * Falcon authentication packets, and reward binding packets) */
@@ -327,7 +332,12 @@ namespace LLP
          **/
         std::vector<uint8_t> GetBytesWithDebug(const std::string& strContext = "") const
         {
-            std::vector<uint8_t> BYTES(1, HEADER);
+            std::vector<uint8_t> BYTES;
+            BYTES.reserve(2);  // Reserve space for 16-bit header
+            
+            // Serialize 16-bit header in big-endian (network byte order)
+            BYTES.push_back(static_cast<uint8_t>(HEADER >> 8));
+            BYTES.push_back(static_cast<uint8_t>(HEADER & 0xFF));
 
             /* Log packet header info */
             std::string strLog = strContext.empty() ? "Packet::GetBytes" : strContext;

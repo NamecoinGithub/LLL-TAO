@@ -3268,24 +3268,24 @@ namespace LLP
         debug::log(0, "      Merkle: ", pBlock->hashMerkleRoot.SubString());
         
         /* Serialize block to 216 bytes */
-        std::vector<uint8_t> vTemplate;
+        std::vector<uint8_t> vBlockTemplate;
         try
         {
-            vTemplate = pBlock->Serialize();
+            vBlockTemplate = pBlock->Serialize();
             
-            if (vTemplate.empty())
+            if (vBlockTemplate.empty())
             {
                 debug::error(FUNCTION, "❌ Serialization returned empty vector");
                 return false;
             }
             
-            if (vTemplate.size() != 216)
+            if (vBlockTemplate.size() != 216)
             {
-                debug::error(FUNCTION, "❌ Unexpected template size: ", vTemplate.size(), " (expected 216)");
+                debug::error(FUNCTION, "❌ Unexpected template size: ", vBlockTemplate.size(), " (expected 216)");
                 return false;
             }
             
-            debug::log(0, "   ✅ Serialized: ", vTemplate.size(), " bytes");
+            debug::log(0, "   ✅ Serialized: ", vBlockTemplate.size(), " bytes");
         }
         catch (const std::exception& e)
         {
@@ -3293,14 +3293,75 @@ namespace LLP
             return false;
         }
         
-        /* Send template via BLOCK_DATA opcode */
-        Packet response(Opcodes::Legacy::BLOCK_DATA);
-        response.DATA = vTemplate;
-        response.LENGTH = static_cast<uint32_t>(vTemplate.size());
+        /* Build stateless GET_BLOCK packet (0xD008)
+         * Format: [metadata(12 bytes)][block template(216 bytes)] = 228 bytes total
+         * 
+         * Metadata structure:
+         *   - nUnifiedHeight (4 bytes) - Best block height
+         *   - nChannelHeight (4 bytes) - Channel-specific height  
+         *   - nDifficulty (4 bytes) - Target difficulty (nBits)
+         */
         
-        debug::log(0, "   📤 Sending BLOCK_DATA packet...");
-        debug::log(0, "      Opcode: ", (uint32_t)response.HEADER);
-        debug::log(0, "      Length: ", response.LENGTH);
+        /* Get blockchain state for metadata */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        
+        /* Get channel-specific height */
+        ChannelStateManager* pChannelMgr = GetChannelManager(context.nChannel);
+        if (!pChannelMgr)
+        {
+            debug::error(FUNCTION, "❌ Failed to get channel manager");
+            return false;
+        }
+        
+        HeightInfo info = pChannelMgr->GetHeightInfo();
+        
+        /* Build packet data with metadata */
+        std::vector<uint8_t> vPacketData;
+        vPacketData.reserve(228);
+        
+        // Metadata (12 bytes) - big-endian (network byte order)
+        uint32_t nUnifiedHeight = stateBest.nHeight;
+        uint32_t nChannelHeight = info.nNextChannelHeight;  // Next block in channel
+        uint32_t nDifficulty = pBlock->nBits;
+        
+        // Serialize as big-endian (network byte order)
+        vPacketData.push_back((nUnifiedHeight >> 24) & 0xFF);
+        vPacketData.push_back((nUnifiedHeight >> 16) & 0xFF);
+        vPacketData.push_back((nUnifiedHeight >> 8) & 0xFF);
+        vPacketData.push_back(nUnifiedHeight & 0xFF);
+        
+        vPacketData.push_back((nChannelHeight >> 24) & 0xFF);
+        vPacketData.push_back((nChannelHeight >> 16) & 0xFF);
+        vPacketData.push_back((nChannelHeight >> 8) & 0xFF);
+        vPacketData.push_back(nChannelHeight & 0xFF);
+        
+        vPacketData.push_back((nDifficulty >> 24) & 0xFF);
+        vPacketData.push_back((nDifficulty >> 16) & 0xFF);
+        vPacketData.push_back((nDifficulty >> 8) & 0xFF);
+        vPacketData.push_back(nDifficulty & 0xFF);
+        
+        // Block template (216 bytes)
+        vPacketData.insert(vPacketData.end(), vBlockTemplate.begin(), vBlockTemplate.end());
+        
+        if (vPacketData.size() != 228)
+        {
+            debug::error(FUNCTION, "❌ Invalid packet size: ", vPacketData.size(), " (expected 228)");
+            return false;
+        }
+        
+        /* Send via stateless GET_BLOCK opcode (0xD008) */
+        Packet response;
+        response.HEADER = Opcodes::StatelessMining::GET_BLOCK;  // 0xD008
+        response.DATA = vPacketData;
+        response.LENGTH = static_cast<uint32_t>(vPacketData.size());
+        
+        debug::log(0, "   📤 Sending GET_BLOCK packet (stateless)...");
+        debug::log(0, "      Opcode: 0x", std::hex, (uint32_t)response.HEADER, std::dec, " (GET_BLOCK)");
+        debug::log(0, "      Metadata: 12 bytes");
+        debug::log(0, "      Template: 216 bytes");
+        debug::log(0, "      Total: ", response.LENGTH, " bytes");
+        debug::log(0, "      Height: Unified=", nUnifiedHeight, " Channel=", nChannelHeight);
+        debug::log(0, "      Difficulty: 0x", std::hex, nDifficulty, std::dec);
         
         respond(response);
         
