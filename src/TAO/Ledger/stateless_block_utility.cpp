@@ -247,7 +247,7 @@ namespace TAO::Ledger
         }
 
         uint8_t nStatus = 0;
-        TAO::Ledger::Process(block, nStatus, nullptr);
+        TAO::Ledger::Process(block, nStatus);
 
         if(!(nStatus & TAO::Ledger::PROCESS::ACCEPTED))
         {
