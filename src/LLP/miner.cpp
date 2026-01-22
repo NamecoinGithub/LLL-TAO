@@ -1207,8 +1207,24 @@ namespace LLP
                     return true;
                 }
 
-                /* Make sure there is no inconsistencies in validating block. */
-                if(!validate_block(hashMerkle))
+                /* Validate and submit block using canonical ledger helper. */
+                TAO::Ledger::TritiumBlock* pBlock =
+                    dynamic_cast<TAO::Ledger::TritiumBlock*>(mapBlocks[hashMerkle]);
+                if(!pBlock)
+                {
+                    debug::log(0, FUNCTION, "SUBMIT_BLOCK failed: non-tritium block");
+                    respond(BLOCK_REJECTED);
+                    return true;
+                }
+
+                TAO::Ledger::SubmitResult submitResult =
+                    TAO::Ledger::SubmitMinedBlockForStatelessMining(*pBlock);
+                debug::log(0, FUNCTION, "SUBMIT_BLOCK result=", submitResult.reason,
+                           " channel=", submitResult.channel,
+                           " height=", submitResult.height,
+                           " hash=", submitResult.hashBlock.SubString());
+
+                if(!submitResult.accepted)
                 {
                     respond(BLOCK_REJECTED);
                     return true;

@@ -1620,10 +1620,35 @@ namespace LLP
                     return true;
                 }
 
-                /* Make sure there is no inconsistencies in validating block. */
-                if(!validate_block(hashMerkle))
+                /* Validate and submit block using canonical ledger helper. */
+                auto it = mapBlocks.find(hashMerkle);
+                TAO::Ledger::TritiumBlock* pBlock = nullptr;
+                const TemplateMetadata* pMeta = nullptr;
+                if(it != mapBlocks.end() && it->second.pBlock)
                 {
-                    debug::error(FUNCTION, "❌ validate_block failed (network rejected or stale)");
+                    pMeta = &it->second;
+                    pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(it->second.pBlock.get());
+                }
+
+                if(!pBlock)
+                {
+                    debug::error(FUNCTION, "❌ submit failed: non-tritium block");
+                    StatelessPacket response(BLOCK_REJECTED);
+                    respond(response);
+                    debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (non-tritium block) ===", ANSI_COLOR_RESET);
+                    return true;
+                }
+
+                TAO::Ledger::SubmitResult submitResult =
+                    TAO::Ledger::SubmitMinedBlockForStatelessMining(*pBlock);
+                debug::log(0, FUNCTION, "SUBMIT_BLOCK result=", submitResult.reason,
+                           " channel=", submitResult.channel,
+                           " height=", submitResult.height,
+                           " hash=", submitResult.hashBlock.SubString());
+
+                if(!submitResult.accepted)
+                {
+                    debug::error(FUNCTION, "❌ Submit rejected: ", submitResult.reason);
                     
                     /* Notify local pool if enabled */
                     if(PoolDiscovery::IsLocalPoolEnabled() && context.hashGenesis != 0)
@@ -1633,7 +1658,7 @@ namespace LLP
                     
                     StatelessPacket response(BLOCK_REJECTED);
                     respond(response);
-                    debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (validate_block failed) ===", ANSI_COLOR_RESET);
+                    debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED ===", ANSI_COLOR_RESET);
                     return true;
                 }
 
@@ -1647,8 +1672,7 @@ namespace LLP
                     
                     /* Calculate reward for block found notification */
                     uint64_t nReward = 0;
-                    auto it = mapBlocks.find(hashMerkle);
-                    if(it != mapBlocks.end() && it->second.pBlock)
+                    if(pMeta && pMeta->pBlock)
                     {
                         /* Get previous block state for reward calculation */
                         TAO::Ledger::BlockState statePrev = TAO::Ledger::ChainState::tStateBest.load();
@@ -1656,7 +1680,7 @@ namespace LLP
                         /* Get block reward (in NXS base units) */
                         nReward = TAO::Ledger::GetCoinbaseReward(
                             statePrev, 
-                            it->second.pBlock->nChannel, 
+                            pMeta->pBlock->nChannel, 
                             0);  // nType = 0 for mining rewards
                         
                         PoolDiscovery::OnBlockFound(context.hashGenesis, nReward);
@@ -2380,9 +2404,10 @@ namespace LLP
             }
             
             ++nAttempts;
+            const uint64_t nExtraNonce = nBlockIterator.fetch_add(1, std::memory_order_relaxed) + 1;
             pBlock = TAO::Ledger::CreateBlockForStatelessMining(
                 context.nChannel,
-                ++nBlockIterator,
+                nExtraNonce,
                 hashReward
             );
             

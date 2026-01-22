@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/create.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/difficulty.h>
+#include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/include/retarget.h>
 #include <TAO/Ledger/include/timelocks.h>
@@ -228,6 +229,35 @@ namespace TAO::Ledger
             debug::error(FUNCTION, "Block creation failed: ", e.what());
             return nullptr;
         }
+    }
+
+
+    /* Validate and submit mined Tritium blocks from stateless mining. */
+    SubmitResult SubmitMinedBlockForStatelessMining(TAO::Ledger::TritiumBlock& block)
+    {
+        SubmitResult result;
+        result.channel = block.nChannel;
+        result.height = block.nHeight;
+        result.hashBlock = block.GetHash();
+
+        if(!block.Check())
+        {
+            result.reason = "Check() failed";
+            return result;
+        }
+
+        uint8_t nStatus = 0;
+        TAO::Ledger::Process(block, nStatus, nullptr);
+
+        if(!(nStatus & TAO::Ledger::PROCESS::ACCEPTED))
+        {
+            result.reason = "Process() rejected";
+            return result;
+        }
+
+        result.accepted = true;
+        result.reason = "accepted";
+        return result;
     }
 
 }
