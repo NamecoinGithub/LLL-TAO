@@ -1208,10 +1208,10 @@ namespace LLP
                 }
 
                 /* Validate and submit block using canonical ledger helper. */
-                auto blockIt = mapBlocks.find(hashMerkle);
+                auto it = mapBlocks.find(hashMerkle);
                 TAO::Ledger::TritiumBlock* pBlock = nullptr;
-                if(blockIt != mapBlocks.end())
-                    pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(blockIt->second);
+                if(it != mapBlocks.end())
+                    pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(it->second);
                 if(!pBlock)
                 {
                     debug::log(0, FUNCTION, "SUBMIT_BLOCK failed: non-tritium block");
