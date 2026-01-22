@@ -1623,12 +1623,8 @@ namespace LLP
                 /* Validate and submit block using canonical ledger helper. */
                 auto it = mapBlocks.find(hashMerkle);
                 TAO::Ledger::TritiumBlock* pBlock = nullptr;
-                const TemplateMetadata* pMeta = nullptr;
                 if(it != mapBlocks.end() && it->second.pBlock)
-                {
-                    pMeta = &it->second;
                     pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(it->second.pBlock.get());
-                }
 
                 if(!pBlock)
                 {
@@ -1672,7 +1668,7 @@ namespace LLP
                     
                     /* Calculate reward for block found notification */
                     uint64_t nReward = 0;
-                    if(pMeta && pMeta->pBlock)
+                    if(it != mapBlocks.end() && it->second.pBlock)
                     {
                         /* Get previous block state for reward calculation */
                         TAO::Ledger::BlockState statePrev = TAO::Ledger::ChainState::tStateBest.load();
@@ -1680,7 +1676,7 @@ namespace LLP
                         /* Get block reward (in NXS base units) */
                         nReward = TAO::Ledger::GetCoinbaseReward(
                             statePrev, 
-                            pMeta->pBlock->nChannel, 
+                            it->second.pBlock->nChannel, 
                             0);  // nType = 0 for mining rewards
                         
                         PoolDiscovery::OnBlockFound(context.hashGenesis, nReward);

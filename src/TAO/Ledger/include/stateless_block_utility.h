@@ -78,7 +78,7 @@ namespace TAO
          *  @return SubmitResult containing acceptance status and details.
          *
          **/
-        SubmitResult SubmitMinedBlockForStatelessMining(TAO::Ledger::TritiumBlock& block);
+        SubmitResult SubmitMinedBlockForStatelessMining(const TAO::Ledger::TritiumBlock& block);
 
     }
 }

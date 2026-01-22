@@ -233,7 +233,7 @@ namespace TAO::Ledger
 
 
     /* Validate and submit mined Tritium blocks from stateless mining. */
-    SubmitResult SubmitMinedBlockForStatelessMining(TAO::Ledger::TritiumBlock& block)
+    SubmitResult SubmitMinedBlockForStatelessMining(const TAO::Ledger::TritiumBlock& block)
     {
         SubmitResult result;
         result.channel = block.nChannel;
