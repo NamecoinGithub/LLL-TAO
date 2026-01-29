@@ -340,7 +340,20 @@ namespace TAO::Ledger
         /* Add remaining block data */
         block.hashPrevBlock = tStateBest.GetHash();
         block.nChannel      = nChannel;
-        block.nHeight       = tStateBest.nHeight + 1;
+
+        /* Use channel-specific height (not unified height) */
+        TAO::Ledger::BlockState stateChannel = tStateBest;
+        const bool fHasChannelState = GetLastState(stateChannel, nChannel);
+        block.nHeight = stateChannel.nChannelHeight + 1;
+
+        if(!fHasChannelState)
+            debug::warning(FUNCTION, "No previous block for channel ", nChannel,
+                           ", using genesis channel height ", stateChannel.nChannelHeight);
+
+        const uint32_t nUnifiedHeight = tStateBest.nHeight + 1;
+        if(tStateBest.GetChannel() != nChannel && block.nHeight == nUnifiedHeight)
+            debug::warning(FUNCTION, "Unified height detected for channel ", nChannel,
+                           ": ", nUnifiedHeight);
         block.nBits         = GetNextTargetRequired(tStateBest, nChannel, false);
         block.nNonce        = 1;
         block.nTime         = std::max(tStateBest.GetBlockTime() + 1, runtime::unifiedtimestamp());
