@@ -30,7 +30,7 @@ Acceptance
 Constraints
 - 3000 char hard limit.
 - Add "Files to AVOID" when scope is narrow.
-- Skip build if Berkeley DB deps are missing.
+- Skip build if external dependencies are missing (e.g., Berkeley DB here).
 
 Integration Checklist
 - [ ] Integration points listed

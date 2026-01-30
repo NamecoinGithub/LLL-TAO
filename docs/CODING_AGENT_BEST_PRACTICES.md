@@ -16,10 +16,10 @@ reduce ambiguity for human-AI collaboration.
 
 ### Diagram Parity Principle
 - Visuals give humans parity with AI scanning speed.
-- Information density: 1 diagram ≈ 1000 words.
+- Information density: 1 diagram can replace ~1000 words (rule of thumb).
 
 ### Validation Speed Advantage
-- 10 seconds to validate a diagram vs 10 minutes to parse long prose.
+- Validate a diagram in seconds vs minutes for long prose (rule of thumb).
 - Shorten review cycles by front-loading visuals.
 
 ### Cognitive Load Reduction Strategies
@@ -84,7 +84,7 @@ reduce ambiguity for human-AI collaboration.
 - Specify “Files to AVOID” when scope is tight.
 
 ## Agent Limitation Awareness
-- **Build environment issues**: Berkeley DB deps may fail; specify “skip build, implement only.”
+- **Build environment issues**: external dependencies may fail (e.g., Berkeley DB here); specify “skip build, implement only.”
 - **Ambiguous requirements**: agent asks questions; provide exact file paths + line numbers.
 - **Scope creep**: agent modifies unrelated files; add explicit “Files to AVOID.”
 - **Integration confusion**: components don’t connect; add an architecture diagram.

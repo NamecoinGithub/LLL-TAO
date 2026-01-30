@@ -13,29 +13,14 @@
 - Combine related changes into single requirement.
 
 ### Anti-Patterns to Avoid
-- Code examples (wastes 300-500 chars per example).
+- Code examples (often hundreds of chars per example).
 - Redundant explanations (say once, precisely).
 - Background history (agent doesn't need context).
 - C++ syntax details (agent knows language).
 
-## Diagram Quick Examples
-### Architecture
-```
-[Client] -> [API] -> [Service] -> [DB]
-```
-
-### Flow (Decision)
-```
-[Start] -> [Validate] -> <Valid?>
-             | yes       | no
-             v           v
-         [Process]   [Return Error]
-```
-
-### State
-```
-(o Idle) --start--> (o Active) --stop--> (o Stopped)
-```
+## Diagram Reference
+Use the ASCII templates in [CODING_AGENT_BEST_PRACTICES.md](CODING_AGENT_BEST_PRACTICES.md) or
+[docs/diagrams](diagrams/README.md) for ready-to-copy diagrams.
 
 ## Case Studies (PRs #214-217)
 ### PR #214 Failure Analysis
