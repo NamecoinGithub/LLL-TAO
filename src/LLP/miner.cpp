@@ -1173,11 +1173,12 @@ namespace LLP
                 
                 uint512_t hashMerkle;
                 uint64_t nonce = 0;
-                uint256_t hashMinerKeyID = 0;
+                uint256_t hashMinerKeyID = 0;  // Reserved for future statistics tracking
+                (void)hashMinerKeyID;  // Suppress unused variable warning
                 
                 if(fWrapped)
                 {
-                    debug::log(0, FUNCTION, "Unwrapping DisposableFalcon-signed block submission...");
+                    debug::log(2, FUNCTION, "Unwrapping DisposableFalcon-signed block submission...");
                     
                     /* Verify miner has established Falcon authentication */
                     if(vMinerPubKey.empty())
@@ -1201,14 +1202,17 @@ namespace LLP
                         return true;
                     }
                     
-                    debug::log(0, FUNCTION, "✓ Signature verified successfully:");
-                    debug::log(0, FUNCTION, "  Merkle root: ", result.submission.hashMerkleRoot.SubString());
-                    debug::log(0, FUNCTION, "  Nonce: ", result.submission.nNonce);
-                    debug::log(0, FUNCTION, "  Timestamp: ", result.submission.nTimestamp);
-                    debug::log(0, FUNCTION, "  Miner keyID: ", result.hashKeyID.SubString());
+                    debug::log(2, FUNCTION, "✓ Signature verified successfully:");
+                    debug::log(3, FUNCTION, "  Merkle root: ", result.submission.hashMerkleRoot.SubString());
+                    debug::log(3, FUNCTION, "  Nonce: ", result.submission.nNonce);
+                    debug::log(3, FUNCTION, "  Timestamp: ", result.submission.nTimestamp);
+                    debug::log(3, FUNCTION, "  Miner keyID: ", result.hashKeyID.SubString());
                     
                     hashMerkle = result.submission.hashMerkleRoot;
                     nonce = result.submission.nNonce;
+                    
+                    /* Extract miner keyID for future statistics tracking.
+                     * Currently unused but reserved for accounting accepted blocks per miner. */
                     hashMinerKeyID = result.hashKeyID;
                 }
                 else
