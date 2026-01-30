@@ -2264,7 +2264,7 @@ namespace LLP
                         SessionRecoveryManager::Get().SaveDisposableKey(
                             result.context.hashKeyID,
                             result.context.vMinerPubKey,
-                            result.context.hashKeyID);
+                            LLC::MiningSessionKeys::DeriveKeyId(result.context.vMinerPubKey));
                         
                         debug::log(1, FUNCTION, "✓ Extracted and stored miner's Falcon pubkey for session 0x",
                                   std::hex, result.context.nSessionId, std::dec,

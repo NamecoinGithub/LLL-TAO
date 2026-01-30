@@ -88,6 +88,7 @@ namespace LLP
          *
          *  @param[in] strAddress Miner address
          *  @param[in] context Updated context
+         *  @param[in] nLane Lane identifier (0=Legacy, 1=Stateless)
          *
          **/
         void UpdateMiner(const std::string& strAddress, const MiningContext& context, uint8_t nLane = 1);

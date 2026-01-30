@@ -561,7 +561,7 @@ namespace LLP
                             SessionRecoveryManager::Get().SaveDisposableKey(
                                 updatedContext.hashKeyID,
                                 updatedContext.vMinerPubKey,
-                                updatedContext.hashKeyID);
+                                LLC::MiningSessionKeys::DeriveKeyId(updatedContext.vMinerPubKey));
                         }
 
                         debug::log(0, FUNCTION, "[Legacy Lane] Session registered: keyID=",
