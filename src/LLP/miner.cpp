@@ -17,6 +17,7 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
+#include <LLP/include/disposable_falcon.h>
 #include <LLP/include/opcode_utility.h>
 #include <LLP/types/miner.h>
 #include <LLP/templates/events.h>
@@ -1167,35 +1168,68 @@ namespace LLP
                     return true;
                 }
 
-                /* Log signature mode for diagnostics */
-                if(PACKET.DATA.size() > FalconConstants::SUBMIT_BLOCK_WRAPPER_MAX)
+                /* Check if payload is wrapped with DisposableFalcon signature */
+                bool fWrapped = (PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN);
+                
+                uint512_t hashMerkle;
+                uint64_t nonce = 0;
+                uint256_t hashMinerKeyID = 0;
+                
+                if(fWrapped)
                 {
-                    debug::log(2, FUNCTION, "SUBMIT_BLOCK: Dual-signature mode detected");
-                }
-                else if(PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN)
-                {
-                    debug::log(3, FUNCTION, "SUBMIT_BLOCK: Single-signature mode");
+                    debug::log(0, FUNCTION, "Unwrapping DisposableFalcon-signed block submission...");
+                    
+                    /* Verify miner has established Falcon authentication */
+                    if(vMinerPubKey.empty())
+                    {
+                        debug::error(FUNCTION, "No Falcon public key found - miner not authenticated");
+                        respond(BLOCK_REJECTED);
+                        return true;
+                    }
+                    
+                    /* Create DisposableFalcon wrapper instance for verification */
+                    auto pWrapper = LLP::DisposableFalcon::Create();
+                    
+                    /* Unwrap and verify the signed submission
+                     * This validates the disposable Falcon signature and extracts work data */
+                    auto result = pWrapper->UnwrapWorkSubmission(PACKET.DATA, vMinerPubKey);
+                    
+                    if(!result.fSuccess)
+                    {
+                        debug::error(FUNCTION, "Failed to unwrap submission: ", result.strError);
+                        respond(BLOCK_REJECTED);
+                        return true;
+                    }
+                    
+                    debug::log(0, FUNCTION, "✓ Signature verified successfully:");
+                    debug::log(0, FUNCTION, "  Merkle root: ", result.submission.hashMerkleRoot.SubString());
+                    debug::log(0, FUNCTION, "  Nonce: ", result.submission.nNonce);
+                    debug::log(0, FUNCTION, "  Timestamp: ", result.submission.nTimestamp);
+                    debug::log(0, FUNCTION, "  Miner keyID: ", result.hashKeyID.SubString());
+                    
+                    hashMerkle = result.submission.hashMerkleRoot;
+                    nonce = result.submission.nNonce;
+                    hashMinerKeyID = result.hashKeyID;
                 }
                 else
                 {
-                    debug::log(3, FUNCTION, "SUBMIT_BLOCK: Legacy format");
+                    /* Naked submission (not wrapped) - backward compatibility */
+                    debug::log(2, FUNCTION, "Processing naked block submission (not wrapped)");
+                    
+                    TAO::Ledger::ParseResult parseResult =
+                        TAO::Ledger::ParseStatelessWorkSubmission(PACKET.DATA);
+                    if(!parseResult.success)
+                    {
+                        debug::error(FUNCTION, "SUBMIT_BLOCK parse failed: ", parseResult.reason);
+                        respond(BLOCK_REJECTED);
+                        return true;
+                    }
+                    
+                    hashMerkle = parseResult.hashMerkle;
+                    nonce = parseResult.nonce;
                 }
 
-                uint512_t hashMerkle;
-                uint64_t nonce = 0;
-                TAO::Ledger::ParseResult parseResult =
-                    TAO::Ledger::ParseStatelessWorkSubmission(PACKET.DATA);
-                if(!parseResult.success)
-                {
-                    debug::error(FUNCTION, "SUBMIT_BLOCK parse failed: ", parseResult.reason);
-                    respond(BLOCK_REJECTED);
-                    return true;
-                }
-
-                hashMerkle = parseResult.hashMerkle;
-                nonce = parseResult.nonce;
-
-                debug::log(3, FUNCTION, "Block merkle root: ", hashMerkle.SubString(), " nonce: ", nonce);
+                debug::log(2, FUNCTION, "Block merkle root: ", hashMerkle.SubString(), " nonce: ", nonce);
 
                 LOCK(MUTEX);
 
