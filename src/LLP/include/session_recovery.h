@@ -43,6 +43,12 @@ namespace LLP
         std::string strAddress;                 // Original connection address
         uint32_t nReconnectCount;               // Number of reconnection attempts
         bool fAuthenticated;                    // Authentication status
+        uint8_t nLastLane;                      // Last lane used (0 legacy, 1 stateless)
+        uint32_t nLaneSwitchCount;              // Number of lane switches
+        uint256_t hashChaCha20Key;              // ChaCha20 key fingerprint
+        uint64_t nChaCha20Nonce;                // ChaCha20 nonce
+        std::vector<uint8_t> vDisposablePubKey; // Disposable Falcon public key
+        uint256_t hashDisposableKeyID;          // Disposable Falcon key ID
 
         /** Default Constructor **/
         SessionRecoveryData();
@@ -227,6 +233,83 @@ namespace LLP
          *
          **/
         void SetMaxReconnects(uint32_t nMax);
+
+        /** SaveChaCha20State
+         *
+         *  Persist ChaCha20 encryption state for session recovery.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *  @param[in] hashKey ChaCha20 key hash
+         *  @param[in] nNonce ChaCha20 nonce
+         *
+         *  @return true if saved
+         *
+         **/
+        bool SaveChaCha20State(const uint256_t& hashKeyID, const uint256_t& hashKey, uint64_t nNonce);
+
+        /** RestoreChaCha20State
+         *
+         *  Restore ChaCha20 encryption state for a session.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *  @param[out] hashKey ChaCha20 key hash
+         *  @param[out] nNonce ChaCha20 nonce
+         *
+         *  @return true if restored
+         *
+         **/
+        bool RestoreChaCha20State(const uint256_t& hashKeyID, uint256_t& hashKey, uint64_t& nNonce);
+
+        /** SaveDisposableKey
+         *
+         *  Persist disposable Falcon key state.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *  @param[in] vPubKey Disposable Falcon public key
+         *  @param[in] hashDisposableKeyID Disposable Falcon key identifier
+         *
+         *  @return true if saved
+         *
+         **/
+        bool SaveDisposableKey(const uint256_t& hashKeyID, const std::vector<uint8_t>& vPubKey,
+                               const uint256_t& hashDisposableKeyID);
+
+        /** RestoreDisposableKey
+         *
+         *  Restore disposable Falcon key state.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *  @param[out] vPubKey Disposable Falcon public key
+         *  @param[out] hashDisposableKeyID Disposable Falcon key identifier
+         *
+         *  @return true if restored
+         *
+         **/
+        bool RestoreDisposableKey(const uint256_t& hashKeyID, std::vector<uint8_t>& vPubKey,
+                                  uint256_t& hashDisposableKeyID);
+
+        /** UpdateLane
+         *
+         *  Track lane usage and lane switches.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *  @param[in] nNewLane New lane
+         *
+         *  @return true if updated
+         *
+         **/
+        bool UpdateLane(const uint256_t& hashKeyID, uint8_t nNewLane);
+
+        /** HasSwitchedLanes
+         *
+         *  Check if lane has switched at least once.
+         *
+         *  @param[in] hashKeyID Falcon key identifier
+         *
+         *  @return true if lane switch count > 0
+         *
+         **/
+        bool HasSwitchedLanes(const uint256_t& hashKeyID) const;
 
     private:
         /** Private constructor for singleton **/

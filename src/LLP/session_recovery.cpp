@@ -40,6 +40,12 @@ namespace LLP
     , strAddress()
     , nReconnectCount(0)
     , fAuthenticated(false)
+    , nLastLane(0xFF)
+    , nLaneSwitchCount(0)
+    , hashChaCha20Key(0)
+    , nChaCha20Nonce(0)
+    , vDisposablePubKey()
+    , hashDisposableKeyID(0)
     {
     }
 
@@ -56,6 +62,12 @@ namespace LLP
     , strAddress(context.strAddress)
     , nReconnectCount(0)
     , fAuthenticated(context.fAuthenticated)
+    , nLastLane(0xFF)
+    , nLaneSwitchCount(0)
+    , hashChaCha20Key(0)
+    , nChaCha20Nonce(0)
+    , vDisposablePubKey()
+    , hashDisposableKeyID(0)
     {
     }
 
@@ -305,6 +317,128 @@ namespace LLP
     void SessionRecoveryManager::SetMaxReconnects(uint32_t nMax)
     {
         nMaxReconnects.store(nMax);
+    }
+
+
+    /** Save ChaCha20 encryption state **/
+    bool SessionRecoveryManager::SaveChaCha20State(
+        const uint256_t& hashKeyID,
+        const uint256_t& hashKey,
+        uint64_t nNonce
+    )
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        SessionRecoveryData data = optData.value();
+        data.hashChaCha20Key = hashKey;
+        data.nChaCha20Nonce = nNonce;
+        mapSessionsByKey.Update(hashKeyID, data);
+
+        debug::log(3, FUNCTION, "Saved ChaCha20 state: keyID=", hashKeyID.SubString(),
+                   " nonce=", nNonce);
+        return true;
+    }
+
+
+    /** Restore ChaCha20 encryption state **/
+    bool SessionRecoveryManager::RestoreChaCha20State(
+        const uint256_t& hashKeyID,
+        uint256_t& hashKey,
+        uint64_t& nNonce
+    )
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        if(optData.value().hashChaCha20Key == 0)
+            return false;
+
+        hashKey = optData.value().hashChaCha20Key;
+        nNonce = optData.value().nChaCha20Nonce;
+
+        debug::log(2, FUNCTION, "Restored ChaCha20 state: nonce=", nNonce);
+        return true;
+    }
+
+
+    /** Save disposable Falcon key state **/
+    bool SessionRecoveryManager::SaveDisposableKey(
+        const uint256_t& hashKeyID,
+        const std::vector<uint8_t>& vPubKey,
+        const uint256_t& hashDisposableKeyID
+    )
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        SessionRecoveryData data = optData.value();
+        data.vDisposablePubKey = vPubKey;
+        data.hashDisposableKeyID = hashDisposableKeyID;
+        mapSessionsByKey.Update(hashKeyID, data);
+
+        debug::log(3, FUNCTION, "Saved disposable Falcon key state for keyID=",
+                   hashKeyID.SubString());
+        return true;
+    }
+
+
+    /** Restore disposable Falcon key state **/
+    bool SessionRecoveryManager::RestoreDisposableKey(
+        const uint256_t& hashKeyID,
+        std::vector<uint8_t>& vPubKey,
+        uint256_t& hashDisposableKeyID
+    )
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        if(optData.value().vDisposablePubKey.empty() || optData.value().hashDisposableKeyID == 0)
+            return false;
+
+        vPubKey = optData.value().vDisposablePubKey;
+        hashDisposableKeyID = optData.value().hashDisposableKeyID;
+
+        debug::log(2, FUNCTION, "Restored disposable Falcon key state for keyID=",
+                   hashKeyID.SubString());
+        return true;
+    }
+
+
+    /** Update lane usage **/
+    bool SessionRecoveryManager::UpdateLane(const uint256_t& hashKeyID, uint8_t nNewLane)
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        SessionRecoveryData data = optData.value();
+        if(data.nLastLane != 0xFF && data.nLastLane != nNewLane)
+        {
+            ++data.nLaneSwitchCount;
+            debug::log(0, FUNCTION, "Session ", hashKeyID.SubString(),
+                       " switched lanes from ", static_cast<int>(data.nLastLane),
+                       " to ", static_cast<int>(nNewLane));
+        }
+
+        data.nLastLane = nNewLane;
+        mapSessionsByKey.Update(hashKeyID, data);
+        return true;
+    }
+
+
+    /** Check for lane switch **/
+    bool SessionRecoveryManager::HasSwitchedLanes(const uint256_t& hashKeyID) const
+    {
+        auto optData = mapSessionsByKey.Get(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        return optData.value().nLaneSwitchCount > 0;
     }
 
 } // namespace LLP

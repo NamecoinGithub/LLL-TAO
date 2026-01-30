@@ -38,9 +38,21 @@ namespace LLP
     /* Update or add a miner */
     void StatelessMinerManager::UpdateMiner(
         const std::string& strAddress,
-        const MiningContext& context
+        const MiningContext& context,
+        uint8_t nLane
     )
     {
+        /* Check for lane switch */
+        auto optOldLane = mapAddressToLane.Get(strAddress);
+        if(optOldLane.has_value() && optOldLane.value() != nLane)
+        {
+            debug::log(0, FUNCTION, "Miner ", strAddress, " switched from lane ",
+                      static_cast<int>(optOldLane.value()), " to lane ", static_cast<int>(nLane));
+        }
+
+        /* Update lane tracking */
+        mapAddressToLane.InsertOrUpdate(strAddress, nLane);
+
         /* Get existing context once to avoid double lookups */
         auto optExisting = mapMiners.Get(strAddress);
         bool fNewMiner = !optExisting.has_value();
@@ -108,6 +120,22 @@ namespace LLP
         }
     }
 
+    /* Get miner lane by address */
+    std::optional<uint8_t> StatelessMinerManager::GetMinerLane(const std::string& strAddress) const
+    {
+        return mapAddressToLane.Get(strAddress);
+    }
+
+    /* Check if miner switched lanes */
+    bool StatelessMinerManager::HasSwitchedLanes(const std::string& strAddress, uint8_t nNewLane) const
+    {
+        auto optLane = mapAddressToLane.Get(strAddress);
+        if(!optLane.has_value())
+            return false;
+
+        return optLane.value() != nNewLane;
+    }
+
     /* Remove a miner by address */
     bool StatelessMinerManager::RemoveMiner(const std::string& strAddress)
     {
@@ -133,6 +161,8 @@ namespace LLP
 
         if(ctx.hashGenesis != 0)
             mapGenesisToAddress.Erase(ctx.hashGenesis);
+
+        mapAddressToLane.Erase(strAddress);
 
         return true;
     }

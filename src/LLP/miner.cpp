@@ -14,6 +14,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/global.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/session_recovery.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
@@ -541,7 +542,31 @@ namespace LLP
                     }
 
                     /* Update StatelessMinerManager with COMPLETE context including encryption state */
-                    StatelessMinerManager::Get().UpdateMiner(updatedContext.strAddress, updatedContext);
+                    StatelessMinerManager::Get().UpdateMiner(updatedContext.strAddress, updatedContext, 0);
+
+                    if(updatedContext.fAuthenticated && updatedContext.hashKeyID != 0)
+                    {
+                        SessionRecoveryManager::Get().SaveSession(updatedContext);
+                        SessionRecoveryManager::Get().UpdateLane(updatedContext.hashKeyID, 0);
+
+                        if(fEncryptionReady && !vChaChaKey.empty())
+                        {
+                            uint256_t hashChaChaKey;
+                            hashChaChaKey.SetBytes(vChaChaKey);
+                            SessionRecoveryManager::Get().SaveChaCha20State(updatedContext.hashKeyID, hashChaChaKey, 0);
+                        }
+
+                        if(!updatedContext.vMinerPubKey.empty())
+                        {
+                            SessionRecoveryManager::Get().SaveDisposableKey(
+                                updatedContext.hashKeyID,
+                                updatedContext.vMinerPubKey,
+                                updatedContext.hashKeyID);
+                        }
+
+                        debug::log(0, FUNCTION, "[Legacy Lane] Session registered: keyID=",
+                                   updatedContext.hashKeyID.SubString());
+                    }
 
                     /* Send response if present */
                     if(!result.response.IsNull())

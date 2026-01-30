@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <LLP/packets/stateless_packet.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/session_recovery.h>
 #include <LLP/include/stateless_opcodes.h>
 #include <LLP/include/falcon_constants.h>
 #include <LLP/include/falcon_auth.h>
@@ -385,7 +386,7 @@ namespace LLP
                 );
 
                 /* Register with StatelessMinerManager for tracking */
-                StatelessMinerManager::Get().UpdateMiner(strAddr, context);
+                StatelessMinerManager::Get().UpdateMiner(strAddr, context, 1);
 
                 return;
             }
@@ -535,7 +536,7 @@ namespace LLP
                 }
                 
                 /* Update StatelessMinerManager with COMPLETE context including encryption state */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
                 
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
                           (context.nChannel == 1 ? "Prime" : "Hash"), " notifications (stateless protocol)");
@@ -547,7 +548,7 @@ namespace LLP
                 SendStatelessTemplate();
                 
                 /* Update manager */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
                 
                 debug::log(2, "📥 === STATELESS_MINER_READY: SUCCESS ===");
                 return true;
@@ -811,7 +812,7 @@ namespace LLP
                                      .WithHeight(pBlock->nHeight);
                     
                     /* Update manager with new context after template served */
-                    StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                    StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
                     StatelessMinerManager::Get().IncrementTemplatesServed();
                     
                     return true;
@@ -1780,7 +1781,7 @@ namespace LLP
                 context = context.WithTimestamp(runtime::unifiedtimestamp());
 
                 /* Update manager with new context */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
 
                 return true;
             }
@@ -1817,7 +1818,7 @@ namespace LLP
                                  .WithHeight(nCurrentHeight);
 
                 /* Update manager with new context */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
 
                 return true;
             }
@@ -1880,7 +1881,7 @@ namespace LLP
                 context = context.WithTimestamp(runtime::unifiedtimestamp());
 
                 /* Update manager with new context */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
 
                 return true;
             }
@@ -2170,7 +2171,7 @@ namespace LLP
                     /* Update only timestamp, keep existing height */
                     context = context.WithTimestamp(runtime::unifiedtimestamp());
                 }
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
 
                 return true;
             }
@@ -2226,7 +2227,7 @@ namespace LLP
                 SendChannelNotification();
                 
                 /* Update manager with COMPLETE context including encryption state */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
                 
                 debug::log(2, "📥 === MINER_READY: SUCCESS ===");
                 return true;
@@ -2260,6 +2261,10 @@ namespace LLP
                         }
                         
                         mapSessionKeys[result.context.nSessionId] = result.context.vMinerPubKey;
+                        SessionRecoveryManager::Get().SaveDisposableKey(
+                            result.context.hashKeyID,
+                            result.context.vMinerPubKey,
+                            result.context.hashKeyID);
                         
                         debug::log(1, FUNCTION, "✓ Extracted and stored miner's Falcon pubkey for session 0x",
                                   std::hex, result.context.nSessionId, std::dec,
@@ -2300,7 +2305,20 @@ namespace LLP
                 /* Update manager with new context after successful packet processing */
                 /* CRITICAL: This must be done AFTER ChaCha20 key derivation to ensure
                  * StatelessMinerManager has the complete encryption state */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context);
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
+
+                if(context.fAuthenticated && context.hashKeyID != 0)
+                {
+                    SessionRecoveryManager::Get().SaveSession(context);
+                    SessionRecoveryManager::Get().UpdateLane(context.hashKeyID, 1);
+
+                    if(context.fEncryptionReady && !context.vChaChaKey.empty())
+                    {
+                        uint256_t hashChaChaKey;
+                        hashChaChaKey.SetBytes(context.vChaChaKey);
+                        SessionRecoveryManager::Get().SaveChaCha20State(context.hashKeyID, hashChaChaKey, 0);
+                    }
+                }
                 
                 /* Log session registration for auth packets */
                 if(PACKET.HEADER == MINER_AUTH_RESPONSE && context.fAuthenticated)

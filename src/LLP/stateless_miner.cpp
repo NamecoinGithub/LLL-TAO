@@ -1534,7 +1534,7 @@ namespace LLP
         MiningContext newContext = context.WithRewardAddress(hashReward);
 
         /* Update the context in StatelessMinerManager to persist the change */
-        StatelessMinerManager::Get().UpdateMiner(context.strAddress, newContext);
+        StatelessMinerManager::Get().UpdateMiner(context.strAddress, newContext, 1);
 
         /* Log successful binding */
         debug::log(0, FUNCTION, "✓ Reward address bound: ", hashReward.ToString());

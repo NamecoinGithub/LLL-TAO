@@ -90,7 +90,30 @@ namespace LLP
          *  @param[in] context Updated context
          *
          **/
-        void UpdateMiner(const std::string& strAddress, const MiningContext& context);
+        void UpdateMiner(const std::string& strAddress, const MiningContext& context, uint8_t nLane = 1);
+
+        /** GetMinerLane
+         *
+         *  Retrieve the lane currently tracked for a miner.
+         *
+         *  @param[in] strAddress Miner address
+         *
+         *  @return Lane if found, nullopt otherwise
+         *
+         **/
+        std::optional<uint8_t> GetMinerLane(const std::string& strAddress) const;
+
+        /** HasSwitchedLanes
+         *
+         *  Check if miner switched lanes.
+         *
+         *  @param[in] strAddress Miner address
+         *  @param[in] nNewLane Lane to compare
+         *
+         *  @return true if miner switched lanes
+         *
+         **/
+        bool HasSwitchedLanes(const std::string& strAddress, uint8_t nNewLane) const;
 
         /** RemoveMiner
          *
@@ -479,6 +502,9 @@ namespace LLP
 
         /** Index by genesis hash for GenesisHash reward mapping **/
         util::ConcurrentHashMap<uint256_t, std::string> mapGenesisToAddress;
+
+        /** Track lane usage by miner address **/
+        util::ConcurrentHashMap<std::string, uint8_t> mapAddressToLane;
 
         /** Atomic counter for total miners (lock-free stats) **/
         mutable std::atomic<size_t> nTotalMiners{0};
