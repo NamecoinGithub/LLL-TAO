@@ -25,6 +25,21 @@ namespace LLP
 {
     using namespace OpcodeUtility;
 
+    /* Helper function: Get human-readable channel name */
+    namespace {
+        const char* GetChannelName(uint32_t nChannel, bool fLegacy = false)
+        {
+            if (fLegacy)
+            {
+                return (nChannel == 1) ? "PRIME_BLOCK_AVAILABLE" : "HASH_BLOCK_AVAILABLE";
+            }
+            else
+            {
+                return (nChannel == 1) ? "STATELESS_PRIME_BLOCK_AVAILABLE" : "STATELESS_HASH_BLOCK_AVAILABLE";
+            }
+        }
+    }
+
     /* GetNotificationOpcode - Lane-aware opcode selection */
     uint16_t PushNotificationBuilder::GetNotificationOpcode(uint32_t nChannel, ProtocolLane lane)
     {
@@ -106,7 +121,7 @@ namespace LLP
 
         debug::log(2, "[PushNotification] Built LEGACY notification:");
         debug::log(2, "   Opcode: 0x", std::hex, (uint32_t)nOpcode, std::dec, 
-            " (", nChannel == 1 ? "PRIME_BLOCK_AVAILABLE" : "HASH_BLOCK_AVAILABLE", ")");
+            " (", GetChannelName(nChannel, true), ")");
         debug::log(2, "   Lane: 8-bit (LEGACY)");
         debug::log(2, "   Payload: 12 bytes");
 
@@ -136,7 +151,7 @@ namespace LLP
 
         debug::log(2, "[PushNotification] Built STATELESS notification:");
         debug::log(2, "   Opcode: 0x", std::hex, nOpcode, std::dec,
-            " (", nChannel == 1 ? "STATELESS_PRIME_BLOCK_AVAILABLE" : "STATELESS_HASH_BLOCK_AVAILABLE", ")");
+            " (", GetChannelName(nChannel, false), ")");
         debug::log(2, "   Lane: 16-bit (STATELESS)");
         debug::log(2, "   Payload: 12 bytes");
 
@@ -154,11 +169,14 @@ namespace LLP
         if (!pBlock)
             throw std::invalid_argument("Block template is nullptr");
 
+        // Expected block size for Tritium (matches TRITIUM_BLOCK_SIZE constant in stateless_miner_connection.cpp)
+        static constexpr size_t EXPECTED_BLOCK_SIZE = 216;
+
         // Serialize block (expected 216 bytes for Tritium)
         std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if (vBlockData.size() != 216)
+        if (vBlockData.size() != EXPECTED_BLOCK_SIZE)
         {
-            debug::error("[PushNotification] Invalid block size: ", vBlockData.size(), " bytes (expected 216)");
+            debug::error("[PushNotification] Invalid block size: ", vBlockData.size(), " bytes (expected ", EXPECTED_BLOCK_SIZE, ")");
             throw std::runtime_error("Invalid block template size");
         }
 

@@ -1466,8 +1466,8 @@ namespace LLP
             {
                 debug::log(2, "📥 === MINER_READY REQUEST (LEGACY LANE) ===");
                 debug::log(0, "   From: ", GetAddress().ToStringIP());
-                debug::log(0, "   Port: 8323 (legacy)");
-                debug::log(0, "   Opcode: 0xD8 (8-bit)");
+                debug::log(0, "   Lane: Legacy (8-bit opcodes)");
+                debug::log(0, "   Opcode: 0xD8 (MINER_READY)");
 
                 /* Validate authentication */
                 if (!fMinerAuthenticated)
