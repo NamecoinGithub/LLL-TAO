@@ -24,6 +24,7 @@ ________________________________________________________________________________
 #include <LLP/include/auto_cooldown_manager.h>
 #include <LLP/include/pool_discovery.h>
 #include <LLP/include/opcode_utility.h>
+#include <LLP/include/push_notification.h>
 #include <LLP/templates/events.h>
 
 #include <TAO/Ledger/include/create.h>
@@ -3558,136 +3559,10 @@ namespace LLP
     /* SendChannelNotification - Send push notification to subscribed miner */
     void StatelessMinerConnection::SendChannelNotification()
     {
-        /* Early exit if shutdown is in progress */
+        /* Early exit if shutdown */
         if (config::fShutdown.load())
         {
-            debug::log(2, FUNCTION, "Shutdown in progress; skipping channel notification");
-            return;
-        }
-        
-        /* Thread-safe context access - use RAII lock guard */
-        uint32_t nChannel;
-        {
-            LOCK(MUTEX);
-            
-            /* Validate subscription state */
-            if (!context.fSubscribedToNotifications)
-                return;
-            
-            /* Validate channel (1=Prime, 2=Hash only) */
-            if (context.nSubscribedChannel != 1 && context.nSubscribedChannel != 2)
-            {
-                debug::error(FUNCTION, "Invalid subscribed channel: ", context.nSubscribedChannel);
-                return;
-            }
-            
-            /* Copy channel for use outside lock */
-            nChannel = context.nSubscribedChannel;
-        }  // MUTEX automatically unlocked here
-        
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
-        /* Get channel-specific state */
-        TAO::Ledger::BlockState stateChannel = stateBest;
-        if (!TAO::Ledger::GetLastState(stateChannel, nChannel))
-        {
-            debug::error(FUNCTION, "Failed to get channel state for channel ", nChannel);
-            return;
-        }
-        
-        /* Get difficulty */
-        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-        
-        /* Determine opcode based on channel (use 16-bit stateless mirror opcodes) */
-        using namespace StatelessOpcodes;
-        uint16_t nOpcode = (nChannel == 1) ? STATELESS_PRIME_BLOCK_AVAILABLE : STATELESS_HASH_BLOCK_AVAILABLE;
-        
-        /* Build 12-byte packet (big-endian) */
-        StatelessPacket notification(nOpcode);
-        notification.DATA.reserve(12);  // Pre-allocate to avoid reallocations
-        
-        // Unified height [0-3]
-        notification.DATA.push_back((stateBest.nHeight >> 24) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 16) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 8) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 0) & 0xFF);
-        
-        // Channel height [4-7]
-        uint32_t nChannelHeight = stateChannel.nChannelHeight;
-        notification.DATA.push_back((nChannelHeight >> 24) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 16) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 8) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 0) & 0xFF);
-        
-        // Difficulty [8-11]
-        notification.DATA.push_back((nDifficulty >> 24) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 16) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 8) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 0) & 0xFF);
-        
-        notification.LENGTH = 12;
-        
-        /* Log the notification details BEFORE sending for diagnostics */
-        const std::string strOpcodeName = (nChannel == 1) ? 
-            "PRIME_BLOCK_AVAILABLE (NEW_PRIME_AVAILABLE)" : 
-            "HASH_BLOCK_AVAILABLE (NEW_HASH_AVAILABLE)";
-        
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "📢 SENDING PUSH NOTIFICATION TO MINER");
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "   Opcode:         ", strOpcodeName);
-        debug::log(2, "   Opcode Value:   0x", std::hex, static_cast<uint32_t>(nOpcode), std::dec, " (", static_cast<uint32_t>(nOpcode), ")");
-        debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
-        debug::log(2, "   Channel:        ", nChannel, " (", (nChannel == 1 ? "Prime" : "Hash"), ")");
-        debug::log(2, "   Payload:");
-        debug::log(2, "      Unified Height:  ", stateBest.nHeight);
-        debug::log(2, "      Channel Height:  ", nChannelHeight);
-        debug::log(2, "      Difficulty:      0x", std::hex, nDifficulty, std::dec);
-        debug::log(2, "   Packet Size:    ", notification.LENGTH, " bytes");
-        debug::log(2, "");
-        debug::log(2, "   ⚠️  EXPECTED CLIENT ACTION:");
-        debug::log(2, "      Client should respond with GET_BLOCK (129/0x81)");
-        debug::log(2, "      to fetch new mining template for this channel.");
-        debug::log(2, "");
-        debug::log(2, "   🔄 FALLBACK BEHAVIOR:");
-        debug::log(2, "      If client times out or doesn't receive this,");
-        debug::log(2, "      client may fall back to polling GET_ROUND (133/0x85).");
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        
-        /* Send to miner */
-        respond(notification);
-        
-        /* Capture timestamp for accurate timing measurements
-         * Using same timestamp both for updating context and for client timing calculations */
-        uint64_t nNotificationTimestamp = runtime::unifiedtimestamp();
-        
-        /* Update statistics (thread-safe) */
-        {
-            LOCK(MUTEX);
-            context = context.WithNotificationSent(nNotificationTimestamp);
-        }  // MUTEX automatically unlocked here
-        
-        debug::log(2, FUNCTION, "Sent ", (nChannel == 1 ? "Prime" : "Hash"), 
-                   " notification to ", GetAddress().ToStringIP(),
-                   " (unified=", stateBest.nHeight, 
-                   ", channel=", nChannelHeight,
-                   ", diff=", std::hex, nDifficulty, std::dec, ")");
-    }
-
-
-    /* SendStatelessTemplate - Send complete template using 16-bit opcode 0xD081 = Mirror(129) */
-    void StatelessMinerConnection::SendStatelessTemplate()
-    {
-        /* Protocol constants for stateless template push */
-        static const size_t TRITIUM_BLOCK_SIZE = 216;        // Serialized Tritium block template size
-        static const size_t METADATA_SIZE = 12;              // Height (4) + channel height (4) + difficulty (4)
-        static const size_t STATELESS_TEMPLATE_SIZE = 228;   // Total: metadata + block template
-        
-        /* Early exit if shutdown is in progress */
-        if (config::fShutdown.load())
-        {
-            debug::log(2, FUNCTION, "Shutdown in progress; skipping stateless template");
+            debug::log(2, FUNCTION, "Shutdown in progress; skipping notification");
             return;
         }
         
@@ -3696,118 +3571,115 @@ namespace LLP
         {
             LOCK(MUTEX);
             
-            /* Validate channel (1=Prime, 2=Hash only) */
-            if (context.nChannel != 1 && context.nChannel != 2)
+            if (!context.fSubscribedToNotifications)
+                return;
+            
+            if (context.nSubscribedChannel != 1 && context.nSubscribedChannel != 2)
             {
-                debug::error(FUNCTION, "Invalid channel: ", context.nChannel);
+                debug::error(FUNCTION, "Invalid channel: ", context.nSubscribedChannel);
                 return;
             }
             
-            /* Copy channel for use outside lock */
-            nChannel = context.nChannel;
-        }  // MUTEX automatically unlocked here
-        
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "📤 SENDING STATELESS TEMPLATE (0xD081)");
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
-        debug::log(2, "   Channel:        ", nChannel, " (", (nChannel == 1 ? "Prime" : "Hash"), ")");
-        
+            nChannel = context.nSubscribedChannel;
+        }
+
         /* Get blockchain state */
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
-        /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nChannel))
         {
             debug::error(FUNCTION, "Failed to get channel state for channel ", nChannel);
-            debug::log(2, "════════════════════════════════════════════════════════════");
             return;
         }
-        
-        /* Get difficulty */
+
         uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-        
-        /* Create new block template - note: new_block() stores in mapBlocks, so we don't own the pointer */
-        TAO::Ledger::Block* pBlock = new_block();
-        if (!pBlock)
-        {
-            debug::error(FUNCTION, "Failed to create block template");
-            debug::log(2, "════════════════════════════════════════════════════════════");
-            return;
-        }
-        
-        /* Serialize block template (expected: 216 bytes for Tritium) */
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if (vBlockData.empty() || vBlockData.size() != TRITIUM_BLOCK_SIZE)
-        {
-            debug::error(FUNCTION, "Invalid block serialization: ", vBlockData.size(), 
-                        " bytes (expected ", TRITIUM_BLOCK_SIZE, ")");
-            debug::log(2, "════════════════════════════════════════════════════════════");
-            return;
-        }
-        
-        /* Build 16-bit opcode packet (228 bytes total: 12 metadata + 216 template) */
-        StatelessPacket notification(StatelessOpcodes::STATELESS_GET_BLOCK);  // 16-bit constructor
-        notification.DATA.reserve(STATELESS_TEMPLATE_SIZE);  // Pre-allocate
-        
-        /* Add 12-byte metadata (big-endian) */
-        // Unified height [0-3]
-        notification.DATA.push_back((stateBest.nHeight >> 24) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 16) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 8) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 0) & 0xFF);
-        
-        // Channel height [4-7]
-        uint32_t nChannelHeight = stateChannel.nChannelHeight;
-        notification.DATA.push_back((nChannelHeight >> 24) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 16) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 8) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 0) & 0xFF);
-        
-        // Difficulty [8-11]
-        notification.DATA.push_back((nDifficulty >> 24) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 16) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 8) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 0) & 0xFF);
-        
-        /* Add 216-byte block template [12-227] */
-        notification.DATA.insert(notification.DATA.end(), vBlockData.begin(), vBlockData.end());
-        
-        /* Set LENGTH field to match DATA size before serialization.
-         * CRITICAL: Unlike error responses (which always have 1 byte of data),
-         * this notification carries variable-size payload (228 bytes = 12 metadata + 216 template).
-         * Must use DATA.size() instead of hardcoded value to ensure correct framing. */
-        notification.LENGTH = static_cast<uint32_t>(notification.DATA.size());
-        
-        debug::log(2, "   Payload:");
-        debug::log(2, "      Unified Height:  ", stateBest.nHeight);
-        debug::log(2, "      Channel Height:  ", nChannelHeight);
-        debug::log(2, "      Difficulty:      0x", std::hex, nDifficulty, std::dec);
-        debug::log(2, "      Block Hash:      ", pBlock->GetHash().SubString());
-        debug::log(2, "      Merkle Root:     ", pBlock->hashMerkleRoot.SubString());
-        debug::log(2, "   Total Size:     ", notification.DATA.size(), " bytes (", 
-                   METADATA_SIZE, " meta + ", TRITIUM_BLOCK_SIZE, " template)");
-        debug::log(2, "");
-        debug::log(2, "   ⚡ STATELESS PROTOCOL:");
-        debug::log(2, "      Miner can begin hashing immediately (no GET_BLOCK needed)");
-        debug::log(2, "      Template pushed automatically on new blocks");
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        
+
+        /* ✅ USE UNIFIED BUILDER (replaces 80 lines of manual packet building) */
+        StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
+            nChannel,
+            ProtocolLane::STATELESS,
+            stateBest,
+            stateChannel,
+            nDifficulty
+        );
+
         /* Send to miner */
         respond(notification);
-        
+
         /* Update statistics */
         uint64_t nNotificationTimestamp = runtime::unifiedtimestamp();
         {
             LOCK(MUTEX);
             context = context.WithNotificationSent(nNotificationTimestamp);
         }
+
+        debug::log(2, FUNCTION, "Sent ", (nChannel == 1 ? "Prime" : "Hash"), 
+                   " notification to ", GetAddress().ToStringIP());
+    }
+
+
+    /* SendStatelessTemplate - Send complete template using 16-bit opcode 0xD081 */
+    void StatelessMinerConnection::SendStatelessTemplate()
+    {
+        /* Early exit if shutdown */
+        if (config::fShutdown.load())
+        {
+            debug::log(2, FUNCTION, "Shutdown in progress; skipping template");
+            return;
+        }
         
-        debug::log(2, FUNCTION, "Sent stateless template (0xD081) to ", GetAddress().ToStringIP(),
-                   " (unified=", stateBest.nHeight, 
-                   ", channel=", nChannelHeight,
-                   ", diff=", std::hex, nDifficulty, std::dec, ")");
+        /* Thread-safe context access */
+        uint32_t nChannel;
+        {
+            LOCK(MUTEX);
+            
+            if (context.nChannel != 1 && context.nChannel != 2)
+            {
+                debug::error(FUNCTION, "Invalid channel: ", context.nChannel);
+                return;
+            }
+            
+            nChannel = context.nChannel;
+        }
+
+        /* Get blockchain state */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        TAO::Ledger::BlockState stateChannel = stateBest;
+        if (!TAO::Ledger::GetLastState(stateChannel, nChannel))
+        {
+            debug::error(FUNCTION, "Failed to get channel state");
+            return;
+        }
+
+        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
+
+        /* Create block template */
+        TAO::Ledger::Block* pBlock = new_block();
+        if (!pBlock)
+        {
+            debug::error(FUNCTION, "Failed to create block template");
+            return;
+        }
+
+        /* ✅ USE UNIFIED BUILDER (replaces 130 lines of manual serialization) */
+        StatelessPacket notification = PushNotificationBuilder::BuildStatelessTemplate(
+            stateBest,
+            stateChannel,
+            nDifficulty,
+            pBlock
+        );
+
+        /* Send to miner */
+        respond(notification);
+
+        /* Update statistics */
+        uint64_t nNotificationTimestamp = runtime::unifiedtimestamp();
+        {
+            LOCK(MUTEX);
+            context = context.WithNotificationSent(nNotificationTimestamp);
+        }
+
+        debug::log(2, FUNCTION, "Sent template to ", GetAddress().ToStringIP());
     }
 
 } // namespace LLP
