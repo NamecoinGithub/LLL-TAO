@@ -418,6 +418,10 @@ namespace LLP
         uint256_t            hashRewardAddress;  // Where to send mining rewards
         bool                 fRewardBound;       // True after successful MINER_SET_REWARD
 
+        /* Push notification subscription state (NEW - enable push on legacy lane) */
+        bool                 fSubscribedToNotifications;    // MINER_READY received
+        uint32_t             nSubscribedChannel;        // Which channel subscribed to (1=Prime, 2=Hash)
+
     public:
 
         /** Default Constructor **/
@@ -478,6 +482,16 @@ namespace LLP
          *
          **/
         bool ProcessPacketStateless(const Packet& PACKET);
+
+
+        /** SendChannelNotification
+         *
+         *  Send channel-specific push notification to this miner (legacy lane).
+         *  Called from server broadcast when blockchain advances.
+         *  NEW: Enables push notifications on legacy lane (port 8323).
+         *
+         **/
+        void SendChannelNotification();
 
 
     private:
