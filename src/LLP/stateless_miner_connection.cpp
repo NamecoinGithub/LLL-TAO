@@ -24,6 +24,7 @@ ________________________________________________________________________________
 #include <LLP/include/auto_cooldown_manager.h>
 #include <LLP/include/pool_discovery.h>
 #include <LLP/include/opcode_utility.h>
+#include <LLP/include/push_notification.h>
 #include <LLP/templates/events.h>
 
 #include <TAO/Ledger/include/create.h>
@@ -3599,45 +3600,26 @@ namespace LLP
         /* Get difficulty */
         uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
         
-        /* Determine opcode based on channel (use 16-bit stateless mirror opcodes) */
-        using namespace StatelessOpcodes;
-        uint16_t nOpcode = (nChannel == 1) ? STATELESS_PRIME_BLOCK_AVAILABLE : STATELESS_HASH_BLOCK_AVAILABLE;
-        
-        /* Build 12-byte packet (big-endian) */
-        StatelessPacket notification(nOpcode);
-        notification.DATA.reserve(12);  // Pre-allocate to avoid reallocations
-        
-        // Unified height [0-3]
-        notification.DATA.push_back((stateBest.nHeight >> 24) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 16) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 8) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 0) & 0xFF);
-        
-        // Channel height [4-7]
-        uint32_t nChannelHeight = stateChannel.nChannelHeight;
-        notification.DATA.push_back((nChannelHeight >> 24) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 16) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 8) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 0) & 0xFF);
-        
-        // Difficulty [8-11]
-        notification.DATA.push_back((nDifficulty >> 24) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 16) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 8) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 0) & 0xFF);
-        
-        notification.LENGTH = 12;
+        /* ✅ USE UNIFIED BUILDER - Lane-aware notification construction */
+        StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
+            nChannel,
+            ProtocolLane::STATELESS,
+            stateBest,
+            stateChannel,
+            nDifficulty
+        );
         
         /* Log the notification details BEFORE sending for diagnostics */
         const std::string strOpcodeName = (nChannel == 1) ? 
             "PRIME_BLOCK_AVAILABLE (NEW_PRIME_AVAILABLE)" : 
             "HASH_BLOCK_AVAILABLE (NEW_HASH_AVAILABLE)";
+        uint32_t nChannelHeight = stateChannel.nChannelHeight;
         
         debug::log(2, "════════════════════════════════════════════════════════════");
         debug::log(2, "📢 SENDING PUSH NOTIFICATION TO MINER");
         debug::log(2, "════════════════════════════════════════════════════════════");
         debug::log(2, "   Opcode:         ", strOpcodeName);
-        debug::log(2, "   Opcode Value:   0x", std::hex, static_cast<uint32_t>(nOpcode), std::dec, " (", static_cast<uint32_t>(nOpcode), ")");
+        debug::log(2, "   Opcode Value:   0x", std::hex, static_cast<uint32_t>(notification.HEADER), std::dec, " (", static_cast<uint32_t>(notification.HEADER), ")");
         debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
         debug::log(2, "   Channel:        ", nChannel, " (", (nChannel == 1 ? "Prime" : "Hash"), ")");
         debug::log(2, "   Payload:");
@@ -3737,56 +3719,23 @@ namespace LLP
             return;
         }
         
-        /* Serialize block template (expected: 216 bytes for Tritium) */
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if (vBlockData.empty() || vBlockData.size() != TRITIUM_BLOCK_SIZE)
-        {
-            debug::error(FUNCTION, "Invalid block serialization: ", vBlockData.size(), 
-                        " bytes (expected ", TRITIUM_BLOCK_SIZE, ")");
-            debug::log(2, "════════════════════════════════════════════════════════════");
-            return;
-        }
+        /* ✅ USE UNIFIED BUILDER - Stateless template construction */
+        StatelessPacket notification = PushNotificationBuilder::BuildStatelessTemplate(
+            stateBest,
+            stateChannel,
+            nDifficulty,
+            pBlock
+        );
         
-        /* Build 16-bit opcode packet (228 bytes total: 12 metadata + 216 template) */
-        StatelessPacket notification(StatelessOpcodes::STATELESS_GET_BLOCK);  // 16-bit constructor
-        notification.DATA.reserve(STATELESS_TEMPLATE_SIZE);  // Pre-allocate
-        
-        /* Add 12-byte metadata (big-endian) */
-        // Unified height [0-3]
-        notification.DATA.push_back((stateBest.nHeight >> 24) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 16) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 8) & 0xFF);
-        notification.DATA.push_back((stateBest.nHeight >> 0) & 0xFF);
-        
-        // Channel height [4-7]
+        /* Log details */
         uint32_t nChannelHeight = stateChannel.nChannelHeight;
-        notification.DATA.push_back((nChannelHeight >> 24) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 16) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 8) & 0xFF);
-        notification.DATA.push_back((nChannelHeight >> 0) & 0xFF);
-        
-        // Difficulty [8-11]
-        notification.DATA.push_back((nDifficulty >> 24) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 16) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 8) & 0xFF);
-        notification.DATA.push_back((nDifficulty >> 0) & 0xFF);
-        
-        /* Add 216-byte block template [12-227] */
-        notification.DATA.insert(notification.DATA.end(), vBlockData.begin(), vBlockData.end());
-        
-        /* Set LENGTH field to match DATA size before serialization.
-         * CRITICAL: Unlike error responses (which always have 1 byte of data),
-         * this notification carries variable-size payload (228 bytes = 12 metadata + 216 template).
-         * Must use DATA.size() instead of hardcoded value to ensure correct framing. */
-        notification.LENGTH = static_cast<uint32_t>(notification.DATA.size());
-        
         debug::log(2, "   Payload:");
         debug::log(2, "      Unified Height:  ", stateBest.nHeight);
         debug::log(2, "      Channel Height:  ", nChannelHeight);
         debug::log(2, "      Difficulty:      0x", std::hex, nDifficulty, std::dec);
         debug::log(2, "      Block Hash:      ", pBlock->GetHash().SubString());
         debug::log(2, "      Merkle Root:     ", pBlock->hashMerkleRoot.SubString());
-        debug::log(2, "   Total Size:     ", notification.DATA.size(), " bytes (", 
+        debug::log(2, "   Total Size:     ", notification.LENGTH, " bytes (", 
                    METADATA_SIZE, " meta + ", TRITIUM_BLOCK_SIZE, " template)");
         debug::log(2, "");
         debug::log(2, "   ⚡ STATELESS PROTOCOL:");
