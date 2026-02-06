@@ -1116,9 +1116,9 @@ namespace LLP
                 debug::log(2, "═══════════════════════════════════════════════════════");
                 debug::log(2, "📥 MINER_READY REQUEST (LEGACY LANE)");
                 debug::log(2, "═══════════════════════════════════════════════════════");
-                debug::log(0, "   From: ", GetAddress().ToStringIP());
-                debug::log(0, "   Port: 8323 (legacy)");
-                debug::log(0, "   Opcode: 0xD8 (8-bit)");
+                debug::log(2, "   From: ", GetAddress().ToStringIP());
+                debug::log(2, "   Port: 8323 (legacy)");
+                debug::log(2, "   Opcode: 0xD8 (8-bit)");
 
                 /* Validate authentication */
                 if (!fMinerAuthenticated)
@@ -1128,22 +1128,25 @@ namespace LLP
                     return true;
                 }
 
+                /* Load channel once for validation and subscription */
+                uint32_t nCurrentChannel = nChannel.load();
+
                 /* Validate channel (1=Prime, 2=Hash only) */
-                if (nChannel != 1 && nChannel != 2)
+                if (nCurrentChannel != 1 && nCurrentChannel != 2)
                 {
-                    debug::error(FUNCTION, "❌ MINER_READY rejected - invalid channel: ", nChannel.load());
+                    debug::error(FUNCTION, "❌ MINER_READY rejected - invalid channel: ", nCurrentChannel);
                     debug::error(FUNCTION, "   Required: Send SET_CHANNEL first (1=Prime or 2=Hash)");
                     return true;
                 }
 
                 /* Enable push notifications for this connection */
                 fSubscribedToNotifications = true;
-                nSubscribedChannel = nChannel.load();
+                nSubscribedChannel = nCurrentChannel;
 
-                debug::log(0, "   ✓ Subscribed to ", 
+                debug::log(2, "   ✓ Subscribed to ", 
                            (nSubscribedChannel == 1 ? "Prime" : "Hash"), " notifications");
-                debug::log(0, "   ✓ Legacy lane will receive 8-bit push notifications");
-                debug::log(0, "   ✓ Polling (GET_ROUND) no longer needed");
+                debug::log(2, "   ✓ Legacy lane will receive 8-bit push notifications");
+                debug::log(2, "   ✓ Polling (GET_ROUND) no longer needed");
 
                 /* Send immediate notification using unified builder */
                 SendChannelNotification();
