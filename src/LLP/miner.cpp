@@ -19,6 +19,7 @@ ________________________________________________________________________________
 #include <LLP/include/falcon_auth.h>
 #include <LLP/include/disposable_falcon.h>
 #include <LLP/include/opcode_utility.h>
+#include <LLP/include/push_notification.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/session_recovery.h>
 #include <LLP/types/miner.h>
@@ -95,6 +96,8 @@ namespace LLP
     , fEncryptionReady(false)
     , hashRewardAddress(0)
     , fRewardBound(false)
+    , fSubscribedToNotifications(false)
+    , nSubscribedChannel(0)
     {
     }
 
@@ -1107,6 +1110,49 @@ namespace LLP
             }
 
 
+            /* Handle MINER_READY - Subscribe to push notifications (NEW for legacy lane) */
+            case MINER_READY:
+            {
+                debug::log(2, "═══════════════════════════════════════════════════════");
+                debug::log(2, "📥 MINER_READY REQUEST (LEGACY LANE)");
+                debug::log(2, "═══════════════════════════════════════════════════════");
+                debug::log(0, "   From: ", GetAddress().ToStringIP());
+                debug::log(0, "   Port: 8323 (legacy)");
+                debug::log(0, "   Opcode: 0xD8 (8-bit)");
+
+                /* Validate authentication */
+                if (!fMinerAuthenticated)
+                {
+                    debug::error(FUNCTION, "❌ MINER_READY rejected - not authenticated");
+                    debug::error(FUNCTION, "   Required: Complete Falcon authentication first");
+                    return true;
+                }
+
+                /* Validate channel (1=Prime, 2=Hash only) */
+                if (nChannel != 1 && nChannel != 2)
+                {
+                    debug::error(FUNCTION, "❌ MINER_READY rejected - invalid channel: ", nChannel.load());
+                    debug::error(FUNCTION, "   Required: Send SET_CHANNEL first (1=Prime or 2=Hash)");
+                    return true;
+                }
+
+                /* Enable push notifications for this connection */
+                fSubscribedToNotifications = true;
+                nSubscribedChannel = nChannel.load();
+
+                debug::log(0, "   ✓ Subscribed to ", 
+                           (nSubscribedChannel == 1 ? "Prime" : "Hash"), " notifications");
+                debug::log(0, "   ✓ Legacy lane will receive 8-bit push notifications");
+                debug::log(0, "   ✓ Polling (GET_ROUND) no longer needed");
+
+                /* Send immediate notification using unified builder */
+                SendChannelNotification();
+
+                debug::log(2, "📥 === MINER_READY: SUCCESS ===");
+                return true;
+            }
+
+
             /* Respond with the block reward in a given round. */
             case GET_REWARD:
             {
@@ -1865,6 +1911,40 @@ namespace LLP
 
         /* Otherwise keep looping. */
         return false;
+    }
+
+
+    /* SendChannelNotification - Send push notification to legacy lane miner */
+    void Miner::SendChannelNotification()
+    {
+        if (!fSubscribedToNotifications)
+            return;
+
+        /* Get blockchain state */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        TAO::Ledger::BlockState stateChannel = stateBest;
+        if (!TAO::Ledger::GetLastState(stateChannel, nSubscribedChannel))
+        {
+            debug::error(FUNCTION, "Failed to get channel state");
+            return;
+        }
+
+        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nSubscribedChannel);
+
+        /* ✅ USE UNIFIED BUILDER for 8-bit notification */
+        Packet notification = PushNotificationBuilder::BuildChannelNotification<Packet>(
+            nSubscribedChannel,
+            ProtocolLane::LEGACY,  // This connection uses 8-bit opcodes
+            stateBest,
+            stateChannel,
+            nDifficulty
+        );
+
+        /* Send to miner using legacy respond() */
+        respond(notification.HEADER, notification.DATA);
+
+        debug::log(2, FUNCTION, "Sent ", (nSubscribedChannel == 1 ? "Prime" : "Hash"),
+                   " notification (8-bit) to ", GetAddress().ToStringIP());
     }
 
 }
