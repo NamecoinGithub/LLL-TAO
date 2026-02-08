@@ -24,6 +24,7 @@ ________________________________________________________________________________
 #include <LLP/include/auto_cooldown_manager.h>
 #include <LLP/include/pool_discovery.h>
 #include <LLP/include/opcode_utility.h>
+#include <LLP/include/mining_constants.h>
 #include <LLP/include/push_notification.h>
 #include <LLP/templates/events.h>
 
@@ -1991,11 +1992,11 @@ namespace LLP
                     /* Continue with height 0 - channel may not exist yet (first block) */
                 }
                 
-                /* Calculate next difficulty for this channel
-                 * GetNextTargetRequired(state, channel, fDebug)
-                 * - fDebug=false: Suppress debug logging for production use
+                /* Calculate next difficulty for this channel (uses cache for performance)
+                 * GetCachedDifficulty checks cache TTL and returns cached value if valid,
+                 * otherwise calls GetNextTargetRequired and updates cache
                  */
-                uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, context.nChannel, false);
+                uint32_t nDifficulty = GetCachedDifficulty(context.nChannel);
                 debug::log(3, FUNCTION, "GET_ROUND: Channel ", context.nChannel, " next difficulty: 0x", std::hex, nDifficulty, std::dec);
                 
                 /* ═════════════════════════════════════════════════════════════════════════ */
@@ -2403,26 +2404,58 @@ namespace LLP
                 if(!result.response.IsNull())
                 {
                     /* Mirror 8-bit response opcodes to 16-bit for stateless lane.
-                     * StatelessMiner builds responses with 8-bit opcodes (e.g., MINER_AUTH_CHALLENGE = 208),
-                     * but the stateless lane expects 16-bit mirror-mapped opcodes (0xD0D0).
-                     * Legacy 8-bit opcodes (< 256) that are NOT already stateless need mirroring.
                      * 
-                     * NOTE: result.response is const, so we must create a copy before modifying.
-                     * This is necessary for correctness to avoid violating const-correctness.
+                     * CRITICAL FIX: StatelessMiner returns 8-bit enum values (207, 208, 209, 210)
+                     * that must be converted to 16-bit stateless format (0xD0CF, 0xD0D0, 0xD0D1, 0xD0D2).
+                     * 
+                     * The node should ONLY send response opcodes in the valid range:
+                     * - MINER_AUTH_CHALLENGE (208 → 0xD0D0): node → miner
+                     * - MINER_AUTH_RESULT (210 → 0xD0D2): node → miner
+                     * - Other response opcodes (200-220 range)
+                     * 
+                     * The node should NEVER send MINER_AUTH_INIT (207 → 0xD0CF) or
+                     * MINER_AUTH_RESPONSE (209 → 0xD0D1) as these are miner → node opcodes.
+                     * 
+                     * However, StatelessMiner may return these in responses, so we validate
+                     * and convert all mining opcodes (200-220) to maintain protocol correctness.
                      */
-                    if(result.response.HEADER < 256 && !StatelessOpcodes::IsStateless(result.response.HEADER))
+                    if(result.response.HEADER < 256)
                     {
+                        /* This is an 8-bit enum value from StatelessMiner - convert to 16-bit */
                         uint8_t nLegacyOpcode = static_cast<uint8_t>(result.response.HEADER);
-                        StatelessPacket mirroredResponse = result.response;  // Create a copy
-                        mirroredResponse.HEADER = StatelessOpcodes::Mirror(nLegacyOpcode);
-                        debug::log(3, FUNCTION, "Mirrored 8-bit response opcode ", 
-                                  uint32_t(nLegacyOpcode), " → 16-bit 0x", std::hex, mirroredResponse.HEADER, std::dec);
                         
-                        respond(mirroredResponse);  // Send the modified copy
+                        /* Validate it's a mining-related opcode (200-220 range) */
+                        if(nLegacyOpcode >= MiningConstants::MINING_OPCODE_MIN && 
+                           nLegacyOpcode <= MiningConstants::MINING_OPCODE_MAX)
+                        {
+                            StatelessPacket mirroredResponse = result.response;
+                            mirroredResponse.HEADER = StatelessOpcodes::Mirror(nLegacyOpcode);
+                            
+                            debug::log(3, FUNCTION, "Converted 8-bit opcode ", 
+                                      uint32_t(nLegacyOpcode), " → 16-bit 0x", 
+                                      std::hex, mirroredResponse.HEADER, std::dec);
+                            
+                            respond(mirroredResponse);
+                        }
+                        else
+                        {
+                            debug::error(FUNCTION, "Invalid 8-bit opcode from StatelessMiner: ", 
+                                       uint32_t(nLegacyOpcode), " (expected ", 
+                                       uint32_t(MiningConstants::MINING_OPCODE_MIN), "-",
+                                       uint32_t(MiningConstants::MINING_OPCODE_MAX), ")");
+                            return true;  /* Graceful failure - keep connection alive */
+                        }
+                    }
+                    else if(StatelessOpcodes::IsStateless(result.response.HEADER))
+                    {
+                        /* Already 16-bit stateless format - send directly */
+                        respond(result.response);
                     }
                     else
                     {
-                        respond(result.response);  // Send original if no mirroring needed
+                        debug::error(FUNCTION, "Invalid response opcode: 0x", 
+                                   std::hex, result.response.HEADER, std::dec);
+                        return true;  /* Graceful failure - keep connection alive */
                     }
                 }
             }
@@ -3477,6 +3510,17 @@ namespace LLP
     {
         m_rateLimit.nViolationCount++;
         
+        /* Debug mode: Skip rate limiting for localhost */
+        #ifdef DEBUG
+        if(MiningConstants::DISABLE_LOCALHOST_RATE_LIMITING && GetAddress().ToStringIP() == "127.0.0.1")
+        {
+            debug::log(0, FUNCTION, "🔧 DEBUG MODE: Skipping rate limit enforcement for localhost");
+            debug::log(0, FUNCTION, "   Violation #", m_rateLimit.nViolationCount, ": ", strReason);
+            debug::log(0, FUNCTION, "   (This would trigger penalties in production mode)");
+            return;  /* Skip all penalties for localhost in debug */
+        }
+        #endif
+        
         /* Notify local pool metrics if enabled */
         if(PoolDiscovery::IsLocalPoolEnabled())
         {
@@ -3550,6 +3594,33 @@ namespace LLP
         debug::log(3, FUNCTION, "Rate limit counters reset for ", GetAddress().ToStringIP());
     }
 
+    uint32_t StatelessMinerConnection::GetCachedDifficulty(uint32_t nChannel)
+    {
+        const uint64_t nNow = runtime::unifiedtimestamp();
+        
+        /* Check if cache is valid (same channel and within TTL) */
+        if(nCachedChannel.load() == nChannel && 
+           (nNow - nLastDifficultyCheck.load()) < (MiningConstants::DIFFICULTY_CACHE_TTL_MS / 1000))
+        {
+            debug::log(3, FUNCTION, "Using cached difficulty for channel ", nChannel, 
+                      " (age: ", (nNow - nLastDifficultyCheck.load()), "s)");
+            return nCachedDifficulty.load();
+        }
+        
+        /* Cache miss or stale - recalculate */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel, false);
+        
+        /* Update cache atomically */
+        nCachedDifficulty.store(nDifficulty);
+        nCachedChannel.store(nChannel);
+        nLastDifficultyCheck.store(nNow);
+        
+        debug::log(3, FUNCTION, "Cached new difficulty for channel ", nChannel, ": ", nDifficulty);
+        
+        return nDifficulty;
+    }
+
 
     /* GetContext - Accessor for mining context (used by server for notifications)
      *
@@ -3605,8 +3676,8 @@ namespace LLP
             return;
         }
         
-        /* Get difficulty */
-        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
+        /* Get difficulty (uses cache for performance) */
+        uint32_t nDifficulty = GetCachedDifficulty(nChannel);
         
         /* Build notification using unified builder */
         StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
@@ -3710,8 +3781,8 @@ namespace LLP
             return;
         }
         
-        /* Get difficulty */
-        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
+        /* Get difficulty (uses cache for performance) */
+        uint32_t nDifficulty = GetCachedDifficulty(nChannel);
         
         /* Create new block template - note: new_block() stores in mapBlocks, so we don't own the pointer */
         TAO::Ledger::Block* pBlock = new_block();

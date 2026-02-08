@@ -18,6 +18,7 @@ ________________________________________________________________________________
 #include <LLP/templates/stateless_connection.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/channel_state_manager.h>
+#include <LLP/include/mining_constants.h>
 #include <TAO/Ledger/types/block.h>
 #include <atomic>
 #include <mutex>
@@ -88,21 +89,21 @@ namespace LLP
             static constexpr uint32_t MAX_SUBMIT_BLOCK_PER_MINUTE = 60;  // Lenient for solutions!
             static constexpr uint32_t MAX_SET_CHANNEL_PER_MINUTE = 5;
             
-            // Minimum intervals (milliseconds)
-            static constexpr uint32_t MIN_GET_ROUND_INTERVAL_MS = 5000;   // 5 seconds
-            static constexpr uint32_t MIN_GET_BLOCK_INTERVAL_MS = 6000;   // 6 seconds
+            // Minimum intervals (milliseconds) - use MiningConstants for debug/production differentiation
+            static constexpr uint32_t MIN_GET_ROUND_INTERVAL_MS = MiningConstants::GET_ROUND_MIN_INTERVAL_MS;
+            static constexpr uint32_t MIN_GET_BLOCK_INTERVAL_MS = MiningConstants::GET_BLOCK_MIN_INTERVAL_MS;
             static constexpr uint32_t MIN_SUBMIT_BLOCK_INTERVAL_MS = 1000; // 1 second (lenient)
             
-            // Violation thresholds
+            // Violation thresholds - use MiningConstants for debug/production differentiation
             static constexpr uint32_t VIOLATIONS_BEFORE_STRIKE = 3;
             static constexpr uint32_t VIOLATIONS_BEFORE_THROTTLE = 6;
-            static constexpr uint32_t VIOLATIONS_BEFORE_DISCONNECT = 10;
+            static constexpr uint32_t VIOLATIONS_BEFORE_DISCONNECT = MiningConstants::RATE_LIMIT_STRIKE_THRESHOLD;
             
-            // Cooldown duration (NOT a ban - auto-expires)
-            static constexpr uint32_t COOLDOWN_DURATION_SECONDS = 300;  // 5 minutes
+            // Cooldown duration (NOT a ban - auto-expires) - use MiningConstants
+            static constexpr uint32_t COOLDOWN_DURATION_SECONDS = MiningConstants::AUTOCOOLDOWN_DURATION_SECONDS;
             
-            // Throttle delay when in throttle mode
-            static constexpr uint32_t THROTTLE_DELAY_MS = 10000;  // 10 seconds forced delay
+            // Throttle delay when in throttle mode - use MiningConstants
+            static constexpr uint32_t THROTTLE_DELAY_MS = MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS;
         };
         
         struct RateLimitState {
@@ -128,6 +129,16 @@ namespace LLP
         };
         
         RateLimitState m_rateLimit;
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // DIFFICULTY CACHE (Performance Optimization)
+        // ═══════════════════════════════════════════════════════════════════════
+        // Cache difficulty calculations to avoid repeated GetNextTargetRequired() calls
+        // which can be expensive during high-frequency mining operations
+        
+        mutable std::atomic<uint64_t> nLastDifficultyCheck{0};
+        mutable std::atomic<uint32_t> nCachedDifficulty{0};
+        mutable std::atomic<uint32_t> nCachedChannel{0};
 
     public:
         /** Default Constructor **/
@@ -340,6 +351,20 @@ namespace LLP
          *
          **/
         void ResetMinuteCounters();
+        
+        /** GetCachedDifficulty
+         *
+         *  @brief Get difficulty with caching to avoid repeated expensive calculations
+         * 
+         *  Caches difficulty for MiningConstants::DIFFICULTY_CACHE_TTL_MS milliseconds
+         *  to reduce load from repeated GetNextTargetRequired() calls during
+         *  high-frequency mining operations.
+         * 
+         *  @param[in] nChannel Mining channel (1=Prime, 2=Hash)
+         *  @return Cached or freshly calculated difficulty
+         *
+         **/
+        uint32_t GetCachedDifficulty(uint32_t nChannel);
         
         /** IsThrottled
          *
