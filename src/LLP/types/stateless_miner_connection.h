@@ -356,7 +356,7 @@ namespace LLP
          *
          *  @brief Get difficulty with caching to avoid repeated expensive calculations
          * 
-         *  Caches difficulty for MiningConstants::DIFFICULTY_CACHE_TTL_MS milliseconds
+         *  Caches difficulty for MiningConstants::DIFFICULTY_CACHE_TTL_SECONDS
          *  to reduce load from repeated GetNextTargetRequired() calls during
          *  high-frequency mining operations.
          * 

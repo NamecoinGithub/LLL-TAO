@@ -3530,14 +3530,19 @@ namespace LLP
     {
         m_rateLimit.nViolationCount++;
         
-        /* Debug mode: Skip rate limiting for localhost */
+        /* Debug mode: Skip rate limiting for localhost (IPv4 and IPv6) */
         #ifdef DEBUG
-        if(MiningConstants::DISABLE_LOCALHOST_RATE_LIMITING && GetAddress().ToStringIP() == "127.0.0.1")
+        if(MiningConstants::DISABLE_LOCALHOST_RATE_LIMITING)
         {
-            debug::log(0, FUNCTION, "🔧 DEBUG MODE: Skipping rate limit enforcement for localhost");
-            debug::log(0, FUNCTION, "   Violation #", m_rateLimit.nViolationCount, ": ", strReason);
-            debug::log(0, FUNCTION, "   (This would trigger penalties in production mode)");
-            return;  /* Skip all penalties for localhost in debug */
+            std::string strIP = GetAddress().ToStringIP();
+            if(strIP == "127.0.0.1" || strIP == "::1")
+            {
+                debug::log(0, FUNCTION, "🔧 DEBUG MODE: Skipping rate limit enforcement for localhost");
+                debug::log(0, FUNCTION, "   IP: ", strIP);
+                debug::log(0, FUNCTION, "   Violation #", m_rateLimit.nViolationCount, ": ", strReason);
+                debug::log(0, FUNCTION, "   (This would trigger penalties in production mode)");
+                return;  /* Skip all penalties for localhost in debug */
+            }
         }
         #endif
         
@@ -3620,7 +3625,7 @@ namespace LLP
         
         /* Check if cache is valid (same channel and within TTL) */
         if(nCachedChannel.load() == nChannel && 
-           (nNow - nLastDifficultyCheck.load()) < (MiningConstants::DIFFICULTY_CACHE_TTL_MS / 1000))
+           (nNow - nLastDifficultyCheck.load()) < MiningConstants::DIFFICULTY_CACHE_TTL_SECONDS)
         {
             debug::log(3, FUNCTION, "Using cached difficulty for channel ", nChannel, 
                       " (age: ", (nNow - nLastDifficultyCheck.load()), "s)");

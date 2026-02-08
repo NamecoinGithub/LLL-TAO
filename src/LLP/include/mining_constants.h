@@ -61,7 +61,7 @@ namespace MiningConstants
     // CHANNEL STATE CACHE
     //=========================================================================
     constexpr uint32_t CHANNEL_HEIGHT_CACHE_TTL_MS = 500;         // Cache channel height for 500ms
-    constexpr uint32_t DIFFICULTY_CACHE_TTL_MS = 1000;            // Cache difficulty for 1 second
+    constexpr uint32_t DIFFICULTY_CACHE_TTL_SECONDS = 1;          // Cache difficulty for 1 second
     
     //=========================================================================
     // SESSION MANAGEMENT
