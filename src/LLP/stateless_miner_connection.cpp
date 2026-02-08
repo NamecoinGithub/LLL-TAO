@@ -659,6 +659,10 @@ namespace LLP
                 debug::log(0, "   ✅ Validation passed");
                 debug::log(0, "   Calling new_block()...");
                 
+                /* Load current blockchain state for stale detection */
+                TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+                uint32_t nHeightBefore = stateBest.nHeight;
+                
                 /* Create a new block */
                 TAO::Ledger::Block* pBlock = new_block();
                 
@@ -666,6 +670,22 @@ namespace LLP
                 if(!pBlock)
                 {
                     debug::error("   ❌ new_block() returned nullptr");
+                    
+                    /* Check if blockchain moved while creating template (stale) */
+                    TAO::Ledger::BlockState stateNow = TAO::Ledger::ChainState::tStateBest.load();
+                    if(stateNow.nHeight != nHeightBefore)
+                    {
+                        debug::log(0, "   ℹ️  Block template became stale during creation:");
+                        debug::log(0, "      Height moved: ", nHeightBefore, " → ", stateNow.nHeight);
+                        debug::log(0, "      This is normal - blockchain advanced during template creation");
+                        debug::log(0, "      Miner should retry with GET_ROUND to get updated height");
+                    }
+                    else
+                    {
+                        debug::warning("   ⚠️  Block creation failed for unknown reason at height ", nHeightBefore);
+                    }
+                    
+                    /* Return empty response - miner will retry */
                     StatelessPacket response(BLOCK_DATA);
                     response.LENGTH = 0;
                     respond(response);
@@ -3789,6 +3809,21 @@ namespace LLP
         if (!pBlock)
         {
             debug::error(FUNCTION, "Failed to create block template");
+            
+            /* Check if blockchain moved while creating template (stale) */
+            TAO::Ledger::BlockState stateNow = TAO::Ledger::ChainState::tStateBest.load();
+            if(stateNow.nHeight != stateBest.nHeight)
+            {
+                debug::log(0, FUNCTION, "Block template became stale during creation:");
+                debug::log(0, FUNCTION, "   Height moved: ", stateBest.nHeight, " → ", stateNow.nHeight);
+                debug::log(0, FUNCTION, "   This is normal - blockchain advanced during template creation");
+                debug::log(0, FUNCTION, "   Push notification skipped - miner will poll for new work");
+            }
+            else
+            {
+                debug::warning(FUNCTION, "Block creation failed for unknown reason at height ", stateBest.nHeight);
+            }
+            
             debug::log(2, "════════════════════════════════════════════════════════════");
             return;
         }
