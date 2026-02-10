@@ -617,6 +617,31 @@ namespace LLP
                     return false;
                 }
 
+                /* Lane-scoped session recovery: only recover sessions created on this lane */
+                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByAddress(GetAddress().ToStringIP());
+                if(optExisting.has_value() && optExisting->nLastLane == 1)
+                {
+                    uint256_t hashRecoveredKey(0);
+                    uint64_t nRecoveredNonce = 0;
+                    if(SessionRecoveryManager::Get().RestoreChaCha20State(optExisting->hashKeyID, hashRecoveredKey, nRecoveredNonce)
+                       && hashRecoveredKey != 0)
+                    {
+                        context = context.WithChaChaKey(hashRecoveredKey.GetBytes());
+                    }
+
+                    std::vector<uint8_t> vRecoveredPubKey;
+                    uint256_t hashDisposableKeyID(0);
+                    if(SessionRecoveryManager::Get().RestoreDisposableKey(optExisting->hashKeyID, vRecoveredPubKey, hashDisposableKeyID)
+                       && !vRecoveredPubKey.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(SESSION_MUTEX);
+                        if(optExisting->nSessionId != 0)
+                            mapSessionKeys[optExisting->nSessionId] = vRecoveredPubKey;
+                    }
+
+                    debug::log(0, FUNCTION, "Session recovered (same lane: stateless)");
+                }
+
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
                 
@@ -633,7 +658,7 @@ namespace LLP
                     debug::log(0, "   Encryption ready: YES");
                 }
                 
-                /* Persist session and lane state for cross-lane recovery */
+                /* Persist session and lane state */
                 if(context.fAuthenticated && context.hashKeyID != 0)
                 {
                     SessionRecoveryManager::Get().SaveSession(context);
@@ -2298,6 +2323,31 @@ namespace LLP
                     debug::error(FUNCTION, "  Stake (0) uses Proof-of-Stake, not mined");
                     debug::log(2, "📥 === MINER_READY: REJECTED (INVALID CHANNEL) ===");
                     return false;
+                }
+
+                /* Lane-scoped session recovery: only recover sessions created on this lane */
+                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByAddress(GetAddress().ToStringIP());
+                if(optExisting.has_value() && optExisting->nLastLane == 1)
+                {
+                    uint256_t hashRecoveredKey(0);
+                    uint64_t nRecoveredNonce = 0;
+                    if(SessionRecoveryManager::Get().RestoreChaCha20State(optExisting->hashKeyID, hashRecoveredKey, nRecoveredNonce)
+                       && hashRecoveredKey != 0)
+                    {
+                        context = context.WithChaChaKey(hashRecoveredKey.GetBytes());
+                    }
+
+                    std::vector<uint8_t> vRecoveredPubKey;
+                    uint256_t hashDisposableKeyID(0);
+                    if(SessionRecoveryManager::Get().RestoreDisposableKey(optExisting->hashKeyID, vRecoveredPubKey, hashDisposableKeyID)
+                       && !vRecoveredPubKey.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(SESSION_MUTEX);
+                        if(optExisting->nSessionId != 0)
+                            mapSessionKeys[optExisting->nSessionId] = vRecoveredPubKey;
+                    }
+
+                    debug::log(0, FUNCTION, "Session recovered (same lane: stateless)");
                 }
 
                 /* Subscribe to notifications */
