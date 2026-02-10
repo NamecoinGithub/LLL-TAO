@@ -576,41 +576,14 @@ namespace LLP
                        uint32_t(PACKET.HEADER), std::dec,
                        " length=", PACKET.LENGTH);
 
+            /* Strict lane enforcement: require 16-bit stateless opcode (0xD000-0xD0FF).
+             * Any other opcode means a legacy miner connected to the stateless port. */
             if(!StatelessOpcodes::IsStateless(PACKET.HEADER))
             {
-                uint16_t nHeaderSwapped = static_cast<uint16_t>((PACKET.HEADER >> 8) | (PACKET.HEADER << 8));
-                if(StatelessOpcodes::IsStateless(nHeaderSwapped))
-                {
-                    debug::error(FUNCTION, "Header endian mismatch detected: header=0x", std::hex, uint32_t(PACKET.HEADER),
-                                 " swapped=0x", uint32_t(nHeaderSwapped), std::dec);
-                    PACKET.HEADER = nHeaderSwapped;
-                }
-            }
-
-            /* Validate opcode range - reject opcodes outside 0xD000-0xD0FF */
-            const uint16_t originalHeader = PACKET.HEADER;
-            if(!StatelessOpcodes::IsStateless(originalHeader))
-            {
-                const uint16_t swappedHeader =
-                    static_cast<uint16_t>((originalHeader >> 8) | (originalHeader << 8));
-                if(StatelessOpcodes::IsStateless(swappedHeader))
-                {
-                    PACKET.HEADER = swappedHeader;
-                }
-                else
-                {
-                    debug::error(FUNCTION, "Invalid stateless opcode: 0x", std::hex, uint32_t(originalHeader), std::dec);
-                    debug::error(FUNCTION, "  Stateless opcodes must be in range 0xD000-0xD0FF");
-                    debug::error(FUNCTION, "  Rejecting packet from ", GetAddress().ToStringIP());
-                    return false;
-                }
-            }
-
-            if(!StatelessOpcodes::IsStateless(PACKET.HEADER))
-            {
-                debug::error(FUNCTION, "Invalid stateless opcode: 0x", std::hex, uint32_t(PACKET.HEADER), std::dec);
-                debug::error(FUNCTION, "  Stateless opcodes must be in range 0xD000-0xD0FF");
-                debug::error(FUNCTION, "  Rejecting packet from ", GetAddress().ToStringIP());
+                debug::error(FUNCTION, "Wrong lane: legacy miner connected to stateless port (9323). ",
+                             "Header 0x", std::hex, uint32_t(PACKET.HEADER), std::dec,
+                             " is not a valid stateless opcode (expected 0xD000-0xD0FF). ",
+                             "Disconnecting ", GetAddress().ToStringIP());
                 return false;
             }
 
@@ -644,31 +617,6 @@ namespace LLP
                     return false;
                 }
 
-                /* Attempt lane-switch recovery based on address */
-                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByAddress(GetAddress().ToStringIP());
-                if(optExisting.has_value())
-                {
-                    uint256_t hashRecoveredKey(0);
-                    uint64_t nRecoveredNonce = 0;
-                    if(SessionRecoveryManager::Get().RestoreChaCha20State(optExisting->hashKeyID, hashRecoveredKey, nRecoveredNonce)
-                       && hashRecoveredKey != 0)
-                    {
-                        context = context.WithChaChaKey(hashRecoveredKey.GetBytes());
-                    }
-
-                    std::vector<uint8_t> vRecoveredPubKey;
-                    uint256_t hashDisposableKeyID(0);
-                    if(SessionRecoveryManager::Get().RestoreDisposableKey(optExisting->hashKeyID, vRecoveredPubKey, hashDisposableKeyID)
-                       && !vRecoveredPubKey.empty())
-                    {
-                        std::lock_guard<std::mutex> lock(SESSION_MUTEX);
-                        if(optExisting->nSessionId != 0)
-                            mapSessionKeys[optExisting->nSessionId] = vRecoveredPubKey;
-                    }
-
-                    debug::log(0, FUNCTION, "Session recovered from lane switch");
-                }
-                
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
                 
@@ -2352,31 +2300,6 @@ namespace LLP
                     return false;
                 }
 
-                /* Attempt lane-switch recovery based on address */
-                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByAddress(GetAddress().ToStringIP());
-                if(optExisting.has_value())
-                {
-                    uint256_t hashRecoveredKey(0);
-                    uint64_t nRecoveredNonce = 0;
-                    if(SessionRecoveryManager::Get().RestoreChaCha20State(optExisting->hashKeyID, hashRecoveredKey, nRecoveredNonce)
-                       && hashRecoveredKey != 0)
-                    {
-                        context = context.WithChaChaKey(hashRecoveredKey.GetBytes());
-                    }
-
-                    std::vector<uint8_t> vRecoveredPubKey;
-                    uint256_t hashDisposableKeyID(0);
-                    if(SessionRecoveryManager::Get().RestoreDisposableKey(optExisting->hashKeyID, vRecoveredPubKey, hashDisposableKeyID)
-                       && !vRecoveredPubKey.empty())
-                    {
-                        std::lock_guard<std::mutex> lock(SESSION_MUTEX);
-                        if(optExisting->nSessionId != 0)
-                            mapSessionKeys[optExisting->nSessionId] = vRecoveredPubKey;
-                    }
-
-                    debug::log(0, FUNCTION, "Session recovered from lane switch");
-                }
-                
                 /* Subscribe to notifications */
                 context = context.WithSubscription(context.nChannel);
                 

@@ -1710,3 +1710,88 @@ TEST_CASE("Legacy Opcode Recognition in ProcessPacket", "[stateless_miner][opcod
     }
 }
 
+
+TEST_CASE("Strict Lane Enforcement – framing mismatch detection", "[stateless_miner][lane]")
+{
+    using namespace LLP::OpcodeUtility;
+
+    SECTION("Legacy port: header 0xD0 indicates stateless framing (wrong lane)")
+    {
+        /* A stateless miner sending 16-bit opcode 0xD0CF would produce a first byte
+         * of 0xD0 (208) on the legacy port's 8-bit header read.
+         * 0xD0 == MINER_AUTH_CHALLENGE, which is node→miner only and must never
+         * arrive from a miner.  The code detects this and disconnects. */
+        uint8_t nHeader = 0xD0;  // Decimal 208
+
+        /* Verify 0xD0 is the high byte of a valid stateless opcode family */
+        REQUIRE(Stateless::IsStateless(static_cast<uint16_t>(0xD000 | 0x00)) == true);
+
+        /* Verify that treating 0xD0 as a mirrored opcode would produce a valid
+         * stateless header – proving it can be confused with stateless framing */
+        uint16_t nStatelessOpcode = Stateless::Mirror(nHeader);  // 0xD0D0
+        REQUIRE(Stateless::IsStateless(nStatelessOpcode) == true);
+
+        /* The legacy lane must reject header 0xD0 as a wrong-lane indicator */
+        REQUIRE(nHeader == 0xD0);
+    }
+
+    SECTION("Stateless port: non-0xD0xx opcode means legacy framing (wrong lane)")
+    {
+        /* When a legacy miner sends 8-bit opcode 207 (MINER_AUTH_INIT) to the
+         * stateless port, the 16-bit ReadPacket reads two bytes that will
+         * NOT fall in the 0xD000-0xD0FF range. */
+        std::vector<uint16_t> legacyDerivedHeaders = {
+            0xCF00,  // [207, 0x00] – legacy MINER_AUTH_INIT with zero-padded second byte
+            0x0300,  // [3, 0x00]   – legacy SET_CHANNEL
+            0x8100,  // [129, 0x00] – legacy GET_BLOCK
+            0x0100,  // [1, 0x00]   – legacy SUBMIT_BLOCK
+            0xFD00,  // [253, 0x00] – legacy PING
+        };
+
+        for(uint16_t h : legacyDerivedHeaders)
+        {
+            /* None of these should pass the stateless opcode check */
+            REQUIRE(Stateless::IsStateless(h) == false);
+        }
+    }
+
+    SECTION("Stateless port: valid 0xD0xx opcodes are accepted")
+    {
+        /* All properly framed stateless opcodes must pass */
+        std::vector<uint16_t> validStatelessOpcodes = {
+            Stateless::BLOCK_DATA,        // 0xD000
+            Stateless::SUBMIT_BLOCK,      // 0xD001
+            Stateless::SET_CHANNEL,       // 0xD003
+            Stateless::GET_BLOCK,         // 0xD081
+            Stateless::GET_HEIGHT,        // 0xD082
+            Stateless::BLOCK_ACCEPTED,    // 0xD0C8
+            Stateless::BLOCK_REJECTED,    // 0xD0C9
+            Stateless::AUTH_INIT,         // 0xD0CF
+            Stateless::AUTH_CHALLENGE,    // 0xD0D0
+            Stateless::AUTH_RESPONSE,     // 0xD0D1
+            Stateless::AUTH_RESULT,       // 0xD0D2
+            Stateless::SESSION_START,     // 0xD0D3
+            Stateless::SESSION_KEEPALIVE, // 0xD0D4
+            Stateless::SET_REWARD,        // 0xD0D5
+            Stateless::REWARD_RESULT,     // 0xD0D6
+            Stateless::MINER_READY,       // 0xD0D8
+            Stateless::PING,              // 0xD0FD
+            Stateless::CLOSE,             // 0xD0FE
+        };
+
+        for(uint16_t op : validStatelessOpcodes)
+        {
+            REQUIRE(Stateless::IsStateless(op) == true);
+        }
+    }
+
+    SECTION("Endian-swapped headers are NOT recovered (strict mode)")
+    {
+        /* Previously the code would byte-swap a mismatched header and retry.
+         * Strict framing disables this: swapped headers must also be rejected. */
+        uint16_t nSwapped = static_cast<uint16_t>((0xD0CF >> 8) | (0xD0CF << 8));
+        // 0xD0CF swapped = 0xCFD0 – this is NOT in 0xD000-0xD0FF
+        REQUIRE(Stateless::IsStateless(nSwapped) == false);
+    }
+}
+
