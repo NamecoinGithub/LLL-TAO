@@ -290,12 +290,9 @@ TEST_CASE("T13-T15: Physical Falcon sig size bounds on deserialization", "[physi
     auto MakeBytesWithPhysiglen = [](uint16_t physiglen, size_t actual_data_bytes)
         -> std::vector<uint8_t>
     {
-        /* Serialize a pre-threshold block to get the header bytes */
-        TAO::Ledger::TritiumBlock blkPre = MakeBlock(PHYSICAL_FALCON_BLOCK_VERSION - 1);
-        DataStream ssHeader(SER_NETWORK, LLP::PROTOCOL_VERSION);
-
-        /* We can't directly serialize at nVersion-1 then patch nVersion, so we build
-         * a fresh block at the threshold version and manually patch the stream. */
+        /* Serialize a post-threshold block with empty sig to get the header bytes,
+         * then strip the trailing 2-byte physiglen=0 field and replace it with
+         * a custom physiglen value and sig data. */
         TAO::Ledger::TritiumBlock blkBase = MakeBlock(PHYSICAL_FALCON_BLOCK_VERSION);
         DataStream ssBase(SER_NETWORK, LLP::PROTOCOL_VERSION);
         ssBase << blkBase;  // serializes with physiglen=0 (2 zero bytes at end)

@@ -1764,6 +1764,11 @@ namespace LLP
             return true;
         }
 
+        /* Legacy lane (port 8323) does not carry a Physical Falcon signature —
+         * ensure fields are empty so the idle block field serializes as physiglen=0. */
+        pTritium->vchPhysicalFalconSig.clear();
+        pTritium->hashPhysicalFalconKeyID = uint256_t(0);
+
         TAO::Ledger::BlockValidationResult validationResult =
             TAO::Ledger::ValidateMinedBlock(*pTritium);
         if(!validationResult.valid)
