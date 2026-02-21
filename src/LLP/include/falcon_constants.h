@@ -664,6 +664,22 @@ namespace FalconConstants
      *  Prevents miners from working on very stale templates. */
     static const uint64_t MAX_TEMPLATE_AGE_SECONDS = 90;
 
+    /***************************************************************************
+     * Size Validation Helpers
+     **************************************************************************/
+
+    /** Returns true if size matches a valid Falcon public key size (512 or 1024) */
+    inline bool is_valid_pubkey_size(size_t size)
+    {
+        return size == FALCON512_PUBKEY_SIZE || size == FALCON1024_PUBKEY_SIZE;
+    }
+
+    /** Returns true if size matches a valid Falcon private key size (512 or 1024) */
+    inline bool is_valid_privkey_size(size_t size)
+    {
+        return size == FALCON512_PRIVKEY_SIZE || size == FALCON1024_PRIVKEY_SIZE;
+    }
+
 } // namespace FalconConstants
 } // namespace LLP
 

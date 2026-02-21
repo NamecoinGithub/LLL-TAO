@@ -1045,7 +1045,7 @@ namespace LLP
                 
                 /* Packet info */
                 debug::log(0, "📦 ENCRYPTED PACKET:");
-                debug::log(0, "   Size: ", PACKET.DATA.size(), " bytes (expected: ~1035 for Tritium)");
+                debug::log(0, "   Size: ", PACKET.DATA.size(), " bytes (Falcon-512 ~1065, Falcon-1024 ~1833)");
                 debug::log(0, "   First 64 bytes (hex):");
                 {
                     std::string hexDump = FormatHexDump(PACKET.DATA, 64);
@@ -1134,7 +1134,13 @@ namespace LLP
                         
                         debug::log(0, "🔐 FALCON SESSION KEY:");
                         debug::log(0, "   Found: ", !vSessionPubKey.empty() ? "YES" : "NO");
-                        debug::log(0, "   Size: ", vSessionPubKey.size(), " bytes (expected: 897)");
+                        {
+                            const size_t falconKeySize = vSessionPubKey.size();
+                            std::string keyDesc = (falconKeySize == FalconConstants::FALCON512_PUBKEY_SIZE)  ? "Falcon-512" :
+                                                  (falconKeySize == FalconConstants::FALCON1024_PUBKEY_SIZE) ? "Falcon-1024" :
+                                                  "UNKNOWN SIZE (expected 897 or 1793)";
+                            debug::log(0, "   Size: ", falconKeySize, " bytes (", keyDesc, ")");
+                        }
                         if(!vSessionPubKey.empty() && vSessionPubKey.size() >= 16)
                         {
                             debug::log(0, "   First 16 bytes (hex): ");
