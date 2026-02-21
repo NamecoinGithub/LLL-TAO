@@ -62,6 +62,8 @@ namespace TAO
         , producer  ( )
         , ssSystem  ( )
         , vtx       ( )
+        , vchPhysicalFalconSig ( )
+        , hashPhysicalFalconKeyID (0)
         {
         }
 
@@ -73,6 +75,8 @@ namespace TAO
         , producer  (block.producer)
         , ssSystem  (block.ssSystem)
         , vtx       (block.vtx)
+        , vchPhysicalFalconSig   (block.vchPhysicalFalconSig)
+        , hashPhysicalFalconKeyID(block.hashPhysicalFalconKeyID)
         {
         }
 
@@ -84,6 +88,8 @@ namespace TAO
         , producer  (std::move(block.producer))
         , ssSystem  (std::move(block.ssSystem))
         , vtx       (std::move(block.vtx))
+        , vchPhysicalFalconSig   (std::move(block.vchPhysicalFalconSig))
+        , hashPhysicalFalconKeyID(std::move(block.hashPhysicalFalconKeyID))
         {
         }
 
@@ -110,6 +116,9 @@ namespace TAO
 
             producer   = block.producer;
 
+            vchPhysicalFalconSig    = block.vchPhysicalFalconSig;
+            hashPhysicalFalconKeyID = block.hashPhysicalFalconKeyID;
+
             return *this;
         }
 
@@ -135,6 +144,9 @@ namespace TAO
             vtx            = std::move(block.vtx);
 
             producer   = std::move(block.producer);
+
+            vchPhysicalFalconSig    = std::move(block.vchPhysicalFalconSig);
+            hashPhysicalFalconKeyID = std::move(block.hashPhysicalFalconKeyID);
 
             return *this;
         }
@@ -287,6 +299,8 @@ namespace TAO
 
             vtx.clear();
             producer = Transaction();
+            vchPhysicalFalconSig.clear();
+            hashPhysicalFalconKeyID = uint256_t(0);
         }
 
 
@@ -589,6 +603,35 @@ namespace TAO
                     default:
                         return debug::error(FUNCTION, "unknown signature type");
                 }
+            }
+
+            /* Physical Falcon signature validation — idle until PHYSICAL_FALCON_ENFORCEMENT is enabled */
+            if(nVersion >= LLP::FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION &&
+               LLP::FalconConstants::PHYSICAL_FALCON_ENFORCEMENT)
+            {
+                /* Enforcement is active — block MUST have a valid physical Falcon sig */
+                if(vchPhysicalFalconSig.empty())
+                    return debug::error(FUNCTION, "block missing required Physical Falcon signature (version ", nVersion, ")");
+
+                if(vchPhysicalFalconSig.size() < LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MIN ||
+                   vchPhysicalFalconSig.size() > LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                    return debug::error(FUNCTION, "Physical Falcon signature size invalid: ", vchPhysicalFalconSig.size());
+
+                /* TODO (stealth activation): look up registered pubkey by hashPhysicalFalconKeyID,
+                 * build message = hashPrevBlock + hashMerkleRoot + nTime + nNonce + nChannel + nHeight,
+                 * verify LLC::FLKey(pubkey).Verify(message, vchPhysicalFalconSig).
+                 * Return false on verification failure.
+                 */
+                debug::log(2, FUNCTION, "Physical Falcon signature present and size-valid (full verify TODO on activation)");
+            }
+            else if(nVersion >= LLP::FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION &&
+                    !LLP::FalconConstants::PHYSICAL_FALCON_ENFORCEMENT)
+            {
+                /* Enforcement is idle — log presence/absence for monitoring but don't reject */
+                if(!vchPhysicalFalconSig.empty())
+                    debug::log(3, FUNCTION, "Physical Falcon sig present (idle mode) size=", vchPhysicalFalconSig.size());
+                else
+                    debug::log(3, FUNCTION, "Physical Falcon sig absent (idle mode, not enforced)");
             }
 
             return true;

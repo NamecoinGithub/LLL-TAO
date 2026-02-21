@@ -17,12 +17,16 @@ ________________________________________________________________________________
 
 #include <LLC/include/flkey.h>
 
+#include <LLP/include/falcon_constants.h>
+
 #include <TAO/Register/types/stream.h>
 
 #include <TAO/Ledger/types/block.h>
 #include <TAO/Ledger/types/transaction.h>
 
 #include <Util/templates/serialize.h>
+
+#include <stdexcept>
 
 /* Global TAO namespace. */
 namespace TAO
@@ -74,23 +78,130 @@ namespace TAO
             std::vector<std::pair<uint8_t, uint512_t> > vtx;
 
 
-            /** Serialization **/
-            IMPLEMENT_SERIALIZE
-            (
-                READWRITE(nVersion);
-                READWRITE(hashPrevBlock);
-                READWRITE(hashMerkleRoot);
-                READWRITE(nChannel);
-                READWRITE(nHeight);
-                READWRITE(nBits);
-                READWRITE(nNonce);
-                READWRITE(nTime);
-                READWRITE(vchBlockSig);
-                READWRITE(producer);
-                READWRITE(ssSystem);
-                READWRITE(vOffsets);
-                READWRITE(vtx);
-            )
+            /** vchPhysicalFalconSig
+             *
+             *  Optional Physical Falcon-1024 signature over this block.
+             *  Present and parsed when nVersion >= FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION.
+             *  Consensus validation only enforced when FalconConstants::PHYSICAL_FALCON_ENFORCEMENT == true.
+             *  The signature covers: hashPrevBlock + hashMerkleRoot + nTime + nNonce + nChannel + nHeight
+             **/
+            std::vector<uint8_t> vchPhysicalFalconSig;
+
+
+            /** hashPhysicalFalconKeyID
+             *
+             *  SK256 hash of the Physical Falcon-1024 public key that produced vchPhysicalFalconSig.
+             *  Used to look up the registered pubkey in the account/trust system.
+             *  Present when nVersion >= FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION and vchPhysicalFalconSig non-empty.
+             **/
+            uint256_t hashPhysicalFalconKeyID;
+
+
+            /** GetSerializeSize **/
+            uint64_t GetSerializeSize(uint32_t nSerType, uint32_t nSerVersion) const
+            {
+                uint64_t nSerSize = 0;
+                nSerSize += ::GetSerializeSize(nVersion, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(hashPrevBlock, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(hashMerkleRoot, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(nChannel, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(nHeight, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(nBits, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(nNonce, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(nTime, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(vchBlockSig, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(producer, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(ssSystem, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(vOffsets, nSerType, nSerVersion);
+                nSerSize += ::GetSerializeSize(vtx, nSerType, nSerVersion);
+
+                /* Physical Falcon signature field — version gated, idle until PHYSICAL_FALCON_ENFORCEMENT */
+                if(nVersion >= LLP::FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION)
+                {
+                    nSerSize += sizeof(uint16_t); // physiglen field (always present, 2 bytes)
+                    if(!vchPhysicalFalconSig.empty())
+                    {
+                        nSerSize += ::GetSerializeSize(hashPhysicalFalconKeyID, nSerType, nSerVersion);
+                        nSerSize += vchPhysicalFalconSig.size();
+                    }
+                }
+                return nSerSize;
+            }
+
+
+            /** Serialize (write) **/
+            template<typename Stream>
+            void Serialize(Stream& s, uint32_t nSerType, uint32_t nSerVersion) const
+            {
+                ::Serialize(s, nVersion, nSerType, nSerVersion);
+                ::Serialize(s, hashPrevBlock, nSerType, nSerVersion);
+                ::Serialize(s, hashMerkleRoot, nSerType, nSerVersion);
+                ::Serialize(s, nChannel, nSerType, nSerVersion);
+                ::Serialize(s, nHeight, nSerType, nSerVersion);
+                ::Serialize(s, nBits, nSerType, nSerVersion);
+                ::Serialize(s, nNonce, nSerType, nSerVersion);
+                ::Serialize(s, nTime, nSerType, nSerVersion);
+                ::Serialize(s, vchBlockSig, nSerType, nSerVersion);
+                ::Serialize(s, producer, nSerType, nSerVersion);
+                ::Serialize(s, ssSystem, nSerType, nSerVersion);
+                ::Serialize(s, vOffsets, nSerType, nSerVersion);
+                ::Serialize(s, vtx, nSerType, nSerVersion);
+
+                /* Physical Falcon signature field — version gated, idle until PHYSICAL_FALCON_ENFORCEMENT */
+                if(nVersion >= LLP::FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION)
+                {
+                    uint16_t nPhySigLen = static_cast<uint16_t>(vchPhysicalFalconSig.size());
+                    WRITEDATA(s, nPhySigLen);
+                    if(nPhySigLen > 0)
+                    {
+                        ::Serialize(s, hashPhysicalFalconKeyID, nSerType, nSerVersion);
+                        s.write(reinterpret_cast<const char*>(vchPhysicalFalconSig.data()), nPhySigLen);
+                    }
+                }
+            }
+
+
+            /** Unserialize (read) **/
+            template<typename Stream>
+            void Unserialize(Stream& s, uint32_t nSerType, uint32_t nSerVersion)
+            {
+                ::Unserialize(s, nVersion, nSerType, nSerVersion);
+                ::Unserialize(s, hashPrevBlock, nSerType, nSerVersion);
+                ::Unserialize(s, hashMerkleRoot, nSerType, nSerVersion);
+                ::Unserialize(s, nChannel, nSerType, nSerVersion);
+                ::Unserialize(s, nHeight, nSerType, nSerVersion);
+                ::Unserialize(s, nBits, nSerType, nSerVersion);
+                ::Unserialize(s, nNonce, nSerType, nSerVersion);
+                ::Unserialize(s, nTime, nSerType, nSerVersion);
+                ::Unserialize(s, vchBlockSig, nSerType, nSerVersion);
+                ::Unserialize(s, producer, nSerType, nSerVersion);
+                ::Unserialize(s, ssSystem, nSerType, nSerVersion);
+                ::Unserialize(s, vOffsets, nSerType, nSerVersion);
+                ::Unserialize(s, vtx, nSerType, nSerVersion);
+
+                /* Physical Falcon signature field — version gated */
+                if(nVersion >= LLP::FalconConstants::PHYSICAL_FALCON_BLOCK_VERSION)
+                {
+                    uint16_t nPhySigLen = 0;
+                    READDATA(s, nPhySigLen);
+                    if(nPhySigLen > 0)
+                    {
+                        if(nPhySigLen < LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MIN ||
+                           nPhySigLen > LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                        {
+                            throw std::runtime_error("Physical Falcon sig size out of range");
+                        }
+                        ::Unserialize(s, hashPhysicalFalconKeyID, nSerType, nSerVersion);
+                        vchPhysicalFalconSig.resize(nPhySigLen);
+                        s.read(reinterpret_cast<char*>(vchPhysicalFalconSig.data()), nPhySigLen);
+                    }
+                    else
+                    {
+                        vchPhysicalFalconSig.clear();
+                        hashPhysicalFalconKeyID = uint256_t(0);
+                    }
+                }
+            }
 
 
             /** The default constructor. **/

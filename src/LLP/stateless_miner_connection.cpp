@@ -1805,6 +1805,24 @@ namespace LLP
                     return true;
                 }
 
+                /* Attach optional Physical Falcon signature to the block for blockchain storage.
+                 * physiglen == 0 (empty) is the standard case until stealth activation.
+                 * Field is idle: stored but not enforced while PHYSICAL_FALCON_ENFORCEMENT == false. */
+                if(!context.vchPhysicalSignature.empty() &&
+                   context.vchPhysicalSignature.size() >= FalconConstants::PHYSICAL_FALCON1024_SIG_MIN &&
+                   context.vchPhysicalSignature.size() <= FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                {
+                    pTritium->vchPhysicalFalconSig    = context.vchPhysicalSignature;
+                    pTritium->hashPhysicalFalconKeyID = context.hashKeyID;
+                    debug::log(2, FUNCTION, "Physical Falcon sig attached to block (idle), size=", context.vchPhysicalSignature.size());
+                }
+                else
+                {
+                    pTritium->vchPhysicalFalconSig.clear();
+                    pTritium->hashPhysicalFalconKeyID = uint256_t(0);
+                    debug::log(3, FUNCTION, "No Physical Falcon sig in submission (idle mode, physiglen=0)");
+                }
+
                 TAO::Ledger::BlockValidationResult validationResult =
                     TAO::Ledger::ValidateMinedBlock(*pTritium);
                 if(!validationResult.valid)

@@ -666,6 +666,49 @@ namespace FalconConstants
      *  Prevents miners from working on very stale templates. */
     static const uint64_t MAX_TEMPLATE_AGE_SECONDS = 600;
 
+    /***************************************************************************
+     * Physical Falcon-1024 Block Signature (Blockchain Storage Layer)
+     *
+     * The Physical Falcon is the BLOCKCHAIN storage layer — a real persistent
+     * Falcon-1024 keypair whose public key is registered on-chain and whose
+     * signature over the block is stored in the block itself for future
+     * quantum-resistance validation at the consensus level.
+     *
+     * This is distinct from the Disposable Falcon (transport security layer).
+     *
+     * Current block version maximum is 8 (NETWORK_BLOCK_CURRENT_VERSION).
+     * PHYSICAL_FALCON_BLOCK_VERSION is set to 9 (one above current maximum)
+     * so no live blocks trigger this field until a future block version upgrade.
+     **************************************************************************/
+
+    /** PHYSICAL_FALCON_BLOCK_VERSION
+     *
+     *  Minimum block nVersion at which vchPhysicalFalconSig field is present
+     *  in serialized blocks.  Blocks with nVersion < this value have no physical
+     *  sig field.  Current production maximum is 8; this is set to 9 to avoid
+     *  any live blocks triggering the new field.
+     **/
+    static const uint32_t PHYSICAL_FALCON_BLOCK_VERSION = 9;
+
+    /** PHYSICAL_FALCON_ENFORCEMENT
+     *
+     *  When false (default): physical sig field is parsed and stored but NOT
+     *  validated by consensus.  Blocks without a valid physical sig are accepted.
+     *  When true (stealth activation): consensus REJECTS blocks missing or with
+     *  invalid physical sig when nVersion >= PHYSICAL_FALCON_BLOCK_VERSION.
+     *
+     *  This flag MUST remain false until 100% node + miner adoption.
+     *  Flip silently in a future routine release.  No announcement required.
+     **/
+    static constexpr bool PHYSICAL_FALCON_ENFORCEMENT = false;
+
+    /** Falcon-1024 physical signature size bounds (real, on-chain signatures) **/
+    static const size_t PHYSICAL_FALCON1024_SIG_MIN = 1000;   // Conservative minimum
+    static const size_t PHYSICAL_FALCON1024_SIG_MAX = 1330;   // Conservative maximum
+
+    /** Physical Falcon pubkey size for Falcon-1024 **/
+    static const size_t PHYSICAL_FALCON1024_PUBKEY_SIZE = 1793;  // Standard Falcon-1024 public key
+
 } // namespace FalconConstants
 } // namespace LLP
 
