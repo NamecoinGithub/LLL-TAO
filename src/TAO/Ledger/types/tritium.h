@@ -186,8 +186,8 @@ namespace TAO
                     READDATA(s, nPhySigLen);
                     if(nPhySigLen > 0)
                     {
-                        if(nPhySigLen < LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MIN ||
-                           nPhySigLen > LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                        if(nPhySigLen < LLP::FalconConstants::FALCON_CT_SIG_SIZE_512 ||
+                           nPhySigLen > LLP::FalconConstants::FALCON_CT_SIG_SIZE_1024)
                         {
                             throw std::runtime_error("Physical Falcon sig size out of range");
                         }

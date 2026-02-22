@@ -613,8 +613,8 @@ namespace TAO
                 if(vchPhysicalFalconSig.empty())
                     return debug::error(FUNCTION, "block missing required Physical Falcon signature (version ", nVersion, ")");
 
-                if(vchPhysicalFalconSig.size() < LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MIN ||
-                   vchPhysicalFalconSig.size() > LLP::FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                if(vchPhysicalFalconSig.size() < LLP::FalconConstants::FALCON_CT_SIG_SIZE_512 ||
+                   vchPhysicalFalconSig.size() > LLP::FalconConstants::FALCON_CT_SIG_SIZE_1024)
                     return debug::error(FUNCTION, "Physical Falcon signature size invalid: ", vchPhysicalFalconSig.size());
 
                 /* TODO (stealth activation): look up registered pubkey by hashPhysicalFalconKeyID,

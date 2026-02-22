@@ -1809,8 +1809,8 @@ namespace LLP
                  * physiglen == 0 (empty) is the standard case until stealth activation.
                  * Field is idle: stored but not enforced while PHYSICAL_FALCON_ENFORCEMENT == false. */
                 if(!context.vchPhysicalSignature.empty() &&
-                   context.vchPhysicalSignature.size() >= FalconConstants::PHYSICAL_FALCON1024_SIG_MIN &&
-                   context.vchPhysicalSignature.size() <= FalconConstants::PHYSICAL_FALCON1024_SIG_MAX)
+                   context.vchPhysicalSignature.size() >= FalconConstants::FALCON_CT_SIG_SIZE_512 &&
+                   context.vchPhysicalSignature.size() <= FalconConstants::FALCON_CT_SIG_SIZE_1024)
                 {
                     pTritium->vchPhysicalFalconSig    = context.vchPhysicalSignature;
                     pTritium->hashPhysicalFalconKeyID = context.hashKeyID;

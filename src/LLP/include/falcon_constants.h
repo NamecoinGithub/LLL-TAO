@@ -703,8 +703,8 @@ namespace FalconConstants
     static constexpr bool PHYSICAL_FALCON_ENFORCEMENT = false;
 
     /** Falcon-1024 physical signature size bounds (real, on-chain signatures) **/
-    static const size_t PHYSICAL_FALCON1024_SIG_MIN = 1000;   // Conservative minimum
-    static const size_t PHYSICAL_FALCON1024_SIG_MAX = 1330;   // Conservative maximum
+    static const size_t FALCON_CT_SIG_SIZE_512  = 897;    // Falcon-512 CT signature (exact)
+    static const size_t FALCON_CT_SIG_SIZE_1024 = 1577;   // Falcon-1024 CT signature (exact)
 
     /** Physical Falcon pubkey size for Falcon-1024 **/
     static const size_t PHYSICAL_FALCON1024_PUBKEY_SIZE = 1793;  // Standard Falcon-1024 public key

@@ -74,19 +74,24 @@ TEST_CASE("Physical Falcon constants are correct", "[physical_falcon][constants]
         REQUIRE(PHYSICAL_FALCON_ENFORCEMENT == false);
     }
 
-    SECTION("PHYSICAL_FALCON1024_SIG_MIN < PHYSICAL_FALCON1024_SIG_MAX")
+    SECTION("FALCON_CT_SIG_SIZE_512 < FALCON_CT_SIG_SIZE_1024")
     {
-        REQUIRE(PHYSICAL_FALCON1024_SIG_MIN < PHYSICAL_FALCON1024_SIG_MAX);
+        REQUIRE(FALCON_CT_SIG_SIZE_512 < FALCON_CT_SIG_SIZE_1024);
     }
 
-    SECTION("PHYSICAL_FALCON1024_SIG_MIN is at least 1000")
+    SECTION("FALCON_CT_SIG_SIZE_512 is 897 (Falcon-512 CT exact)")
     {
-        REQUIRE(PHYSICAL_FALCON1024_SIG_MIN >= 1000u);
+        REQUIRE(FALCON_CT_SIG_SIZE_512 == 897u);
     }
 
-    SECTION("PHYSICAL_FALCON1024_SIG_MAX fits in uint16_t")
+    SECTION("FALCON_CT_SIG_SIZE_1024 is 1577 (Falcon-1024 CT exact)")
     {
-        REQUIRE(PHYSICAL_FALCON1024_SIG_MAX <= 65535u);
+        REQUIRE(FALCON_CT_SIG_SIZE_1024 == 1577u);
+    }
+
+    SECTION("FALCON_CT_SIG_SIZE_1024 fits in uint16_t")
+    {
+        REQUIRE(FALCON_CT_SIG_SIZE_1024 <= 65535u);
     }
 
     SECTION("PHYSICAL_FALCON1024_PUBKEY_SIZE is 1793 (standard Falcon-1024 pubkey)")
@@ -186,8 +191,8 @@ TEST_CASE("T07-T09: Post-threshold block with dummy physical sig round-trip", "[
 {
     using namespace LLP::FalconConstants;
 
-    /* Build a dummy sig of valid size */
-    static const size_t DUMMY_SIG_SIZE = PHYSICAL_FALCON1024_SIG_MIN;  // 1000 bytes
+    /* Build a dummy sig of valid size (Falcon-512 CT exact size) */
+    static const size_t DUMMY_SIG_SIZE = FALCON_CT_SIG_SIZE_512;  // 897 bytes
     std::vector<uint8_t> vDummySig(DUMMY_SIG_SIZE, 0xAB);
     uint256_t dummyKeyID(0x1234567890ABCDEF);
 
@@ -319,25 +324,25 @@ TEST_CASE("T13-T15: Physical Falcon sig size bounds on deserialization", "[physi
         return vBase;
     };
 
-    SECTION("T13: physiglen below PHYSICAL_FALCON1024_SIG_MIN throws on deserialization")
+    SECTION("T13: physiglen below FALCON_CT_SIG_SIZE_512 throws on deserialization")
     {
-        const uint16_t tooSmall = static_cast<uint16_t>(PHYSICAL_FALCON1024_SIG_MIN - 1);
+        const uint16_t tooSmall = static_cast<uint16_t>(FALCON_CT_SIG_SIZE_512 - 1);
         std::vector<uint8_t> vBytes = MakeBytesWithPhysiglen(tooSmall, static_cast<size_t>(tooSmall));
 
         REQUIRE_THROWS_AS(Deserialize(vBytes), std::runtime_error);
     }
 
-    SECTION("T14: physiglen above PHYSICAL_FALCON1024_SIG_MAX throws on deserialization")
+    SECTION("T14: physiglen above FALCON_CT_SIG_SIZE_1024 throws on deserialization")
     {
-        const uint16_t tooBig = static_cast<uint16_t>(PHYSICAL_FALCON1024_SIG_MAX + 1);
+        const uint16_t tooBig = static_cast<uint16_t>(FALCON_CT_SIG_SIZE_1024 + 1);
         std::vector<uint8_t> vBytes = MakeBytesWithPhysiglen(tooBig, static_cast<size_t>(tooBig));
 
         REQUIRE_THROWS_AS(Deserialize(vBytes), std::runtime_error);
     }
 
-    SECTION("T15: physiglen at valid minimum deserializes successfully")
+    SECTION("T15: physiglen at FALCON_CT_SIG_SIZE_512 (897) deserializes successfully")
     {
-        const uint16_t validMin = static_cast<uint16_t>(PHYSICAL_FALCON1024_SIG_MIN);
+        const uint16_t validMin = static_cast<uint16_t>(FALCON_CT_SIG_SIZE_512);
         std::vector<uint8_t> vBytes = MakeBytesWithPhysiglen(validMin, static_cast<size_t>(validMin));
 
         TAO::Ledger::TritiumBlock blk;
