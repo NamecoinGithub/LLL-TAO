@@ -20,6 +20,7 @@ ________________________________________________________________________________
 
 /* Forward declarations to avoid heavy includes */
 namespace LLP { class Packet; }
+namespace LLP { class StatelessPacket; }
 
 namespace LLP
 {
@@ -149,12 +150,6 @@ namespace OpcodeUtility
         static constexpr uint16_t HASH_BLOCK_AVAILABLE  = Mirror(Opcodes::HASH_BLOCK_AVAILABLE);  // 0xD0DA
         static constexpr uint16_t PRIME_AVAILABLE       = PRIME_BLOCK_AVAILABLE;                   // Alias: 0xD0D9
         static constexpr uint16_t HASH_AVAILABLE        = HASH_BLOCK_AVAILABLE;                    // Alias: 0xD0DA
-
-        /* Stateless-only KEEPALIVE_V2 opcodes (no legacy 8-bit equivalents).
-         * These extend beyond the mirror range and are not in OpcodeUtility::Opcodes. */
-        static constexpr uint16_t KEEPALIVE_V2     = Mirror(219);  // 0xD0DB — Miner→Node  8-byte request
-        static constexpr uint16_t KEEPALIVE_V2_ACK = Mirror(220);  // 0xD0DC — Node→Miner 28-byte response
-
         static constexpr uint16_t PING  = Mirror(Opcodes::PING);   // 0xD0FD
         static constexpr uint16_t CLOSE = Mirror(Opcodes::CLOSE);  // 0xD0FE
 
@@ -194,6 +189,62 @@ namespace OpcodeUtility
         static constexpr uint16_t STATELESS_HASH_BLOCK_AVAILABLE  = HASH_BLOCK_AVAILABLE;
         static constexpr uint16_t STATELESS_PING  = PING;
         static constexpr uint16_t STATELESS_CLOSE = CLOSE;
+
+        //=====================================================================
+        // UN-MIRRORED STATELESS-ONLY OPCODES
+        // These opcodes do NOT follow the 0xD000|legacy formula.
+        // They have NO legacy lane equivalent and are STATELESS PORT ONLY.
+        // They all carry DATA payloads — never header-only.
+        //=====================================================================
+
+        /** KEEPALIVE_V2 (0xD100)
+         *
+         *  Stateless-only session keepalive. Carries an 8-byte payload:
+         *
+         *  PAYLOAD (8 bytes, little-endian):
+         *    [0-3]  uint32_t  sequence            Monotonic miner keepalive counter
+         *    [4-7]  uint32_t  hashPrevBlock_lo32  Low 32 bits of miner's current prevHash (fork canary)
+         *
+         *  NOT available on legacy port 8323. Use SESSION_KEEPALIVE (0xD4) there.
+         **/
+        static constexpr uint16_t KEEPALIVE_V2     = 0xD100;   // DATA-bearing, stateless-only
+
+        /** KEEPALIVE_V2_ACK (0xD101)
+         *
+         *  Node response to KEEPALIVE_V2. 28-byte payload (7 × little-endian uint32):
+         *    [0-3]   sequence            Echo of miner's sequence
+         *    [4-7]   hashPrevBlock_lo32  Echo of miner's prevHash canary
+         *    [8-11]  unified_height      Node's unified block height
+         *    [12-15] hash_tip_lo32       Low 32 bits of node's hashBestChain
+         *    [16-19] prime_height        Node's Prime channel height
+         *    [20-23] hash_height         Node's Hash channel height
+         *    [24-27] fork_score          Latent Fork Detection score (0=healthy)
+         **/
+        static constexpr uint16_t KEEPALIVE_V2_ACK = 0xD101;   // DATA-bearing, stateless-only
+
+        /** PING_DIAG (0xD0E0)
+         *
+         *  Colin AI Miner Agent 64-byte diagnostic PING. Sent by the node to
+         *  each active miner at every emit_report() cycle (default: 60s).
+         *  Carries a fully structured PingFrame (see colin_mining_agent.h).
+         *
+         *  PAYLOAD: 64 bytes (PingFrame, big-endian, cache-line aligned)
+         *  Direction: Node → Miner
+         *  NOT mirrored from legacy PING (0xFD) — completely separate opcode.
+         *  NOT available on legacy port 8323.
+         **/
+        static constexpr uint16_t PING_DIAG        = 0xD0E0;   // DATA-bearing, stateless-only
+
+        /** PONG_DIAG (0xD0E1)
+         *
+         *  Colin AI Miner response to PING_DIAG. Carries a 64-byte PongFrame
+         *  with echoed sequence/timestamp and live miner telemetry.
+         *
+         *  PAYLOAD: 64 bytes (PongFrame, big-endian)
+         *  Direction: Miner → Node
+         *  NOT mirrored. NOT available on legacy port 8323.
+         **/
+        static constexpr uint16_t PONG_DIAG        = 0xD0E1;   // DATA-bearing, stateless-only
     }
 
     //=========================================================================
@@ -249,18 +300,57 @@ namespace OpcodeUtility
 
     /** GetExpectedPayloadSize16
      *
-     *  Returns the expected payload size in bytes for a 16-bit stateless opcode,
-     *  or -1 if the opcode has a variable-length or unspecified payload.
+     *  Returns the exact required payload size in bytes for fixed-payload
+     *  16-bit stateless opcodes, or 0 for variable-length / header-only opcodes.
      *
-     *  Used by packet validators to enforce exact payload sizes for opcodes
-     *  that have a fixed wire format (e.g., KEEPALIVE_V2, KEEPALIVE_V2_ACK).
+     *  Fixed-payload opcodes:
+     *    KEEPALIVE_V2     (0xD100) → 8 bytes
+     *    KEEPALIVE_V2_ACK (0xD101) → 28 bytes
+     *    PING_DIAG        (0xD0E0) → 64 bytes
+     *    PONG_DIAG        (0xD0E1) → 64 bytes
      *
      *  @param[in] nOpcode The 16-bit stateless opcode to query
      *
-     *  @return Expected payload size in bytes, or -1 for variable/unknown
+     *  @return Exact required byte count, or 0 for variable/header-only
      *
      **/
-    int32_t GetExpectedPayloadSize16(uint16_t nOpcode);
+    uint32_t GetExpectedPayloadSize16(uint16_t nOpcode);
+
+
+    /** HasDataPayload16
+     *
+     *  Check if a 16-bit stateless opcode carries a data payload.
+     *
+     *  Covers both mirrored opcodes (0xD0xx) and un-mirrored stateless-only
+     *  opcodes (0xD1xx). Un-mirrored data-bearing opcodes:
+     *    - KEEPALIVE_V2     (0xD100): 8-byte payload
+     *    - KEEPALIVE_V2_ACK (0xD101): 28-byte payload
+     *    - PING_DIAG        (0xD0E0): 64-byte PingFrame
+     *    - PONG_DIAG        (0xD0E1): 64-byte PongFrame
+     *
+     *  @param[in] nOpcode  The 16-bit stateless opcode to check
+     *
+     *  @return true if opcode carries data payload, false for header-only
+     *
+     **/
+    bool HasDataPayload16(uint16_t nOpcode);
+
+
+    /** IsUnmirroredStatelessOpcode
+     *
+     *  Check if a 16-bit opcode is a stateless-only un-mirrored opcode.
+     *  Un-mirrored opcodes have NO legacy lane equivalent and must NEVER
+     *  be sent or accepted on legacy port 8323.
+     *
+     *  Un-mirrored opcodes: KEEPALIVE_V2 (0xD100), KEEPALIVE_V2_ACK (0xD101),
+     *                       PING_DIAG (0xD0E0), PONG_DIAG (0xD0E1).
+     *
+     *  @param[in] nOpcode The 16-bit opcode to check
+     *
+     *  @return true if opcode is an un-mirrored stateless-only opcode
+     *
+     **/
+    bool IsUnmirroredStatelessOpcode(uint16_t nOpcode);
 
 
     /** IsStatelessMiningOpcode
@@ -380,6 +470,21 @@ namespace OpcodeUtility
      *
      **/
     bool ValidatePacketLength(const Packet& packet, std::string* strReason = nullptr);
+
+
+    /** ValidatePacketLength (StatelessPacket overload)
+     *
+     *  Validates that a 16-bit stateless packet's length is within acceptable
+     *  bounds, enforcing exact payload sizes for fixed-payload opcodes such as
+     *  KEEPALIVE_V2 (8 B), KEEPALIVE_V2_ACK (28 B), PING_DIAG/PONG_DIAG (64 B).
+     *
+     *  @param[in] packet The stateless packet to validate
+     *  @param[out] strReason Optional reason string for validation failure
+     *
+     *  @return true if packet length is valid, false otherwise
+     *
+     **/
+    bool ValidatePacketLength(const StatelessPacket& packet, std::string* strReason = nullptr);
 
 
     /** ValidateOpcodeForStatelessPort
