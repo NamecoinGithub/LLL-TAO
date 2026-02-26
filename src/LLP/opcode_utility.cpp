@@ -414,19 +414,6 @@ namespace OpcodeUtility
     }
 
 
-    uint32_t GetExpectedPayloadSize16(uint16_t nOpcode)
-    {
-        switch(nOpcode)
-        {
-            case Stateless::KEEPALIVE_V2:      return KEEPALIVE_V2_PAYLOAD_SIZE;      // 8
-            case Stateless::KEEPALIVE_V2_ACK:  return KEEPALIVE_V2_ACK_PAYLOAD_SIZE;  // 28
-            case Stateless::PING_DIAG:         return 64;  // PingFrame
-            case Stateless::PONG_DIAG:         return 64;  // PongFrame
-            default:                           return 0;   // variable or header-only
-        }
-    }
-
-
     bool HasDataPayload(uint8_t nOpcode)
     {
         /* Traditional data packets (0-127) carry payload */
@@ -489,6 +476,19 @@ namespace OpcodeUtility
                 return true;
             default:
                 return false;
+        }
+    }
+
+
+    uint32_t GetExpectedPayloadSize16(uint16_t nOpcode)
+    {
+        switch(nOpcode)
+        {
+            case Stateless::KEEPALIVE_V2:      return KEEPALIVE_V2_PAYLOAD_SIZE;      // 8
+            case Stateless::KEEPALIVE_V2_ACK:  return KEEPALIVE_V2_ACK_PAYLOAD_SIZE;  // 28
+            case Stateless::PING_DIAG:         return 64;  // PingFrame
+            case Stateless::PONG_DIAG:         return 64;  // PongFrame
+            default:                           return 0;   // variable or header-only
         }
     }
 

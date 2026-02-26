@@ -298,61 +298,6 @@ namespace OpcodeUtility
     static constexpr uint32_t KEEPALIVE_V2_ACK_PAYLOAD_SIZE = 28;  // Node→Miner: 7 × uint32_t
 
 
-    /** GetExpectedPayloadSize16
-     *
-     *  Returns the exact required payload size in bytes for fixed-payload
-     *  16-bit stateless opcodes, or 0 for variable-length / header-only opcodes.
-     *
-     *  Fixed-payload opcodes:
-     *    KEEPALIVE_V2     (0xD100) → 8 bytes
-     *    KEEPALIVE_V2_ACK (0xD101) → 28 bytes
-     *    PING_DIAG        (0xD0E0) → 64 bytes
-     *    PONG_DIAG        (0xD0E1) → 64 bytes
-     *
-     *  @param[in] nOpcode The 16-bit stateless opcode to query
-     *
-     *  @return Exact required byte count, or 0 for variable/header-only
-     *
-     **/
-    uint32_t GetExpectedPayloadSize16(uint16_t nOpcode);
-
-
-    /** HasDataPayload16
-     *
-     *  Check if a 16-bit stateless opcode carries a data payload.
-     *
-     *  Covers both mirrored opcodes (0xD0xx) and un-mirrored stateless-only
-     *  opcodes (0xD1xx). Un-mirrored data-bearing opcodes:
-     *    - KEEPALIVE_V2     (0xD100): 8-byte payload
-     *    - KEEPALIVE_V2_ACK (0xD101): 28-byte payload
-     *    - PING_DIAG        (0xD0E0): 64-byte PingFrame
-     *    - PONG_DIAG        (0xD0E1): 64-byte PongFrame
-     *
-     *  @param[in] nOpcode  The 16-bit stateless opcode to check
-     *
-     *  @return true if opcode carries data payload, false for header-only
-     *
-     **/
-    bool HasDataPayload16(uint16_t nOpcode);
-
-
-    /** IsUnmirroredStatelessOpcode
-     *
-     *  Check if a 16-bit opcode is a stateless-only un-mirrored opcode.
-     *  Un-mirrored opcodes have NO legacy lane equivalent and must NEVER
-     *  be sent or accepted on legacy port 8323.
-     *
-     *  Un-mirrored opcodes: KEEPALIVE_V2 (0xD100), KEEPALIVE_V2_ACK (0xD101),
-     *                       PING_DIAG (0xD0E0), PONG_DIAG (0xD0E1).
-     *
-     *  @param[in] nOpcode The 16-bit opcode to check
-     *
-     *  @return true if opcode is an un-mirrored stateless-only opcode
-     *
-     **/
-    bool IsUnmirroredStatelessOpcode(uint16_t nOpcode);
-
-
     /** IsStatelessMiningOpcode
      *
      *  Determines if an opcode is part of the stateless mining protocol range.
@@ -458,6 +403,61 @@ namespace OpcodeUtility
     bool HasDataPayload(uint8_t nOpcode);
 
 
+    /** HasDataPayload16
+     *
+     *  Check if a 16-bit stateless opcode carries a data payload.
+     *
+     *  Covers both mirrored opcodes (0xD0xx) and un-mirrored stateless-only
+     *  opcodes (0xD1xx). Un-mirrored data-bearing opcodes:
+     *    - KEEPALIVE_V2     (0xD100): 8-byte payload
+     *    - KEEPALIVE_V2_ACK (0xD101): 28-byte payload
+     *    - PING_DIAG        (0xD0E0): 64-byte PingFrame
+     *    - PONG_DIAG        (0xD0E1): 64-byte PongFrame
+     *
+     *  @param[in] nOpcode  The 16-bit stateless opcode to check
+     *
+     *  @return true if opcode carries data payload, false for header-only
+     *
+     **/
+    bool HasDataPayload16(uint16_t nOpcode);
+
+
+    /** IsUnmirroredStatelessOpcode
+     *
+     *  Check if a 16-bit opcode is a stateless-only un-mirrored opcode.
+     *  Un-mirrored opcodes have NO legacy lane equivalent and must NEVER
+     *  be sent or accepted on legacy port 8323.
+     *
+     *  Un-mirrored opcodes: KEEPALIVE_V2 (0xD100), KEEPALIVE_V2_ACK (0xD101),
+     *  PING_DIAG (0xD0E0), PONG_DIAG (0xD0E1).
+     *
+     *  @param[in] nOpcode  The 16-bit opcode to check
+     *
+     *  @return true if this is a stateless-only un-mirrored opcode
+     *
+     **/
+    bool IsUnmirroredStatelessOpcode(uint16_t nOpcode);
+
+
+    /** GetExpectedPayloadSize16
+     *
+     *  Return the expected exact payload size (bytes) for opcodes with
+     *  fixed-length payloads. Returns 0 for variable-length or header-only.
+     *
+     *  Fixed-size opcodes:
+     *    - KEEPALIVE_V2     (0xD100): 8 bytes
+     *    - KEEPALIVE_V2_ACK (0xD101): 28 bytes
+     *    - PING_DIAG        (0xD0E0): 64 bytes
+     *    - PONG_DIAG        (0xD0E1): 64 bytes
+     *
+     *  @param[in] nOpcode  The 16-bit opcode to query
+     *
+     *  @return Expected payload size in bytes, or 0 if variable/header-only
+     *
+     **/
+    uint32_t GetExpectedPayloadSize16(uint16_t nOpcode);
+
+
     /** ValidatePacketLength
      *
      *  Validates that a packet's length is within acceptable bounds.
@@ -472,11 +472,13 @@ namespace OpcodeUtility
     bool ValidatePacketLength(const Packet& packet, std::string* strReason = nullptr);
 
 
-    /** ValidatePacketLength (StatelessPacket overload)
+    /** ValidatePacketLength
      *
-     *  Validates that a 16-bit stateless packet's length is within acceptable
-     *  bounds, enforcing exact payload sizes for fixed-payload opcodes such as
-     *  KEEPALIVE_V2 (8 B), KEEPALIVE_V2_ACK (28 B), PING_DIAG/PONG_DIAG (64 B).
+     *  Validates that a stateless packet's length is within acceptable bounds.
+     *  Enforces exact payload sizes for fixed-length un-mirrored stateless opcodes:
+     *    - KEEPALIVE_V2: exactly 8 bytes
+     *    - KEEPALIVE_V2_ACK: exactly 28 bytes
+     *    - PING_DIAG / PONG_DIAG: exactly 64 bytes
      *
      *  @param[in] packet The stateless packet to validate
      *  @param[out] strReason Optional reason string for validation failure
