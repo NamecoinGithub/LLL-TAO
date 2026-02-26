@@ -181,6 +181,133 @@ namespace LLP
 
     } /* namespace KeepaliveV2 */
 
+
+    /** KeepAliveV2Frame
+     *
+     *  8-byte Miner→Node payload for the KEEPALIVE_V2 opcode.
+     *
+     *  Wire format (all little-endian uint32):
+     *    [0-3]  sequence            Monotonic miner keepalive counter
+     *    [4-7]  hashPrevBlock_lo32  Low 32 bits of miner's current prevHash (fork canary)
+     *
+     **/
+    struct KeepAliveV2Frame
+    {
+        uint32_t sequence{0};
+        uint32_t hashPrevBlock_lo32{0};
+
+        static constexpr uint32_t PAYLOAD_SIZE = 8;
+
+        /** Serialize — encode to wire bytes (little-endian) **/
+        std::vector<uint8_t> Serialize() const
+        {
+            std::vector<uint8_t> v;
+            v.reserve(PAYLOAD_SIZE);
+            v.push_back(static_cast<uint8_t>(sequence & 0xFF));
+            v.push_back(static_cast<uint8_t>((sequence >> 8) & 0xFF));
+            v.push_back(static_cast<uint8_t>((sequence >> 16) & 0xFF));
+            v.push_back(static_cast<uint8_t>((sequence >> 24) & 0xFF));
+            v.push_back(static_cast<uint8_t>(hashPrevBlock_lo32 & 0xFF));
+            v.push_back(static_cast<uint8_t>((hashPrevBlock_lo32 >> 8) & 0xFF));
+            v.push_back(static_cast<uint8_t>((hashPrevBlock_lo32 >> 16) & 0xFF));
+            v.push_back(static_cast<uint8_t>((hashPrevBlock_lo32 >> 24) & 0xFF));
+            return v;
+        }
+
+        /** Parse — decode from wire bytes; returns false if data is too short **/
+        bool Parse(const std::vector<uint8_t>& data)
+        {
+            if(data.size() < PAYLOAD_SIZE)
+                return false;
+            sequence =
+                static_cast<uint32_t>(data[0])         |
+                (static_cast<uint32_t>(data[1]) << 8)  |
+                (static_cast<uint32_t>(data[2]) << 16) |
+                (static_cast<uint32_t>(data[3]) << 24);
+            hashPrevBlock_lo32 =
+                static_cast<uint32_t>(data[4])         |
+                (static_cast<uint32_t>(data[5]) << 8)  |
+                (static_cast<uint32_t>(data[6]) << 16) |
+                (static_cast<uint32_t>(data[7]) << 24);
+            return true;
+        }
+    };
+
+
+    /** KeepAliveV2AckFrame
+     *
+     *  28-byte Node→Miner payload for the KEEPALIVE_V2_ACK opcode.
+     *
+     *  Feeds:
+     *   1. Latent Fork Detection Manager  (hashPrevBlock_lo32 echo vs hash_tip_lo32)
+     *   2. Unified Block Height Manager   (unified_height, prime_height, hash_height)
+     *   3. Fork Resolution Manager        (fork_score)
+     *
+     *  Wire format (all little-endian uint32):
+     *    [0-3]   sequence            Echo of miner's sequence
+     *    [4-7]   hashPrevBlock_lo32  Echo of miner's prevHash canary
+     *    [8-11]  unified_height      Node's unified block height
+     *    [12-15] hash_tip_lo32       Low 32 bits of node's hashBestChain
+     *    [16-19] prime_height        Node's Prime channel height
+     *    [20-23] hash_height         Node's Hash channel height
+     *    [24-27] fork_score          Latent Fork Detection score (0=healthy, >0=divergence)
+     *
+     **/
+    struct KeepAliveV2AckFrame
+    {
+        uint32_t sequence{0};
+        uint32_t hashPrevBlock_lo32{0};
+        uint32_t unified_height{0};
+        uint32_t hash_tip_lo32{0};
+        uint32_t prime_height{0};
+        uint32_t hash_height{0};
+        uint32_t fork_score{0};
+
+        static constexpr uint32_t PAYLOAD_SIZE = 28;
+
+        /** Serialize — encode to wire bytes (little-endian) **/
+        std::vector<uint8_t> Serialize() const
+        {
+            std::vector<uint8_t> v;
+            v.reserve(PAYLOAD_SIZE);
+            auto pushLE = [&](uint32_t val) {
+                v.push_back(static_cast<uint8_t>(val & 0xFF));
+                v.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+                v.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
+                v.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
+            };
+            pushLE(sequence);
+            pushLE(hashPrevBlock_lo32);
+            pushLE(unified_height);
+            pushLE(hash_tip_lo32);
+            pushLE(prime_height);
+            pushLE(hash_height);
+            pushLE(fork_score);
+            return v;
+        }
+
+        /** Parse — decode from wire bytes; returns false if data is too short **/
+        bool Parse(const std::vector<uint8_t>& data)
+        {
+            if(data.size() < PAYLOAD_SIZE)
+                return false;
+            auto readLE = [&](size_t offset) -> uint32_t {
+                return static_cast<uint32_t>(data[offset])         |
+                       (static_cast<uint32_t>(data[offset+1]) << 8)  |
+                       (static_cast<uint32_t>(data[offset+2]) << 16) |
+                       (static_cast<uint32_t>(data[offset+3]) << 24);
+            };
+            sequence            = readLE(0);
+            hashPrevBlock_lo32  = readLE(4);
+            unified_height      = readLE(8);
+            hash_tip_lo32       = readLE(12);
+            prime_height        = readLE(16);
+            hash_height         = readLE(20);
+            fork_score          = readLE(24);
+            return true;
+        }
+    };
+
 } /* namespace LLP */
 
 #endif /* NEXUS_LLP_INCLUDE_KEEPALIVE_V2_H */

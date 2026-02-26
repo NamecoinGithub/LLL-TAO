@@ -149,6 +149,12 @@ namespace OpcodeUtility
         static constexpr uint16_t HASH_BLOCK_AVAILABLE  = Mirror(Opcodes::HASH_BLOCK_AVAILABLE);  // 0xD0DA
         static constexpr uint16_t PRIME_AVAILABLE       = PRIME_BLOCK_AVAILABLE;                   // Alias: 0xD0D9
         static constexpr uint16_t HASH_AVAILABLE        = HASH_BLOCK_AVAILABLE;                    // Alias: 0xD0DA
+
+        /* Stateless-only KEEPALIVE_V2 opcodes (no legacy 8-bit equivalents).
+         * These extend beyond the mirror range and are not in OpcodeUtility::Opcodes. */
+        static constexpr uint16_t KEEPALIVE_V2     = Mirror(219);  // 0xD0DB — Miner→Node  8-byte request
+        static constexpr uint16_t KEEPALIVE_V2_ACK = Mirror(220);  // 0xD0DC — Node→Miner 28-byte response
+
         static constexpr uint16_t PING  = Mirror(Opcodes::PING);   // 0xD0FD
         static constexpr uint16_t CLOSE = Mirror(Opcodes::CLOSE);  // 0xD0FE
 
@@ -235,6 +241,26 @@ namespace OpcodeUtility
     
     /** Maximum packet length for any mining packet (2MB + overhead for full blocks) */
     static constexpr uint32_t MAX_ANY_PACKET_LENGTH = 3 * 1024 * 1024;  // 3 MB safety margin
+
+    /** KEEPALIVE_V2 payload sizes (stateless-only opcodes) **/
+    static constexpr uint32_t KEEPALIVE_V2_PAYLOAD_SIZE     = 8;   // Miner→Node: sequence(4) + hashPrevBlock_lo32(4)
+    static constexpr uint32_t KEEPALIVE_V2_ACK_PAYLOAD_SIZE = 28;  // Node→Miner: 7 × uint32_t
+
+
+    /** GetExpectedPayloadSize16
+     *
+     *  Returns the expected payload size in bytes for a 16-bit stateless opcode,
+     *  or -1 if the opcode has a variable-length or unspecified payload.
+     *
+     *  Used by packet validators to enforce exact payload sizes for opcodes
+     *  that have a fixed wire format (e.g., KEEPALIVE_V2, KEEPALIVE_V2_ACK).
+     *
+     *  @param[in] nOpcode The 16-bit stateless opcode to query
+     *
+     *  @return Expected payload size in bytes, or -1 for variable/unknown
+     *
+     **/
+    int32_t GetExpectedPayloadSize16(uint16_t nOpcode);
 
 
     /** IsStatelessMiningOpcode

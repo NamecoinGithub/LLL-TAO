@@ -382,7 +382,11 @@ namespace OpcodeUtility
 
     std::string GetOpcodeName16(uint16_t nOpcode)
     {
-        /* Check if it's a stateless opcode */
+        /* Named stateless-only opcodes that have no legacy 8-bit equivalent */
+        if(nOpcode == Stateless::KEEPALIVE_V2)     return "STATELESS_KEEPALIVE_V2";
+        if(nOpcode == Stateless::KEEPALIVE_V2_ACK) return "STATELESS_KEEPALIVE_V2_ACK";
+
+        /* Check if it's a standard mirror-mapped stateless opcode */
         if(Stateless::IsStateless(nOpcode))
         {
             /* Convert to legacy opcode and get name, then prefix with STATELESS_ */
@@ -404,6 +408,16 @@ namespace OpcodeUtility
         std::ostringstream oss;
         oss << "INVALID_16BIT(0x" << std::hex << nOpcode << ")";
         return oss.str();
+    }
+
+
+    int32_t GetExpectedPayloadSize16(uint16_t nOpcode)
+    {
+        if(nOpcode == Stateless::KEEPALIVE_V2)
+            return static_cast<int32_t>(KEEPALIVE_V2_PAYLOAD_SIZE);     // 8
+        if(nOpcode == Stateless::KEEPALIVE_V2_ACK)
+            return static_cast<int32_t>(KEEPALIVE_V2_ACK_PAYLOAD_SIZE); // 28
+        return -1; /* variable or unspecified */
     }
 
 

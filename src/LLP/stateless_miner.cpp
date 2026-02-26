@@ -671,6 +671,10 @@ namespace LLP
                 debug::log(3, FUNCTION, "Routing to ProcessSessionKeepalive");
                 return ProcessSessionKeepalive(context, packet);
 
+            case KEEPALIVE_V2:
+                debug::log(3, FUNCTION, "Routing to ProcessKeepaliveV2");
+                return ProcessKeepaliveV2(context, packet);
+
             case SET_REWARD:
                 debug::log(2, FUNCTION, "Routing to ProcessSetReward");
                 return ProcessSetReward(context, packet);
@@ -1568,6 +1572,80 @@ namespace LLP
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
         return ProcessResult::Success(newContext, response);
+    }
+
+
+    /* Process KEEPALIVE_V2 packet (stateless-only, opcode 0xD0DB) */
+    ProcessResult StatelessMiner::ProcessKeepaliveV2(
+        const MiningContext& context,
+        const StatelessPacket& packet
+    )
+    {
+        /* Require authentication before accepting KEEPALIVE_V2 */
+        if(!context.fAuthenticated)
+            return ProcessResult::Error(context, "Not authenticated");
+
+        /* Validate payload size: must be exactly 8 bytes */
+        if(packet.DATA.size() != OpcodeUtility::KEEPALIVE_V2_PAYLOAD_SIZE)
+        {
+            debug::log(1, FUNCTION, "KEEPALIVE_V2 bad payload size=", packet.DATA.size(),
+                       " expected=", OpcodeUtility::KEEPALIVE_V2_PAYLOAD_SIZE);
+            return ProcessResult::Error(context, "Invalid KEEPALIVE_V2 payload size");
+        }
+
+        /* Parse the miner request frame */
+        KeepAliveV2Frame req;
+        if(!req.Parse(packet.DATA))
+            return ProcessResult::Error(context, "Failed to parse KEEPALIVE_V2 frame");
+
+        /* Gather current chain state */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        uint32_t nUnifiedHeight = stateBest.nHeight;
+
+        TAO::Ledger::BlockState stateChannel = stateBest;
+        uint32_t nPrimeHeight = 0;
+        if(TAO::Ledger::GetLastState(stateChannel, 1))
+            nPrimeHeight = stateChannel.nChannelHeight;
+
+        stateChannel = stateBest;
+        uint32_t nHashHeight = 0;
+        if(TAO::Ledger::GetLastState(stateChannel, 2))
+            nHashHeight = stateChannel.nChannelHeight;
+
+        uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
+        std::vector<uint8_t> vHashBytes = hashBestChain.GetBytes();
+        uint32_t nHashTipLo32 = 0;
+        if(vHashBytes.size() >= 4)
+        {
+            nHashTipLo32 =
+                static_cast<uint32_t>(vHashBytes[0])        |
+                (static_cast<uint32_t>(vHashBytes[1]) << 8)  |
+                (static_cast<uint32_t>(vHashBytes[2]) << 16) |
+                (static_cast<uint32_t>(vHashBytes[3]) << 24);
+        }
+
+        /* Build the 28-byte ACK frame */
+        KeepAliveV2AckFrame ack;
+        ack.sequence           = req.sequence;
+        ack.hashPrevBlock_lo32 = req.hashPrevBlock_lo32;
+        ack.unified_height     = nUnifiedHeight;
+        ack.hash_tip_lo32      = nHashTipLo32;
+        ack.prime_height       = nPrimeHeight;
+        ack.hash_height        = nHashHeight;
+        ack.fork_score         = 0; /* Latent Fork Detection Manager not yet implemented */
+
+        debug::log(3, FUNCTION, "KEEPALIVE_V2 seq=", req.sequence,
+                   " prevHash_lo32=0x", std::hex, req.hashPrevBlock_lo32, std::dec,
+                   " -> ACK unified=", nUnifiedHeight,
+                   " prime=", nPrimeHeight,
+                   " hash=", nHashHeight,
+                   " fork_score=", ack.fork_score);
+
+        StatelessPacket response(StatelessOpcodes::KEEPALIVE_V2_ACK);
+        response.DATA   = ack.Serialize();
+        response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+
+        return ProcessResult::Success(context, response);
     }
 
 

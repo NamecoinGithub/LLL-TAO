@@ -933,6 +933,26 @@ namespace LLP
             const StatelessPacket& packet
         );
 
+        /** ProcessKeepaliveV2
+         *
+         *  Process a KEEPALIVE_V2 packet (stateless-only, opcode 0xD0DB).
+         *
+         *  Parses the 8-byte KeepAliveV2Frame (sequence + hashPrevBlock_lo32)
+         *  and replies with a 28-byte KeepAliveV2AckFrame containing the
+         *  echoed sequence, echoed prevHash canary, node chain-state telemetry,
+         *  and the Latent Fork Detection Manager score.
+         *
+         *  @param[in] context Current miner state
+         *  @param[in] packet  KEEPALIVE_V2 packet (must carry 8-byte payload)
+         *
+         *  @return ProcessResult with KEEPALIVE_V2_ACK response or error
+         *
+         **/
+        static ProcessResult ProcessKeepaliveV2(
+            const MiningContext& context,
+            const StatelessPacket& packet
+        );
+
         /** ProcessSetReward
          *
          *  Process MINER_SET_REWARD packet to bind reward address.
