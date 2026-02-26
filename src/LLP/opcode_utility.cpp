@@ -389,7 +389,7 @@ namespace OpcodeUtility
         if(nOpcode == Stateless::PING_DIAG)         return "PING_DIAG";
         if(nOpcode == Stateless::PONG_DIAG)         return "PONG_DIAG";
 
-        /* Check if it's a standard mirror-mapped stateless opcode */
+        /* Check if it's a mirrored stateless opcode */
         if(Stateless::IsStateless(nOpcode))
         {
             /* Convert to legacy opcode and get name, then prefix with STATELESS_ */
@@ -440,6 +440,10 @@ namespace OpcodeUtility
         if(nOpcode == Opcodes::PRIME_BLOCK_AVAILABLE || nOpcode == Opcodes::HASH_BLOCK_AVAILABLE)
             return true;
 
+        /* NOTE: Legacy PING (0xFD = 253) is header-only — no payload.
+         * The stateless PING_DIAG (0xD0E0) is data-bearing but is
+         * handled by HasDataPayload16(), not this function. */
+        
         /* NOTE: Legacy PING (0xFD = 253) is header-only — no payload.
          * The stateless PING_DIAG (0xD0E0) is data-bearing but is
          * handled by HasDataPayload16(), not this function. */
@@ -525,6 +529,7 @@ namespace OpcodeUtility
 
         return true;
     }
+
 
 } // namespace OpcodeUtility
 } // namespace LLP

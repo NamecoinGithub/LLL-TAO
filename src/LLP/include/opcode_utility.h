@@ -362,10 +362,13 @@ namespace OpcodeUtility
     /** GetOpcodeName16
      *
      *  Returns a human-readable name for a 16-bit stateless opcode for logging purposes.
+     *  Handles both mirrored opcodes (0xD0xx) and un-mirrored stateless-only opcodes:
+     *    - KEEPALIVE_V2 (0xD100), KEEPALIVE_V2_ACK (0xD101)
+     *    - PING_DIAG (0xD0E0), PONG_DIAG (0xD0E1)
      *
      *  @param[in] nOpcode The 16-bit opcode to get the name for
      *
-     *  @return String name of the opcode (e.g., "STATELESS_GET_BLOCK", "STATELESS_SUBMIT_BLOCK")
+     *  @return String name of the opcode (e.g., "STATELESS_GET_BLOCK", "KEEPALIVE_V2")
      *
      **/
     std::string GetOpcodeName16(uint16_t nOpcode);
