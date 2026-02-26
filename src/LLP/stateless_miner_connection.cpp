@@ -61,6 +61,7 @@ ________________________________________________________________________________
 #include <Util/include/hex.h>
 
 #include <LLP/include/colin_mining_agent.h>
+#include <LLP/include/keepalive_v2.h>
 
 #include <chrono>
 #include <limits>
@@ -2420,6 +2421,71 @@ namespace LLP
                         context.hashGenesis != 0 ? context.hashGenesis.SubString(8) : "",
                         PACKET.DATA);
                 }
+                return true;
+            }
+
+            /* KEEPALIVE_V2 (0xD0E2) — 8-byte request from miner; reply with 28-byte ACK */
+            if(PACKET.HEADER == KeepaliveV2Opcodes::KEEPALIVE_V2)
+            {
+                /* Require authentication before processing */
+                if(!context.fAuthenticated)
+                {
+                    debug::log(1, FUNCTION, "KEEPALIVE_V2 rejected - not authenticated from ",
+                               GetAddress().ToStringIP());
+                    return true;
+                }
+
+                /* Parse the 8-byte request frame */
+                KeepAliveV2Frame req;
+                if(!req.Parse(PACKET.DATA))
+                {
+                    debug::log(1, FUNCTION, "KEEPALIVE_V2 rejected - invalid payload size ",
+                               PACKET.DATA.size(), " from ", GetAddress().ToStringIP());
+                    return true;
+                }
+
+                /* Gather current chain state */
+                TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+                uint32_t nUnifiedHeight = stateBest.nHeight;
+
+                TAO::Ledger::BlockState stateChannel = stateBest;
+                uint32_t nPrimeHeight = 0;
+                if(TAO::Ledger::GetLastState(stateChannel, 1))
+                    nPrimeHeight = stateChannel.nChannelHeight;
+
+                stateChannel = stateBest;
+                uint32_t nHashHeight = 0;
+                if(TAO::Ledger::GetLastState(stateChannel, 2))
+                    nHashHeight = stateChannel.nChannelHeight;
+
+                uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
+
+                /* Derive hash_tip_lo32: low 32 bits of hashBestChain (first 4 bytes, big-endian) */
+                std::vector<uint8_t> vHashBytes = hashBestChain.GetBytes();
+                uint32_t nHashTipLo32 = 0;
+                for(size_t i = 0; i < 4 && i < vHashBytes.size(); ++i)
+                    nHashTipLo32 = (nHashTipLo32 << 8) | vHashBytes[i];
+
+                /* Build the 28-byte ACK frame */
+                KeepAliveV2AckFrame ack;
+                ack.sequence           = req.sequence;
+                ack.hashPrevBlock_lo32 = req.hashPrevBlock_lo32;
+                ack.unified_height     = nUnifiedHeight;
+                ack.hash_tip_lo32      = nHashTipLo32;
+                ack.prime_height       = nPrimeHeight;
+                ack.hash_height        = nHashHeight;
+                ack.fork_score         = 0;  /* Latent Fork Detection Manager not yet implemented */
+
+                /* Serialize and send the ACK */
+                StatelessPacket ackPacket(KeepaliveV2Opcodes::KEEPALIVE_V2_ACK);
+                ackPacket.DATA   = ack.Serialize();
+                ackPacket.LENGTH = static_cast<uint32_t>(ackPacket.DATA.size());
+                respond(ackPacket);
+
+                debug::log(3, FUNCTION, "KEEPALIVE_V2 ACK: seq=", req.sequence,
+                           " unified=", nUnifiedHeight,
+                           " prime=", nPrimeHeight,
+                           " hash=", nHashHeight);
                 return true;
             }
 

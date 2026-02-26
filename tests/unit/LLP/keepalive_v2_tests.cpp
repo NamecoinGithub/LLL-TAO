@@ -371,3 +371,269 @@ TEST_CASE("KeepaliveV2 - backward compatibility", "[keepalive_v2][llp]")
         REQUIRE(suffixBytes[3] == 0u);
     }
 }
+
+
+// ============================================================================
+// Tests for the new KEEPALIVE_V2 / KEEPALIVE_V2_ACK opcode constants and
+// frame structs introduced to fix the ACK payload size (8 → 28 bytes).
+// ============================================================================
+
+TEST_CASE("KeepaliveV2Opcodes - constants", "[keepalive_v2][llp]")
+{
+    using namespace LLP::KeepaliveV2Opcodes;
+
+    SECTION("KEEPALIVE_V2 opcode is 0xD0E2")
+    {
+        REQUIRE(KEEPALIVE_V2 == static_cast<uint16_t>(0xD0E2u));
+    }
+
+    SECTION("KEEPALIVE_V2_ACK opcode is 0xD0E3")
+    {
+        REQUIRE(KEEPALIVE_V2_ACK == static_cast<uint16_t>(0xD0E3u));
+    }
+
+    SECTION("Request payload size is 8 bytes (Miner → Node)")
+    {
+        REQUIRE(KEEPALIVE_V2_REQUEST_PAYLOAD_SIZE == 8u);
+    }
+
+    SECTION("ACK payload size is 28 bytes (Node → Miner) — the corrected value")
+    {
+        REQUIRE(KEEPALIVE_V2_ACK_PAYLOAD_SIZE == 28u);
+    }
+
+    SECTION("Request and ACK sizes are asymmetric")
+    {
+        REQUIRE(KEEPALIVE_V2_REQUEST_PAYLOAD_SIZE != KEEPALIVE_V2_ACK_PAYLOAD_SIZE);
+    }
+}
+
+
+TEST_CASE("KeepAliveV2Frame - Miner→Node 8-byte request", "[keepalive_v2][llp]")
+{
+    using LLP::KeepAliveV2Frame;
+
+    SECTION("PAYLOAD_SIZE constant is 8")
+    {
+        REQUIRE(KeepAliveV2Frame::PAYLOAD_SIZE == 8u);
+    }
+
+    SECTION("Serialize produces exactly 8 bytes")
+    {
+        KeepAliveV2Frame f;
+        f.sequence           = 1;
+        f.hashPrevBlock_lo32 = 2;
+        auto v = f.Serialize();
+        REQUIRE(v.size() == 8u);
+    }
+
+    SECTION("Serialize encodes sequence big-endian at bytes [0..3]")
+    {
+        KeepAliveV2Frame f;
+        f.sequence           = 0x01020304u;
+        f.hashPrevBlock_lo32 = 0u;
+        auto v = f.Serialize();
+
+        REQUIRE(v[0] == 0x01u);
+        REQUIRE(v[1] == 0x02u);
+        REQUIRE(v[2] == 0x03u);
+        REQUIRE(v[3] == 0x04u);
+    }
+
+    SECTION("Serialize encodes hashPrevBlock_lo32 big-endian at bytes [4..7]")
+    {
+        KeepAliveV2Frame f;
+        f.sequence           = 0u;
+        f.hashPrevBlock_lo32 = 0xDEADBEEFu;
+        auto v = f.Serialize();
+
+        REQUIRE(v[4] == 0xDEu);
+        REQUIRE(v[5] == 0xADu);
+        REQUIRE(v[6] == 0xBEu);
+        REQUIRE(v[7] == 0xEFu);
+    }
+
+    SECTION("Parse rejects fewer than 8 bytes")
+    {
+        KeepAliveV2Frame f;
+        std::vector<uint8_t> data(7, 0xFF);
+        REQUIRE(f.Parse(data) == false);
+    }
+
+    SECTION("Parse rejects empty data")
+    {
+        KeepAliveV2Frame f;
+        std::vector<uint8_t> data;
+        REQUIRE(f.Parse(data) == false);
+    }
+
+    SECTION("Parse decodes sequence big-endian from bytes [0..3]")
+    {
+        KeepAliveV2Frame f;
+        std::vector<uint8_t> data = {
+            0x01, 0x02, 0x03, 0x04,  /* sequence = 0x01020304 */
+            0x00, 0x00, 0x00, 0x00   /* hashPrevBlock_lo32 = 0 */
+        };
+        REQUIRE(f.Parse(data) == true);
+        REQUIRE(f.sequence == 0x01020304u);
+    }
+
+    SECTION("Parse decodes hashPrevBlock_lo32 big-endian from bytes [4..7]")
+    {
+        KeepAliveV2Frame f;
+        std::vector<uint8_t> data = {
+            0x00, 0x00, 0x00, 0x00,  /* sequence = 0 */
+            0xDE, 0xAD, 0xBE, 0xEF  /* hashPrevBlock_lo32 = 0xDEADBEEF */
+        };
+        REQUIRE(f.Parse(data) == true);
+        REQUIRE(f.hashPrevBlock_lo32 == 0xDEADBEEFu);
+    }
+
+    SECTION("Serialize/Parse round-trip")
+    {
+        KeepAliveV2Frame orig;
+        orig.sequence           = 0xCAFEBABEu;
+        orig.hashPrevBlock_lo32 = 0x12345678u;
+
+        auto wire = orig.Serialize();
+
+        KeepAliveV2Frame parsed;
+        REQUIRE(parsed.Parse(wire) == true);
+        REQUIRE(parsed.sequence           == orig.sequence);
+        REQUIRE(parsed.hashPrevBlock_lo32 == orig.hashPrevBlock_lo32);
+    }
+}
+
+
+TEST_CASE("KeepAliveV2AckFrame - Node→Miner 28-byte response", "[keepalive_v2][llp]")
+{
+    using LLP::KeepAliveV2AckFrame;
+
+    SECTION("PAYLOAD_SIZE constant is 28 — the corrected value")
+    {
+        REQUIRE(KeepAliveV2AckFrame::PAYLOAD_SIZE == 28u);
+    }
+
+    SECTION("Serialize produces exactly 28 bytes")
+    {
+        KeepAliveV2AckFrame f;
+        auto v = f.Serialize();
+        REQUIRE(v.size() == 28u);
+    }
+
+    SECTION("sequence echoed big-endian at bytes [0..3]")
+    {
+        KeepAliveV2AckFrame f;
+        f.sequence = 0x0A0B0C0Du;
+        auto v = f.Serialize();
+        REQUIRE(v[0] == 0x0Au);
+        REQUIRE(v[1] == 0x0Bu);
+        REQUIRE(v[2] == 0x0Cu);
+        REQUIRE(v[3] == 0x0Du);
+    }
+
+    SECTION("hashPrevBlock_lo32 at bytes [4..7]")
+    {
+        KeepAliveV2AckFrame f;
+        f.hashPrevBlock_lo32 = 0xAABBCCDDu;
+        auto v = f.Serialize();
+        REQUIRE(v[4] == 0xAAu);
+        REQUIRE(v[5] == 0xBBu);
+        REQUIRE(v[6] == 0xCCu);
+        REQUIRE(v[7] == 0xDDu);
+    }
+
+    SECTION("unified_height at bytes [8..11]")
+    {
+        KeepAliveV2AckFrame f;
+        f.unified_height = 0x00123456u;
+        auto v = f.Serialize();
+        REQUIRE(v[8]  == 0x00u);
+        REQUIRE(v[9]  == 0x12u);
+        REQUIRE(v[10] == 0x34u);
+        REQUIRE(v[11] == 0x56u);
+    }
+
+    SECTION("hash_tip_lo32 at bytes [12..15]")
+    {
+        KeepAliveV2AckFrame f;
+        f.hash_tip_lo32 = 0x11223344u;
+        auto v = f.Serialize();
+        REQUIRE(v[12] == 0x11u);
+        REQUIRE(v[13] == 0x22u);
+        REQUIRE(v[14] == 0x33u);
+        REQUIRE(v[15] == 0x44u);
+    }
+
+    SECTION("prime_height at bytes [16..19]")
+    {
+        KeepAliveV2AckFrame f;
+        f.prime_height = 0xFEDCBA98u;
+        auto v = f.Serialize();
+        REQUIRE(v[16] == 0xFEu);
+        REQUIRE(v[17] == 0xDCu);
+        REQUIRE(v[18] == 0xBAu);
+        REQUIRE(v[19] == 0x98u);
+    }
+
+    SECTION("hash_height at bytes [20..23]")
+    {
+        KeepAliveV2AckFrame f;
+        f.hash_height = 0x0000007Bu;
+        auto v = f.Serialize();
+        REQUIRE(v[20] == 0x00u);
+        REQUIRE(v[21] == 0x00u);
+        REQUIRE(v[22] == 0x00u);
+        REQUIRE(v[23] == 0x7Bu);
+    }
+
+    SECTION("fork_score at bytes [24..27]")
+    {
+        KeepAliveV2AckFrame f;
+        f.fork_score = 0u;  /* 0 = healthy */
+        auto v = f.Serialize();
+        REQUIRE(v[24] == 0x00u);
+        REQUIRE(v[25] == 0x00u);
+        REQUIRE(v[26] == 0x00u);
+        REQUIRE(v[27] == 0x00u);
+    }
+
+    SECTION("Parse rejects fewer than 28 bytes")
+    {
+        KeepAliveV2AckFrame f;
+        std::vector<uint8_t> data(27, 0xFF);
+        REQUIRE(f.Parse(data) == false);
+    }
+
+    SECTION("Parse rejects empty data")
+    {
+        KeepAliveV2AckFrame f;
+        std::vector<uint8_t> data;
+        REQUIRE(f.Parse(data) == false);
+    }
+
+    SECTION("Serialize/Parse round-trip - all fields")
+    {
+        KeepAliveV2AckFrame orig;
+        orig.sequence           = 0xCAFEBABEu;
+        orig.hashPrevBlock_lo32 = 0x12345678u;
+        orig.unified_height     = 1000000u;
+        orig.hash_tip_lo32      = 0xDEADBEEFu;
+        orig.prime_height       = 500u;
+        orig.hash_height        = 750u;
+        orig.fork_score         = 0u;
+
+        auto wire = orig.Serialize();
+        REQUIRE(wire.size() == 28u);
+
+        KeepAliveV2AckFrame parsed;
+        REQUIRE(parsed.Parse(wire) == true);
+        REQUIRE(parsed.sequence           == orig.sequence);
+        REQUIRE(parsed.hashPrevBlock_lo32 == orig.hashPrevBlock_lo32);
+        REQUIRE(parsed.unified_height     == orig.unified_height);
+        REQUIRE(parsed.hash_tip_lo32      == orig.hash_tip_lo32);
+        REQUIRE(parsed.prime_height       == orig.prime_height);
+        REQUIRE(parsed.hash_height        == orig.hash_height);
+        REQUIRE(parsed.fork_score         == orig.fork_score);
+    }
+}
