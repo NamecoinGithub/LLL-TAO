@@ -593,7 +593,14 @@ namespace LLP
                     uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
                     uint32_t nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
 
-                    uint32_t nForkScore = (nMinerPrevHashLo32 != 0 && nMinerPrevHashLo32 != nHashTipLo32) ? 1u : 0u;
+                    /* Fork detection via lo32 hash comparison is inherently racy — the unified chain
+                     * advances between template creation and keepalive, making hashPrevBlock_lo32 !=
+                     * hash_tip_lo32 the NORMAL state during active mining (not a fork).
+                     * Real staleness detection uses the full 128-byte hashBestChain in push notifications
+                     * and the hashPrevBlock != hashBestChain guard at submit time.
+                     * Set fork_score=0 (healthy) unconditionally to prevent the miner's fork canary
+                     * from triggering DEGRADED MODE during normal operation. */
+                    uint32_t nForkScore = 0u;
 
                     std::vector<uint8_t> vV2 = KeepaliveV2::BuildUnifiedResponse(
                         nKeepaliveSession,

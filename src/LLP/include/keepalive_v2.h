@@ -95,7 +95,7 @@ namespace LLP
          *    [16-19] uint32_t  prime_height        big-endian
          *    [20-23] uint32_t  hash_height         big-endian
          *    [24-27] uint32_t  stake_height        big-endian
-         *    [28-31] uint32_t  fork_score          big-endian — 0=healthy, >0=divergence
+         *    [28-31] uint32_t  fork_score          big-endian — always 0 (reserved; lo32 comparison is racy)
          *
          *  Used on BOTH ports:
          *    - Legacy SESSION_KEEPALIVE response (port 8323)   replaces BuildBestCurrentResponse()
@@ -113,7 +113,7 @@ namespace LLP
             uint32_t prime_height{0};       // [16-19] BE
             uint32_t hash_height{0};        // [20-23] BE
             uint32_t stake_height{0};       // [24-27] BE
-            uint32_t fork_score{0};         // [28-31] BE
+            uint32_t fork_score{0};         // [28-31] BE — always 0 (reserved; lo32 comparison is racy)
 
             static constexpr uint32_t PAYLOAD_SIZE = 32;
 

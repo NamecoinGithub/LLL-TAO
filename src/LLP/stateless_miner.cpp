@@ -1535,7 +1535,14 @@ namespace LLP
                     (uint32_t(prevblockSuffixBytes[2]) <<  8) |
                      uint32_t(prevblockSuffixBytes[3]);
 
-            uint32_t nForkScore = (nMinerPrevHashLo32 != 0 && nMinerPrevHashLo32 != nHashTipLo32) ? 1u : 0u;
+            /* Fork detection via lo32 hash comparison is inherently racy — the unified chain
+             * advances between template creation and keepalive, making hashPrevBlock_lo32 !=
+             * hash_tip_lo32 the NORMAL state during active mining (not a fork).
+             * Real staleness detection uses the full 128-byte hashBestChain in push notifications
+             * and the hashPrevBlock != hashBestChain guard at submit time.
+             * Set fork_score=0 (healthy) unconditionally to prevent the miner's fork canary
+             * from triggering DEGRADED MODE during normal operation. */
+            uint32_t nForkScore = 0u;
 
             std::vector<uint8_t> vV2 = KeepaliveV2::BuildUnifiedResponse(
                 newContext.nSessionId,
@@ -1621,9 +1628,14 @@ namespace LLP
         uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
         uint32_t nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
 
-        /* fork_score: non-zero when miner's prevHash lo32 differs from node tip —
-         * checked by Miner::IsForkDetected() as (hash_tip_lo32 != myHashPrevBlock_lo32 || fork_score > 0) */
-        uint32_t nForkScore = (frame.hashPrevBlock_lo32 != 0 && frame.hashPrevBlock_lo32 != nHashTipLo32) ? 1u : 0u;
+        /* Fork detection via lo32 hash comparison is inherently racy — the unified chain
+         * advances between template creation and keepalive, making hashPrevBlock_lo32 !=
+         * hash_tip_lo32 the NORMAL state during active mining (not a fork).
+         * Real staleness detection uses the full 128-byte hashBestChain in push notifications
+         * and the hashPrevBlock != hashBestChain guard at submit time.
+         * Set fork_score=0 (healthy) unconditionally to prevent the miner's fork canary
+         * from triggering DEGRADED MODE during normal operation. */
+        uint32_t nForkScore = 0u;
 
         /* Build 32-byte unified ACK */
         std::vector<uint8_t> vAck = KeepaliveV2::BuildUnifiedResponse(
