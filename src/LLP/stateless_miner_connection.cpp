@@ -783,15 +783,13 @@ namespace LLP
                 }
 
                 debug::log(0, "   ✅ Validation passed");
-            }  // UNLOCK MUTEX before calling new_block() to prevent nested lock deadlock
 
-            /* Create a new block (new_block() will acquire MUTEX internally for snapshot) */
-            debug::log(0, "   Calling new_block()...");
-            TAO::Ledger::Block* pBlock = new_block();
+                /* Release MUTEX before calling new_block() to prevent nested lock deadlock */
+                lk.unlock();
 
-            /* Re-acquire MUTEX for remaining GET_BLOCK processing */
-            {
-                LOCK(MUTEX);
+                /* Create a new block (new_block() will acquire MUTEX internally for snapshot) */
+                debug::log(0, "   Calling new_block()...");
+                TAO::Ledger::Block* pBlock = new_block();
 
                 /* Handle if the block failed to be created. */
                 if(!pBlock)
@@ -800,6 +798,9 @@ namespace LLP
                     debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
                     pBlock = new_block();
                 }
+
+                /* Re-acquire MUTEX after both new_block() calls for respond() and context mutations */
+                lk.lock();
 
                 if(!pBlock)
                 {
@@ -946,7 +947,7 @@ namespace LLP
                     uint32_t nBitsMeta = pBlock->nBits;
 
                     /* Build canonical chain state snapshot for GET_BLOCK response and store in context.
-                     * NOTE: MUTEX was re-acquired at line ~794 after new_block() returned. */
+                     * NOTE: MUTEX was re-acquired via lk.lock() after both new_block() calls returned. */
                     {
                         TAO::Ledger::BlockState stateGetBlock = TAO::Ledger::ChainState::tStateBest.load();
                         TAO::Ledger::BlockState stateGetBlockCh = stateGetBlock;
