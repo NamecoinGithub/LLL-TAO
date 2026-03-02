@@ -755,13 +755,13 @@ namespace LLP
                     respond(response);
                     return true;  // Handled (rejected)
                 }
-                
+
                 debug::log(2, "📥 === GET_BLOCK REQUEST ===");
                 debug::log(0, "   From: ", GetAddress().ToStringIP());
                 debug::log(0, "   Authenticated: ", (context.fAuthenticated ? "YES" : "NO"));
                 debug::log(0, "   Channel: ", context.nChannel);
                 debug::log(0, "   Session ID: ", context.nSessionId);
-                
+
                 /* Check authentication */
                 if(!context.fAuthenticated)
                 {
@@ -773,7 +773,7 @@ namespace LLP
                     debug::log(2, "📥 === GET_BLOCK: REJECTED (AUTH) ===");
                     return true;
                 }
-                
+
                 /* Check channel is set */
                 if(context.nChannel == 0)
                 {
@@ -781,12 +781,17 @@ namespace LLP
                     debug::log(2, "📥 === GET_BLOCK: REJECTED (NO CHANNEL) ===");
                     return true;
                 }
-                
+
                 debug::log(0, "   ✅ Validation passed");
-                debug::log(0, "   Calling new_block()...");
-                
-                /* Create a new block */
-                TAO::Ledger::Block* pBlock = new_block();
+            }  // UNLOCK MUTEX before calling new_block() to prevent nested lock deadlock
+
+            /* Create a new block (new_block() will acquire MUTEX internally for snapshot) */
+            debug::log(0, "   Calling new_block()...");
+            TAO::Ledger::Block* pBlock = new_block();
+
+            /* Re-acquire MUTEX for remaining GET_BLOCK processing */
+            {
+                LOCK(MUTEX);
 
                 /* Handle if the block failed to be created. */
                 if(!pBlock)
@@ -941,8 +946,7 @@ namespace LLP
                     uint32_t nBitsMeta = pBlock->nBits;
 
                     /* Build canonical chain state snapshot for GET_BLOCK response and store in context.
-                     * NOTE: We already hold LOCK(MUTEX) from line 725 — do NOT re-acquire it here
-                     * (std::mutex is non-recursive; a nested LOCK would deadlock). */
+                     * NOTE: MUTEX was re-acquired at line ~794 after new_block() returned. */
                     {
                         TAO::Ledger::BlockState stateGetBlock = TAO::Ledger::ChainState::tStateBest.load();
                         TAO::Ledger::BlockState stateGetBlockCh = stateGetBlock;
@@ -2894,7 +2898,19 @@ namespace LLP
                     debug::log(1, FUNCTION, "Shutdown detected while waiting for template creation");
                     return nullptr;
                 }
-                return m_last_created_template;
+
+                /* If the waited-for template creation returned nullptr, retry once instead of
+                 * propagating the failure. This prevents miners from receiving empty BLOCK_DATA
+                 * when template creation fails transiently (e.g., during chain reorganization). */
+                if(m_last_created_template == nullptr)
+                {
+                    debug::log(1, FUNCTION, "Waited template creation returned nullptr — retrying once");
+                    /* Fall through to create our own template (m_template_create_in_flight will be set below) */
+                }
+                else
+                {
+                    return m_last_created_template;
+                }
             }
 
             m_template_create_in_flight = true;
