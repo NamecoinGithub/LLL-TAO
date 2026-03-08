@@ -17,7 +17,10 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/tritium.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 /* Global TAO namespace. */
 namespace TAO
@@ -89,6 +92,13 @@ namespace TAO
             uint64_t timestamp = 0; // Set when Falcon wrapper includes timestamp; legacy payloads remain 0.
             uint32_t nUnifiedHeight = 0; ///< Canonical unified height from the block payload (0 if absent)
             uint32_t nChannelHeight = 0; ///< Channel height from the block payload (0 if absent)
+            uint32_t nChannel = 0; ///< Mining channel decoded from full-block submissions (0 if absent)
+            uint16_t nSignatureLength = 0; ///< Signature length decoded from the Falcon trailer
+            size_t nBlockBytes = 0; ///< Authenticated block_bytes length before [timestamp][sig_len][signature]
+            bool fFullBlockSubmission = false; ///< True when the payload was parsed as [block_bytes][timestamp][sig_len][signature]
+            std::vector<uint8_t> vBlockBytes; ///< Authenticated block bytes for full-block submissions
+            std::vector<uint8_t> vPrimeOffsets; ///< Prime-only bytes between the 216-byte Tritium block and Falcon trailer
+            std::vector<uint8_t> vSignature; ///< Falcon signature bytes from the trailer
         };
 
 
@@ -147,11 +157,12 @@ namespace TAO
 
         /** ParseStatelessWorkSubmission
          *
-         *  Parse stateless miner work submission payloads (merkle + nonce).
+         *  Parse stateless miner work submission payloads.
          *
-         *  This helper validates and extracts Falcon wrapper data when present.
-         *  For legacy payloads, it extracts merkle and nonce from the start of
-         *  the payload.
+         *  This helper validates and extracts Falcon trailer data when present.
+         *  It supports both compact wrappers ([merkle][nonce][timestamp][sig_len][sig])
+         *  and full-block wrappers where Prime miners may append vOffsets between
+         *  the 216-byte Tritium block and the Falcon trailer.
          *
          *  @param[in] vData Raw submission payload
          *

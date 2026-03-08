@@ -75,13 +75,25 @@ TEST_CASE("Falcon-1024 Block Size Detection", "[falcon][falcon1024][detection]")
         REQUIRE(detected1024 == FalconVersion::FALCON_1024);
     }
     
-    SECTION("Calculate correct packet sizes for Falcon-1024")
+    SECTION("Calculate correct packet sizes for Falcon-1024 hash channel")
     {
-        // Tritium block without physical signature (Falcon-1024) - simplified format
+        // Hash-channel Tritium block without physical signature (Falcon-1024)
         // Format: [block(216)][timestamp(8)][siglen(2)][sig(1577)]
         size_t expected = 216 + 8 + 2 + 1577;
         REQUIRE(expected == 1803);
-        REQUIRE(expected == FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_WRAPPER_FALCON1024_MAX);
+        REQUIRE(expected == FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX);
+        REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_ENCRYPTED_MAX == 1831);
+    }
+
+    SECTION("Prime Falcon-1024 constants expose bounded variable wrapper sizes")
+    {
+        REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN
+                == FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX);
+        REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MIN == 1831);
+        REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MAX
+                >= FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN);
+        REQUIRE(FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_VOFFSETS_MAX
+                == FalconConstants::FULL_BLOCK_TRITIUM_SIZE - FalconConstants::FULL_BLOCK_TRITIUM_MIN);
     }
     
     SECTION("Version-agnostic aliases accept both Falcon-512 and Falcon-1024")

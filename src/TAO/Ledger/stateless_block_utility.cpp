@@ -36,6 +36,152 @@ ________________________________________________________________________________
 /* Global TAO namespace. */
 namespace TAO::Ledger
 {
+    namespace
+    {
+        uint64_t bytes_to_uint64_le(const std::vector<uint8_t>& vData, const size_t nOffset)
+        {
+            uint64_t nValue = 0;
+            for(size_t i = 0; i < LLP::FalconConstants::NONCE_SIZE; ++i)
+                nValue |= static_cast<uint64_t>(vData[nOffset + i]) << (8 * i);
+
+            return nValue;
+        }
+
+
+        bool TryParseFullBlockSubmission(const std::vector<uint8_t>& vData, ParseResult& result)
+        {
+            const size_t MIN_TRAILER_SIZE = LLP::FalconConstants::TIMESTAMP_SIZE
+                                         + LLP::FalconConstants::LENGTH_FIELD_SIZE
+                                         + LLP::FalconConstants::FALCON_SIG_MIN;
+
+            if(vData.size() < LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN + MIN_TRAILER_SIZE)
+                return false;
+
+            static const uint16_t COMMON_SIG_SIZES[] = {
+                LLP::FalconConstants::FALCON1024_SIG_COMMON_SIZE_1,
+                LLP::FalconConstants::FALCON1024_SIG_COMMON_SIZE_2,
+                LLP::FalconConstants::FALCON1024_SIG_COMMON_SIZE_3,
+                LLP::FalconConstants::FALCON1024_SIG_COMMON_SIZE_4,
+                LLP::FalconConstants::FALCON1024_SIG_COMMON_SIZE_5,
+                LLP::FalconConstants::FALCON512_SIG_COMMON_SIZE_1,
+                LLP::FalconConstants::FALCON512_SIG_COMMON_SIZE_2,
+                LLP::FalconConstants::FALCON512_SIG_COMMON_SIZE_3,
+                LLP::FalconConstants::FALCON512_SIG_COMMON_SIZE_4,
+                LLP::FalconConstants::FALCON512_SIG_COMMON_SIZE_5
+            };
+
+            size_t nBlockBytes = 0;
+            uint16_t nSigLen = 0;
+            bool fFoundValidTrailer = false;
+
+            const auto try_sig_len = [&](const uint16_t nCandidateSigLen) -> bool
+            {
+                if(vData.size() < LLP::FalconConstants::TIMESTAMP_SIZE
+                                  + LLP::FalconConstants::LENGTH_FIELD_SIZE
+                                  + nCandidateSigLen)
+                    return false;
+
+                const size_t nCandidateBlockBytes = vData.size()
+                                                  - LLP::FalconConstants::TIMESTAMP_SIZE
+                                                  - LLP::FalconConstants::LENGTH_FIELD_SIZE
+                                                  - nCandidateSigLen;
+
+                if(nCandidateBlockBytes < LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN
+                || nCandidateBlockBytes > LLP::FalconConstants::FULL_BLOCK_TRITIUM_SIZE)
+                    return false;
+
+                const size_t nSigLenOffset = nCandidateBlockBytes + LLP::FalconConstants::TIMESTAMP_SIZE;
+                const uint16_t nActualSigLen = static_cast<uint16_t>(vData[nSigLenOffset])
+                    | (static_cast<uint16_t>(vData[nSigLenOffset + 1]) << 8);
+
+                if(nActualSigLen != nCandidateSigLen
+                || !LLP::FalconConstants::is_valid_sig_size(nActualSigLen))
+                    return false;
+
+                nBlockBytes = nCandidateBlockBytes;
+                nSigLen = nActualSigLen;
+                return true;
+            };
+
+            for(const uint16_t nCandidateSigLen : COMMON_SIG_SIZES)
+            {
+                if(try_sig_len(nCandidateSigLen))
+                {
+                    fFoundValidTrailer = true;
+                    break;
+                }
+            }
+
+            if(!fFoundValidTrailer)
+            {
+                for(size_t nCandidateSigLen = LLP::FalconConstants::FALCON_SIG_MIN;
+                    nCandidateSigLen <= LLP::FalconConstants::FALCON_SIG_ABSOLUTE_MAX;
+                    ++nCandidateSigLen)
+                {
+                    if(try_sig_len(static_cast<uint16_t>(nCandidateSigLen)))
+                    {
+                        fFoundValidTrailer = true;
+                        break;
+                    }
+                }
+            }
+
+            if(!fFoundValidTrailer)
+                return false;
+
+            result.nBlockBytes = nBlockBytes;
+            result.nSignatureLength = nSigLen;
+            result.fFullBlockSubmission = true;
+            result.timestamp = bytes_to_uint64_le(vData, nBlockBytes);
+            result.vBlockBytes.assign(vData.begin(), vData.begin() + nBlockBytes);
+            result.vSignature.assign(vData.begin() + nBlockBytes
+                                   + LLP::FalconConstants::TIMESTAMP_SIZE
+                                   + LLP::FalconConstants::LENGTH_FIELD_SIZE,
+                                     vData.end());
+
+            result.hashMerkle.SetBytes(std::vector<uint8_t>(
+                vData.begin() + LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET,
+                vData.begin() + LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET
+                              + LLP::FalconConstants::MERKLE_ROOT_SIZE));
+
+            result.nonce = bytes_to_uint64_le(vData, LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET);
+
+            if(nBlockBytes < 204)
+            {
+                result.reason = "full-block submission missing channel/height fields";
+                return true;
+            }
+
+            result.nChannel = convert::bytes2uint(vData, 196);
+            if(result.nChannel != 1 && result.nChannel != 2)
+            {
+                result.reason = "full-block submission missing valid mining channel";
+                return true;
+            }
+
+            result.nUnifiedHeight = convert::bytes2uint(vData, 200);
+
+            if(result.nChannel == 1)
+            {
+                if(nBlockBytes > LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+                {
+                    result.vPrimeOffsets.assign(vData.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN,
+                                                vData.begin() + nBlockBytes);
+                }
+            }
+            else if(nBlockBytes != LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+            {
+                result.reason = "hash submission contains unexpected bytes before Falcon trailer";
+                return true;
+            }
+
+            result.success = true;
+            result.reason = "";
+            return true;
+        }
+    }
+
+
     /* Create wallet-signed block for stateless mining */
     TritiumBlock* CreateBlockForStatelessMining(
         const uint32_t nChannel,
@@ -309,6 +455,9 @@ namespace TAO::Ledger
             return result;
         }
 
+        if(TryParseFullBlockSubmission(vData, result))
+            return result;
+
         if(vData.size() >= LLP::FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN)
         {
             LLP::DisposableFalcon::SignedWorkSubmission submission;
@@ -317,6 +466,8 @@ namespace TAO::Ledger
                 result.hashMerkle = submission.hashMerkleRoot;
                 result.nonce = submission.nNonce;
                 result.timestamp = submission.nTimestamp;
+                result.nSignatureLength = static_cast<uint16_t>(submission.vSignature.size());
+                result.vSignature = submission.vSignature;
                 result.success = true;
 
                 /* Opportunistically extract nUnifiedHeight from the block body when the

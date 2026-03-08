@@ -362,14 +362,39 @@ namespace FalconConstants
      * Falcon-1024 uses 1577-byte signatures vs Falcon-512's 809 bytes.
      **************************************************************************/
 
-    /** Tritium wrapper signature (Falcon-1024) - localhost
-     *  Format: [block(216)][timestamp(8)][siglen(2)][sig(1577)]
+    /** Hash-channel Tritium wrapper signature (Falcon-1024) - localhost
+     *  Fixed format: [block(216)][timestamp(8)][siglen(2)][sig(1577)]
      *  Calculation: 216 + 8 + 2 + 1577 = 1803 bytes */
-    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_WRAPPER_FALCON1024_MAX = 1803;
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX = 1803;
 
-    /** Tritium wrapper signature (Falcon-1024) - encrypted
+    /** Hash-channel Tritium wrapper signature (Falcon-1024) - encrypted
      *  Add ChaCha20 overhead: 1803 + 28 = 1831 bytes */
-    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_WRAPPER_FALCON1024_ENCRYPTED_MAX = 1831;
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_ENCRYPTED_MAX = 1831;
+
+    /** Prime-channel Tritium wrapper signature (Falcon-1024) - localhost
+     *  Variable format: [block(216)][vOffsets(N)][timestamp(8)][siglen(2)][sig(1577)]
+     *  The minimum Prime wrapper equals the Hash wrapper when N == 0. */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN =
+        SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX;
+
+    /** Maximum Prime-channel vOffset overhead that can fit inside the bounded full-block payload. */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_VOFFSETS_MAX =
+        FULL_BLOCK_TRITIUM_SIZE - FULL_BLOCK_TRITIUM_MIN;
+
+    /** Prime-channel Tritium wrapper signature (Falcon-1024) - localhost
+     *  Maximum bounded size: [block(max)][timestamp(8)][siglen(2)][sig(1577)] */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MAX =
+        FULL_BLOCK_TRITIUM_SIZE + TIMESTAMP_SIZE + LENGTH_FIELD_SIZE + FALCON1024_SIG_CT_SIZE;
+
+    /** Prime-channel Tritium wrapper signature (Falcon-1024) - encrypted
+     *  Minimum size when N == 0: 1803 + 28 = 1831 bytes */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MIN =
+        SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN + CHACHA20_OVERHEAD;
+
+    /** Prime-channel Tritium wrapper signature (Falcon-1024) - encrypted
+     *  Maximum bounded size with ChaCha20 overhead applied. */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MAX =
+        SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MAX + CHACHA20_OVERHEAD;
 
     /** Legacy wrapper signature (Falcon-1024) - localhost
      *  Format: [block(220)][timestamp(8)][siglen(2)][sig(1577)]

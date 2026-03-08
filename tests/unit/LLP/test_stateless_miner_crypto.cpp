@@ -22,6 +22,8 @@ ________________________________________________________________________________
 
 #include <LLP/include/falcon_constants.h>
 
+#include <TAO/Ledger/include/stateless_block_utility.h>
+
 #include <Util/include/hex.h>
 #include <Util/include/debug.h>
 
@@ -333,6 +335,47 @@ static std::vector<uint8_t> BuildSubmitBlockPayload(
 }
 
 
+static std::vector<uint8_t> BuildTritiumSubmitBlockPayload(
+    const uint32_t nChannel,
+    const std::vector<uint8_t>& vPrimeOffsets,
+    const uint64_t nTimestamp,
+    const uint16_t nSigLen
+)
+{
+    std::vector<uint8_t> payload(LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN, 0x00);
+
+    for(size_t i = 0; i < LLP::FalconConstants::MERKLE_ROOT_SIZE; ++i)
+        payload[LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET + i] = static_cast<uint8_t>(0x40 + i);
+
+    payload[196] = static_cast<uint8_t>((nChannel >> 24) & 0xFF);
+    payload[197] = static_cast<uint8_t>((nChannel >> 16) & 0xFF);
+    payload[198] = static_cast<uint8_t>((nChannel >> 8) & 0xFF);
+    payload[199] = static_cast<uint8_t>(nChannel & 0xFF);
+
+    payload[200] = 0x00;
+    payload[201] = 0x00;
+    payload[202] = 0x00;
+    payload[203] = 0x2A;
+
+    const uint64_t nNonce = 0x0102030405060708ULL;
+    for(size_t i = 0; i < LLP::FalconConstants::NONCE_SIZE; ++i)
+        payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET + i] = static_cast<uint8_t>((nNonce >> (8 * i)) & 0xFF);
+
+    payload.insert(payload.end(), vPrimeOffsets.begin(), vPrimeOffsets.end());
+
+    for(size_t i = 0; i < LLP::FalconConstants::TIMESTAMP_SIZE; ++i)
+        payload.push_back(static_cast<uint8_t>((nTimestamp >> (8 * i)) & 0xFF));
+
+    payload.push_back(static_cast<uint8_t>(nSigLen & 0xFF));
+    payload.push_back(static_cast<uint8_t>((nSigLen >> 8) & 0xFF));
+
+    for(uint16_t i = 0; i < nSigLen; ++i)
+        payload.push_back(static_cast<uint8_t>(0x90 + (i & 0x0F)));
+
+    return payload;
+}
+
+
 TEST_CASE("T10: SUBMIT_BLOCK payload format encrypt/decrypt round-trip", "[stateless_miner_crypto][payload]")
 {
     /* Format: [block(216)][timestamp(8LE)][sig_len(2LE)][falcon_ct_sig(809)] */
@@ -470,6 +513,60 @@ TEST_CASE("T14: Simplified wire format (Physical Falcon removed)", "[stateless_m
     {
         uint16_t tooLarge = 1578;
         REQUIRE(tooLarge > LLP::FalconConstants::FALCON_SIG_ABSOLUTE_MAX);
+    }
+}
+
+
+TEST_CASE("T14A: Channel-aware full-block parse distinguishes Hash and Prime trailers", "[stateless_miner_crypto][payload][prime]")
+{
+    SECTION("Hash Falcon-1024 payload stays fixed at 1803/1831")
+    {
+        const std::vector<uint8_t> vPayload = BuildTritiumSubmitBlockPayload(2, {}, 1700000000, 1577);
+        REQUIRE(vPayload.size() == 1803);
+
+        TAO::Ledger::ParseResult result = TAO::Ledger::ParseStatelessWorkSubmission(vPayload);
+        REQUIRE(result.fFullBlockSubmission);
+        REQUIRE(result.success);
+        REQUIRE(result.nChannel == 2);
+        REQUIRE(result.nBlockBytes == LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN);
+        REQUIRE(result.vPrimeOffsets.empty());
+        REQUIRE(result.timestamp == 1700000000);
+        REQUIRE(result.nSignatureLength == 1577);
+        REQUIRE(result.vSignature.size() == 1577);
+
+        std::vector<uint8_t> vEncrypted = LLC::EncryptPayloadChaCha20(vPayload, std::vector<uint8_t>(32, 0x11));
+        REQUIRE(vEncrypted.size() == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_ENCRYPTED_MAX);
+    }
+
+    SECTION("Prime Falcon-1024 payload preserves vOffsets before the Falcon trailer")
+    {
+        const std::vector<uint8_t> vPrimeOffsets = {1,2,3,4,5,6,7,8,9,10};
+        const std::vector<uint8_t> vPayload = BuildTritiumSubmitBlockPayload(1, vPrimeOffsets, 1700000000, 1577);
+        REQUIRE(vPayload.size() == 1813);
+
+        TAO::Ledger::ParseResult result = TAO::Ledger::ParseStatelessWorkSubmission(vPayload);
+        REQUIRE(result.fFullBlockSubmission);
+        REQUIRE(result.success);
+        REQUIRE(result.nChannel == 1);
+        REQUIRE(result.nBlockBytes == LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN + vPrimeOffsets.size());
+        REQUIRE(result.vPrimeOffsets == vPrimeOffsets);
+        REQUIRE(result.timestamp == 1700000000);
+        REQUIRE(result.nSignatureLength == 1577);
+        REQUIRE(result.vSignature.size() == 1577);
+
+        std::vector<uint8_t> vEncrypted = LLC::EncryptPayloadChaCha20(vPayload, std::vector<uint8_t>(32, 0x22));
+        REQUIRE(vEncrypted.size() == 1841);
+        REQUIRE(vEncrypted.size() == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MIN + vPrimeOffsets.size());
+    }
+
+    SECTION("Hash Falcon-1024 payload rejects unexpected bytes before the Falcon trailer")
+    {
+        const std::vector<uint8_t> vPayload = BuildTritiumSubmitBlockPayload(2, {9,8,7,6,5,4,3,2,1,0}, 1700000000, 1577);
+        TAO::Ledger::ParseResult result = TAO::Ledger::ParseStatelessWorkSubmission(vPayload);
+
+        REQUIRE(result.fFullBlockSubmission);
+        REQUIRE_FALSE(result.success);
+        REQUIRE(result.reason == "hash submission contains unexpected bytes before Falcon trailer");
     }
 }
 

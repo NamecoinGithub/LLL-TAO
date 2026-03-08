@@ -36,7 +36,9 @@ MINER                          NODE  (StatelessMinerConnection)
   │                              │      → decryptedData
   │                              │
   │                              ├─ 2. Detect format
-  │                              │      Full-block format: [block_data][timestamp][sig_len][sig]
+  │                              │      Full-block format:
+  │                              │        Hash:  [block_data(216)][timestamp][sig_len][sig]
+  │                              │        Prime: [block_data(216)][vOffsets(N)][timestamp][sig_len][sig]
   │                              │      Legacy format:     [merkle][nonce][timestamp][sig_len][sig]
   │                              │
   │                              ├─ 3. DisposableFalcon::VerifyWorkSubmission()
@@ -137,7 +139,9 @@ still at the correct height) should **not** be rejected by the pre-check.
 ```
 [ChaCha20 ciphertext]
     └── decrypted ──►
-        Full-block format:  [216-byte block][timestamp 8B LE][sig_len 2B LE][Falcon signature]
+        Full-block format:
+            Hash:  [216-byte block][timestamp 8B LE][sig_len 2B LE][Falcon signature]
+            Prime: [216-byte block][vOffsets N bytes][timestamp 8B LE][sig_len 2B LE][Falcon signature]
         Legacy format:      [merkle 64B][nonce 8B LE][timestamp 8B LE][sig_len 2B LE][Falcon signature]
 ```
 
