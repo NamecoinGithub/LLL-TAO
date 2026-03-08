@@ -366,12 +366,27 @@ namespace FalconConstants
      * 
      * These constants define packet sizes when using Falcon-1024 signatures.
      * Falcon-1024 uses 1577-byte signatures vs Falcon-512's 809 bytes.
+     *
+     * Payload grammar note:
+     *  - Base Tritium block bytes: 216
+     *  - Falcon trailer: [timestamp(8)][sig_len(2)][sig]
+     *  - Prime-only vOffsets: variable bytes inserted between the 216-byte block
+     *    and the Falcon trailer
      **************************************************************************/
+
+    /** Fixed Tritium base block bytes before any Prime-only vOffsets or Falcon trailer. */
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_BASE_BYTES = FULL_BLOCK_TRITIUM_MIN;
+
+    /** Fixed Falcon-1024 trailer bytes appended after block bytes / Prime offsets.
+     *  Format: [timestamp(8)][siglen(2)][sig(1577)] */
+    static const size_t SUBMIT_BLOCK_FALCON1024_TRAILER_SIZE =
+        TIMESTAMP_SIZE + LENGTH_FIELD_SIZE + FALCON1024_SIG_CT_SIZE;
 
     /** Hash-channel Tritium wrapper signature (Falcon-1024) - localhost
      *  Fixed format: [block(216)][timestamp(8)][siglen(2)][sig(1577)]
      *  Calculation: 216 + 8 + 2 + 1577 = 1803 bytes */
-    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX = 1803;
+    static const size_t SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX =
+        SUBMIT_BLOCK_FULL_TRITIUM_BASE_BYTES + SUBMIT_BLOCK_FALCON1024_TRAILER_SIZE;
 
     /** Hash-channel Tritium wrapper signature (Falcon-1024) - encrypted
      *  Add ChaCha20 overhead: 1803 + 28 = 1831 bytes */

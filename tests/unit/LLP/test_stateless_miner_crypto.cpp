@@ -564,6 +564,22 @@ TEST_CASE("T14A: Channel-aware full-block parse distinguishes Hash and Prime tra
         REQUIRE(vEncrypted.size() == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MIN + vPrimeOffsets.size());
     }
 
+    SECTION("Prime Falcon-1024 zero-offset payload keeps the Prime lower bound at 1803/1831")
+    {
+        const std::vector<uint8_t> vPayload = BuildTritiumSubmitBlockPayload(1, {}, 1700000000, 1577);
+        REQUIRE(vPayload.size() == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN);
+
+        TAO::Ledger::ParseResult result = TAO::Ledger::ParseStatelessWorkSubmission(vPayload);
+        REQUIRE(result.fFullBlockSubmission);
+        REQUIRE(result.success);
+        REQUIRE(result.nChannel == 1);
+        REQUIRE(result.nBlockBytes == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_BASE_BYTES);
+        REQUIRE(result.vPrimeOffsets.empty());
+
+        std::vector<uint8_t> vEncrypted = LLC::EncryptPayloadChaCha20(vPayload, std::vector<uint8_t>(32, 0x33));
+        REQUIRE(vEncrypted.size() == LLP::FalconConstants::SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_ENCRYPTED_MIN);
+    }
+
     SECTION("Hash Falcon-1024 payload rejects unexpected bytes before the Falcon trailer")
     {
         const std::vector<uint8_t> vPayload = BuildTritiumSubmitBlockPayload(2, {9,8,7,6,5,4,3,2,1,0}, 1700000000, 1577);

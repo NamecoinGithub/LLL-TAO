@@ -57,6 +57,14 @@ namespace TAO::Ledger
 
         bool TryParseFullBlockSubmission(const std::vector<uint8_t>& vData, ParseResult& result)
         {
+            /* Tail-safe full-block decode model:
+             *  1. Read sig_len from immediately before the signature bytes.
+             *  2. Derive timestamp bounds from the 8 bytes immediately before sig_len.
+             *  3. Treat everything before [timestamp][sig_len][signature] as block_bytes.
+             *  4. Split full-block prefixes as:
+             *       first 216 bytes = Tritium block
+             *       remaining prefix bytes = Prime vOffsets only when nChannel == 1
+             *     Hash (nChannel == 2) must not carry any extra prefix bytes. */
             const size_t MIN_TRAILER_SIZE = LLP::FalconConstants::TIMESTAMP_SIZE
                                          + LLP::FalconConstants::LENGTH_FIELD_SIZE
                                          + LLP::FalconConstants::FALCON_SIG_MIN;

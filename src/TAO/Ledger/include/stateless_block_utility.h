@@ -164,6 +164,11 @@ namespace TAO
          *  and full-block wrappers where Prime miners may append vOffsets between
          *  the 216-byte Tritium block and the Falcon trailer.
          *
+         *  NOTE: This describes payload grammar (Prime vs Hash contents), not the
+         *  outer protocol-lane framing (stateless 16-bit vs legacy 8-bit opcodes).
+         *  TODO: share this payload parser across both lanes so payload rules live
+         *  in one place regardless of outer framing.
+         *
          *  @param[in] vData Raw submission payload
          *
          *  @return Parsed result with merkle root and nonce
