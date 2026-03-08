@@ -1519,10 +1519,12 @@ namespace LLP
                                  * authenticated block body for use in the canonical pre-check gate.
                                  * Tritium layout: [0-3]=nVersion [4-131]=hashPrevBlock
                                  *                 [132-195]=hashMerkleRoot [196-199]=nChannel
-                                 *                 [200-203]=nHeight / nonce extraction remains anchored
-                                 *                 to FULL_BLOCK_TRITIUM_NONCE_OFFSET for compatibility
+                                 *                 [200-203]=nHeight
                                  *
-                                 * Use blockSize (the authenticated block body length) rather than
+                                 * Channel and height come from the authenticated block body. Nonce
+                                 * extraction continues to use FULL_BLOCK_TRITIUM_NONCE_OFFSET to
+                                 * preserve the existing stateless submit compatibility path. */
+                                /* Use blockSize (the authenticated block body length) rather than
                                  * decryptedData.size() which also includes [timestamp][sig_len][signature]
                                  * and could satisfy the bound even when the block body is too short. */
                                 if(blockSize >= 204)
@@ -1793,6 +1795,8 @@ namespace LLP
                 }
                 else
                 {
+                    /* Explicitly clear any stale offsets from reused templates before
+                     * Hash-channel validation, which requires vOffsets to remain empty. */
                     pTritium->vOffsets.clear();
                 }
 

@@ -40,8 +40,15 @@ namespace TAO::Ledger
     {
         uint64_t bytes_to_uint64_le(const std::vector<uint8_t>& vData, const size_t nOffset)
         {
+            if(vData.size() < nOffset + 8)
+            {
+                debug::error(FUNCTION, "bytes_to_uint64_le: insufficient data for 8-byte read at offset ",
+                             nOffset, " (size=", vData.size(), ")");
+                return 0;
+            }
+
             uint64_t nValue = 0;
-            for(size_t i = 0; i < LLP::FalconConstants::NONCE_SIZE; ++i)
+            for(size_t i = 0; i < 8; ++i)
                 nValue |= static_cast<uint64_t>(vData[nOffset + i]) << (8 * i);
 
             return nValue;
@@ -146,20 +153,23 @@ namespace TAO::Ledger
 
             result.nonce = bytes_to_uint64_le(vData, LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET);
 
-            if(nBlockBytes < 204)
+            const size_t CHANNEL_AND_HEIGHT_BYTES =
+                LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET + sizeof(uint32_t);
+
+            if(nBlockBytes < CHANNEL_AND_HEIGHT_BYTES)
             {
-                result.reason = "full-block submission missing channel/height fields";
+                result.reason = "full-block submission too small to contain channel/height fields";
                 return true;
             }
 
-            result.nChannel = convert::bytes2uint(vData, 196);
+            result.nChannel = convert::bytes2uint(vData, LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET);
             if(result.nChannel != 1 && result.nChannel != 2)
             {
                 result.reason = "full-block submission missing valid mining channel";
                 return true;
             }
 
-            result.nUnifiedHeight = convert::bytes2uint(vData, 200);
+            result.nUnifiedHeight = convert::bytes2uint(vData, LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET);
 
             if(result.nChannel == 1)
             {
@@ -171,7 +181,9 @@ namespace TAO::Ledger
             }
             else if(nBlockBytes != LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
             {
-                result.reason = "hash submission contains unexpected bytes before Falcon trailer";
+                result.reason = debug::safe_printstr(
+                    "hash submission contains unexpected bytes before Falcon trailer (expected ",
+                    LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN, ", got ", nBlockBytes, ")");
                 return true;
             }
 

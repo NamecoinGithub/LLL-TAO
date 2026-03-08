@@ -342,24 +342,29 @@ static std::vector<uint8_t> BuildTritiumSubmitBlockPayload(
     const uint16_t nSigLen
 )
 {
+    /* Helper: build a full-block SUBMIT_BLOCK plaintext payload.
+     * Format:
+     *   Hash:  [block(216)][timestamp(8LE)][sig_len(2LE)][signature(nSigLen)]
+     *   Prime: [block(216)][vOffsets(N)][timestamp(8LE)][sig_len(2LE)][signature(nSigLen)] */
     std::vector<uint8_t> payload(LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN, 0x00);
+    const uint32_t TEST_SAMPLE_HEIGHT = 42;
+    const uint64_t TEST_NONCE = 0x0102030405060708ULL;
 
     for(size_t i = 0; i < LLP::FalconConstants::MERKLE_ROOT_SIZE; ++i)
         payload[LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET + i] = static_cast<uint8_t>(0x40 + i);
 
-    payload[196] = static_cast<uint8_t>((nChannel >> 24) & 0xFF);
-    payload[197] = static_cast<uint8_t>((nChannel >> 16) & 0xFF);
-    payload[198] = static_cast<uint8_t>((nChannel >> 8) & 0xFF);
-    payload[199] = static_cast<uint8_t>(nChannel & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET] = static_cast<uint8_t>((nChannel >> 24) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET + 1] = static_cast<uint8_t>((nChannel >> 16) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET + 2] = static_cast<uint8_t>((nChannel >> 8) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET + 3] = static_cast<uint8_t>(nChannel & 0xFF);
 
-    payload[200] = 0x00;
-    payload[201] = 0x00;
-    payload[202] = 0x00;
-    payload[203] = 0x2A;
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET] = static_cast<uint8_t>((TEST_SAMPLE_HEIGHT >> 24) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET + 1] = static_cast<uint8_t>((TEST_SAMPLE_HEIGHT >> 16) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET + 2] = static_cast<uint8_t>((TEST_SAMPLE_HEIGHT >> 8) & 0xFF);
+    payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET + 3] = static_cast<uint8_t>(TEST_SAMPLE_HEIGHT & 0xFF);
 
-    const uint64_t nNonce = 0x0102030405060708ULL;
     for(size_t i = 0; i < LLP::FalconConstants::NONCE_SIZE; ++i)
-        payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET + i] = static_cast<uint8_t>((nNonce >> (8 * i)) & 0xFF);
+        payload[LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET + i] = static_cast<uint8_t>((TEST_NONCE >> (8 * i)) & 0xFF);
 
     payload.insert(payload.end(), vPrimeOffsets.begin(), vPrimeOffsets.end());
 
@@ -566,7 +571,8 @@ TEST_CASE("T14A: Channel-aware full-block parse distinguishes Hash and Prime tra
 
         REQUIRE(result.fFullBlockSubmission);
         REQUIRE_FALSE(result.success);
-        REQUIRE(result.reason == "hash submission contains unexpected bytes before Falcon trailer");
+        REQUIRE(result.vPrimeOffsets.empty());
+        REQUIRE(result.reason == "hash submission contains unexpected bytes before Falcon trailer (expected 216, got 226)");
     }
 }
 

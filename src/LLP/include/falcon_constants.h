@@ -260,6 +260,12 @@ namespace FalconConstants
     /** Merkle root offset in full block
      *  Located after: nVersion(4) + hashPrevBlock(128) = 132 bytes */
     static const size_t FULL_BLOCK_MERKLE_OFFSET = 132;
+
+    /** Channel offset in Tritium full block */
+    static const size_t FULL_BLOCK_TRITIUM_CHANNEL_OFFSET = 196;
+
+    /** Unified height offset in Tritium full block */
+    static const size_t FULL_BLOCK_TRITIUM_HEIGHT_OFFSET = 200;
     
     /** Nonce offset in Tritium full block
      *  Confirmed via diagnostic data at offset 200 */
@@ -377,7 +383,8 @@ namespace FalconConstants
     static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_WRAPPER_FALCON1024_MIN =
         SUBMIT_BLOCK_FULL_TRITIUM_HASH_WRAPPER_FALCON1024_MAX;
 
-    /** Maximum Prime-channel vOffset overhead that can fit inside the bounded full-block payload. */
+    /** Maximum Prime-channel vOffset overhead that can fit inside the bounded full-block payload.
+     *  Derived as max Tritium block bytes minus the fixed 216-byte empty Tritium block. */
     static const size_t SUBMIT_BLOCK_FULL_TRITIUM_PRIME_VOFFSETS_MAX =
         FULL_BLOCK_TRITIUM_SIZE - FULL_BLOCK_TRITIUM_MIN;
 
