@@ -17,6 +17,111 @@ ________________________________________________________________________________
 
 namespace LLP
 {
+    namespace
+    {
+        bool HasRewardBinding(const MiningContext& context)
+        {
+            return context.fRewardBound && context.hashRewardAddress != 0;
+        }
+
+        bool HasRewardBinding(const SessionRecoveryData& data)
+        {
+            return data.fRewardBound && data.hashRewardAddress != 0;
+        }
+
+        bool HasChaChaState(const MiningContext& context)
+        {
+            return context.fEncryptionReady && !context.vChaChaKey.empty();
+        }
+
+        bool HasChaChaState(const SessionRecoveryData& data)
+        {
+            return data.fEncryptionReady && !data.vChaCha20Key.empty();
+        }
+
+        SessionRecoveryData ResolveRecoveredSnapshot(
+            const MiningContext& liveContext,
+            const SessionRecoveryData& recovered,
+            const bool fAddressHintPath,
+            bool& fAccepted
+        )
+        {
+            SessionRecoveryData resolved = recovered;
+            fAccepted = true;
+
+            if(liveContext.hashKeyID != 0 && recovered.hashKeyID != 0 && liveContext.hashKeyID != recovered.hashKeyID)
+            {
+                debug::warning(FUNCTION, "RECOVERY CONFLICT: live Falcon identity=",
+                               liveContext.hashKeyID.GetHex(), " differs from recovered identity=",
+                               recovered.hashKeyID.GetHex(), ". Rejecting recovery.");
+                fAccepted = false;
+                return resolved;
+            }
+
+            if(liveContext.hashGenesis != 0 && recovered.hashGenesis != 0 &&
+               liveContext.hashGenesis != recovered.hashGenesis)
+            {
+                debug::warning(FUNCTION, "RECOVERY CONFLICT: live genesis=", liveContext.hashGenesis.GetHex(),
+                               " differs from recovered genesis=", recovered.hashGenesis.GetHex(),
+                               ". Rejecting recovery.");
+                fAccepted = false;
+                return resolved;
+            }
+
+            if(liveContext.nSessionId != 0 && recovered.nSessionId != 0 &&
+               liveContext.nSessionId != recovered.nSessionId)
+            {
+                debug::warning(FUNCTION, "RECOVERY CONFLICT: ",
+                               fAddressHintPath ? "address-based" : "key-based",
+                               " recovery found same Falcon identity but different session ids (live=",
+                               liveContext.nSessionId, ", recovered=", recovered.nSessionId,
+                               "). Preferring recovered canonical session id.");
+            }
+
+            if(HasRewardBinding(liveContext))
+            {
+                if(HasRewardBinding(recovered) && liveContext.hashRewardAddress != recovered.hashRewardAddress)
+                {
+                    debug::warning(FUNCTION, "RECOVERY CONFLICT: reward hash mismatch on reconnect (live=",
+                                   liveContext.hashRewardAddress.GetHex(), ", recovered=",
+                                   recovered.hashRewardAddress.GetHex(),
+                                   "). Preserving live reward binding.");
+                }
+
+                resolved.hashRewardAddress = liveContext.hashRewardAddress;
+                resolved.fRewardBound = true;
+            }
+
+            if(HasChaChaState(liveContext))
+            {
+                if(HasChaChaState(recovered) && liveContext.vChaChaKey != recovered.vChaCha20Key)
+                {
+                    debug::warning(FUNCTION, "RECOVERY CONFLICT: live session and recovered snapshot disagree on "
+                                   "ChaCha20 state. Preserving live encryption context.");
+                }
+
+                resolved.vChaCha20Key = liveContext.vChaChaKey;
+                resolved.fEncryptionReady = true;
+                resolved.hashChaCha20Key = uint256_t(liveContext.vChaChaKey);
+            }
+
+            if(!liveContext.vDisposablePubKey.empty())
+            {
+                if(!recovered.vDisposablePubKey.empty() && liveContext.vDisposablePubKey != recovered.vDisposablePubKey)
+                {
+                    debug::warning(FUNCTION, "RECOVERY CONFLICT: live session and recovered snapshot disagree on "
+                                   "disposable Falcon key. Preserving live key material.");
+                }
+
+                resolved.vDisposablePubKey = liveContext.vDisposablePubKey;
+                if(liveContext.hashDisposableKeyID != 0)
+                    resolved.hashDisposableKeyID = liveContext.hashDisposableKeyID;
+            }
+
+            return resolved;
+        }
+    }
+
     /** Default session timeout: 1 hour **/
     static const uint64_t DEFAULT_SESSION_TIMEOUT = 3600;
 
@@ -309,34 +414,44 @@ namespace LLP
     }
 
 
-    /** RecoverSession **/
-    bool SessionRecoveryManager::RecoverSession(const uint256_t& hashKeyID, MiningContext& context)
+    /** PreviewRecoverableSession **/
+    std::optional<SessionRecoveryData> SessionRecoveryManager::PreviewRecoverableSession(const uint256_t& hashKeyID)
     {
         auto optData = mapSessionsByKey.Get(hashKeyID);
         if(!optData.has_value())
         {
             debug::log(2, FUNCTION, "No recoverable session for keyID=", hashKeyID.SubString());
-            return false;
+            return std::nullopt;
         }
 
-        /* Get a copy of the data - concurrent map returns copies */
         SessionRecoveryData data = optData.value();
-
-        /* Check expiration */
         if(data.IsExpired(nSessionTimeout.load()))
         {
             debug::log(2, FUNCTION, "Session expired for keyID=", hashKeyID.SubString());
-            mapSessionsByKey.Erase(hashKeyID);
-            return false;
+            RemoveSession(hashKeyID);
+            return std::nullopt;
         }
 
-        /* Check reconnect limit */
         if(data.nReconnectCount >= nMaxReconnects.load())
         {
             debug::log(0, FUNCTION, "Session exceeded max reconnects for keyID=", hashKeyID.SubString());
-            mapSessionsByKey.Erase(hashKeyID);
-            return false;
+            RemoveSession(hashKeyID);
+            return std::nullopt;
         }
+
+        return data;
+    }
+
+
+    /** RecoverSession **/
+    bool SessionRecoveryManager::RecoverSession(const uint256_t& hashKeyID, MiningContext& context)
+    {
+        auto optData = PreviewRecoverableSession(hashKeyID);
+        if(!optData.has_value())
+            return false;
+
+        /* Get a copy of the data - concurrent map returns copies */
+        SessionRecoveryData data = optData.value();
 
         /* Increment reconnect count and update activity */
         data.nReconnectCount++;
@@ -386,22 +501,7 @@ namespace LLP
             return std::nullopt;
         }
 
-        auto optData = mapSessionsByKey.Get(optKeyID.value());
-        if(!optData.has_value())
-        {
-            debug::log(3, FUNCTION, "No recoverable session for keyID=", optKeyID.value().SubString());
-            return std::nullopt;
-        }
-
-        SessionRecoveryData data = optData.value();
-        if(data.IsExpired(nSessionTimeout.load()))
-        {
-            debug::log(2, FUNCTION, "Session expired for keyID=", optKeyID.value().SubString());
-            mapSessionsByKey.Erase(optKeyID.value());
-            return std::nullopt;
-        }
-
-        return data;
+        return PreviewRecoverableSession(optKeyID.value());
     }
 
 
@@ -411,26 +511,58 @@ namespace LLP
         const std::string& strAddress
     )
     {
-        if(hashKeyID != 0)
+        MiningContext context = MiningContext().WithKeyId(hashKeyID);
+        context.strAddress = strAddress;
+        return RecoverSessionByIdentity(context);
+    }
+
+
+    /** RecoverSessionByIdentity **/
+    std::optional<SessionRecoveryData> SessionRecoveryManager::RecoverSessionByIdentity(const MiningContext& liveContext)
+    {
+        if(liveContext.hashKeyID != 0)
         {
-            MiningContext context;
-            if(RecoverSession(hashKeyID, context))
+            const auto optPreview = PreviewRecoverableSession(liveContext.hashKeyID);
+            if(optPreview.has_value())
             {
-                return SessionRecoveryData(context);
+                bool fAccepted = false;
+                ResolveRecoveredSnapshot(liveContext, optPreview.value(), false, fAccepted);
+
+                if(!fAccepted)
+                    return std::nullopt;
+
+                MiningContext recoveredContext;
+                if(RecoverSession(liveContext.hashKeyID, recoveredContext))
+                {
+                    SessionRecoveryData resolved = SessionRecoveryData(recoveredContext);
+                    resolved = ResolveRecoveredSnapshot(liveContext, resolved, false, fAccepted);
+                    return fAccepted ? std::optional<SessionRecoveryData>(resolved) : std::nullopt;
+                }
             }
 
-            debug::log(3, FUNCTION, "No recoverable session for keyID=", hashKeyID.SubString(),
+            debug::log(3, FUNCTION, "No recoverable session for keyID=", liveContext.hashKeyID.SubString(),
                        " falling back to address hint");
         }
 
-        if(strAddress.empty())
+        if(liveContext.strAddress.empty())
             return std::nullopt;
 
-        MiningContext context;
-        if(!RecoverSessionByAddress(strAddress, context))
+        const auto optPreview = RecoverSessionByAddress(liveContext.strAddress);
+        if(!optPreview.has_value())
             return std::nullopt;
 
-        return SessionRecoveryData(context);
+        bool fAccepted = false;
+        ResolveRecoveredSnapshot(liveContext, optPreview.value(), true, fAccepted);
+        if(!fAccepted)
+            return std::nullopt;
+
+        MiningContext recoveredContext;
+        if(!RecoverSession(optPreview->hashKeyID, recoveredContext))
+            return std::nullopt;
+
+        SessionRecoveryData resolved = SessionRecoveryData(recoveredContext);
+        resolved = ResolveRecoveredSnapshot(liveContext, resolved, true, fAccepted);
+        return fAccepted ? std::optional<SessionRecoveryData>(resolved) : std::nullopt;
     }
 
 

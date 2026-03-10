@@ -657,10 +657,8 @@ namespace LLP
                 }
 
                 /* Attempt lane-switch recovery based on address */
-                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByIdentity(
-                    context.hashKeyID,
-                    GetAddress().ToStringIP()
-                );
+                context.strAddress = GetAddress().ToStringIP();
+                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByIdentity(context);
                 if(optExisting.has_value())
                 {
                     if(optExisting->fRewardBound && optExisting->hashRewardAddress != 0)
@@ -2336,10 +2334,8 @@ namespace LLP
                 }
 
                 /* Attempt lane-switch recovery based on address */
-                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByIdentity(
-                    context.hashKeyID,
-                    GetAddress().ToStringIP()
-                );
+                context.strAddress = GetAddress().ToStringIP();
+                auto optExisting = SessionRecoveryManager::Get().RecoverSessionByIdentity(context);
                 if(optExisting.has_value())
                 {
                     if(optExisting->fRewardBound && optExisting->hashRewardAddress != 0)
