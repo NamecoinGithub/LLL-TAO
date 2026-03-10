@@ -534,8 +534,8 @@ namespace LLP
                 MiningContext recoveredContext;
                 if(RecoverSession(liveContext.hashKeyID, recoveredContext))
                 {
-                    SessionRecoveryData resolved = SessionRecoveryData(recoveredContext);
-                    resolved = ResolveRecoveredSnapshot(liveContext, resolved, false, fAccepted);
+                    SessionRecoveryData resolved =
+                        ResolveRecoveredSnapshot(liveContext, SessionRecoveryData(recoveredContext), false, fAccepted);
                     return fAccepted ? std::optional<SessionRecoveryData>(resolved) : std::nullopt;
                 }
             }
@@ -560,8 +560,8 @@ namespace LLP
         if(!RecoverSession(optPreview->hashKeyID, recoveredContext))
             return std::nullopt;
 
-        SessionRecoveryData resolved = SessionRecoveryData(recoveredContext);
-        resolved = ResolveRecoveredSnapshot(liveContext, resolved, true, fAccepted);
+        SessionRecoveryData resolved =
+            ResolveRecoveredSnapshot(liveContext, SessionRecoveryData(recoveredContext), true, fAccepted);
         return fAccepted ? std::optional<SessionRecoveryData>(resolved) : std::nullopt;
     }
 
