@@ -282,9 +282,14 @@ namespace TAO
         /* Get the Proof Hash of the block. Used to verify work claims. */
         uint1024_t Block::ProofHash() const
         {
-            /** Hashing template for CPU miners uses nVersion to nBits **/
+            /** Prime-channel miners hash the serialized 216-byte template excluding
+             *  the trailing nonce field, so use the same canonical byte encoding
+             *  the miner receives over LLP rather than the in-memory object layout. */
             if(nChannel == 1)
-                return LLC::SK1024(BEGIN(nVersion), END(nBits));
+            {
+                std::vector<uint8_t> vData = Serialize();
+                return LLC::SK1024(vData.begin(), vData.end() - 8);
+            }
 
             /** Hashing template for GPU uses nVersion to nNonce **/
             return LLC::SK1024(BEGIN(nVersion), END(nNonce));

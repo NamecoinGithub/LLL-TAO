@@ -15,7 +15,28 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/tritium.h>
 #include <TAO/Ledger/types/state.h>
 
+#include <LLC/hash/SK.h>
+
 #include <unit/catch2/catch.hpp>
+
+namespace
+{
+    uint1024_t PrimeProofHashFromSerializedTemplate(const TAO::Ledger::Block& block)
+    {
+        std::vector<uint8_t> vData = block.Serialize();
+        REQUIRE(vData.size() == 216);
+
+        return LLC::SK1024(vData.begin(), vData.end() - 8);
+    }
+
+    uint1024_t PrimeProofHashFromLegacyMemorySpan(const TAO::Ledger::Block& block)
+    {
+        const char* pbegin = reinterpret_cast<const char*>(&block.nVersion);
+        const char* pend   = reinterpret_cast<const char*>(&block.nBits + 1);
+
+        return LLC::SK1024(pbegin, pend);
+    }
+}
 
 TEST_CASE( "Block primitive values", "[ledger]")
 {
@@ -183,5 +204,50 @@ TEST_CASE( "Prime Calculation - Nonce Endianness (PR #128)", "[ledger][prime][en
         
         /* With nonce=0, prime should equal ProofHash */
         REQUIRE(nPrime == nProofHash);
+    }
+}
+
+
+TEST_CASE("Prime ProofHash uses miner-compatible serialized template bytes", "[ledger][prime][proofhash]")
+{
+    TAO::Ledger::Block block(7, 0, 1, 100);
+    block.hashPrevBlock = uint1024_t(0x123456789abcdef0ULL);
+    block.hashMerkleRoot = uint512_t(0x0fedcba987654321ULL);
+    block.nBits = 0x1d00ffff;
+    block.nNonce = 0x8877665544332211ULL;
+
+    SECTION("Channel 1 ProofHash matches serialized template without nonce")
+    {
+        REQUIRE(block.ProofHash() == PrimeProofHashFromSerializedTemplate(block));
+    }
+
+    SECTION("Channel 1 ProofHash excludes nonce bytes")
+    {
+        const uint1024_t hashBefore = block.ProofHash();
+
+        block.nNonce = 0x0102030405060708ULL;
+
+        REQUIRE(block.ProofHash() == hashBefore);
+    }
+
+    SECTION("Channel 1 ProofHash changes when hashed template fields change")
+    {
+        const uint1024_t hashBefore = block.ProofHash();
+
+        block.nBits ^= 0x0000ffff;
+
+        REQUIRE(block.ProofHash() != hashBefore);
+    }
+
+    SECTION("GetPrime adds nonce to miner-compatible prime base")
+    {
+        const uint1024_t expectedPrime = PrimeProofHashFromSerializedTemplate(block) + block.nNonce;
+
+        REQUIRE(block.GetPrime() == expectedPrime);
+    }
+
+    SECTION("Serialized template hashing differs from legacy in-memory span hashing")
+    {
+        REQUIRE(PrimeProofHashFromSerializedTemplate(block) != PrimeProofHashFromLegacyMemorySpan(block));
     }
 }
