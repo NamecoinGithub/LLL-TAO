@@ -20,7 +20,12 @@ The current repository shape for that boundary is:
   - `qtv_fixture_case(case_id)`
   - `Base.@ccallable qtv_run_fixture(::Cint)`
   - `Base.@ccallable qtv_compare_parity(::Cint)`
-- C++ adapters in `src/LLC/include/`
+- formal public C++ bridge in `include/qtv/`
+  - `QTVJuliaBridge.hpp`
+  - `QTVBackendKind.hpp`
+  - `QTVCapabilities.hpp`
+  - `QTVEngineFacade.hpp`
+- compatibility wrappers in `src/LLC/include/`
   - `qtv_julia_bridge.h`
   - `qtv_engine.h`
 

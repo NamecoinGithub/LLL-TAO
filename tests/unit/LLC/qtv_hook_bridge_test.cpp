@@ -69,3 +69,62 @@ TEST_CASE("QTV engine backends isolate hook behavior", "[qtv][hooks][engine]")
     REQUIRE(juliaEngine.RunFixture(1));
     REQUIRE_FALSE(juliaEngine.CompareParity(0));
 }
+
+TEST_CASE("QTV backend selection is deterministic", "[qtv][hooks][selection]")
+{
+    using Backend = LLC::QTV::QTVBackendKind;
+
+    SECTION("C++ preference never promotes to Julia")
+    {
+        const LLC::QTV::QTVCapabilities capabilities = {false, true, true};
+        REQUIRE(LLC::QTV::SelectBackend(Backend::Cpp, capabilities) == Backend::Null);
+    }
+
+    SECTION("Julia preference falls back to C++ only when explicitly allowed")
+    {
+        const LLC::QTV::QTVCapabilities fallback_capabilities = {true, false, true};
+        REQUIRE(LLC::QTV::SelectBackend(Backend::Julia, fallback_capabilities) == Backend::Cpp);
+
+        const LLC::QTV::QTVCapabilities no_fallback_capabilities = {true, false, false};
+        REQUIRE(LLC::QTV::SelectBackend(Backend::Julia, no_fallback_capabilities) == Backend::Null);
+    }
+
+    SECTION("Available preferred backend wins")
+    {
+        const LLC::QTV::QTVCapabilities cpp_capabilities = {true, false, true};
+        REQUIRE(LLC::QTV::SelectBackend(Backend::Cpp, cpp_capabilities) == Backend::Cpp);
+
+        const LLC::QTV::QTVCapabilities julia_capabilities = {true, true, true};
+        REQUIRE(LLC::QTV::SelectBackend(Backend::Julia, julia_capabilities) == Backend::Julia);
+    }
+}
+
+TEST_CASE("QTV engine facade enforces selected backend", "[qtv][hooks][facade]")
+{
+    LLC::QTV::NullQTVEngine nullEngine;
+    LLC::QTV::CppQTVEngine cppEngine(&SuccessBool, &SuccessBool);
+    LLC::QTV::JuliaQTVEngine juliaEngine(LLC::QTV::QTVJuliaBridge(&SuccessStatus, &SuccessStatus));
+
+    SECTION("Julia request safely falls back to C++")
+    {
+        LLC::QTV::QTVEngineFacade facade(
+            nullEngine, cppEngine, juliaEngine, LLC::QTV::QTVBackendKind::Julia, {true, false, true});
+
+        REQUIRE(facade.PreferredBackend() == LLC::QTV::QTVBackendKind::Julia);
+        REQUIRE(facade.SelectedBackend() == LLC::QTV::QTVBackendKind::Cpp);
+        REQUIRE(facade.Available());
+        REQUIRE(facade.RunFixture(1));
+        REQUIRE_FALSE(facade.CompareParity(0));
+    }
+
+    SECTION("Unavailable C++ request disables the facade")
+    {
+        LLC::QTV::QTVEngineFacade facade(
+            nullEngine, cppEngine, juliaEngine, LLC::QTV::QTVBackendKind::Cpp, {false, true, true});
+
+        REQUIRE(facade.SelectedBackend() == LLC::QTV::QTVBackendKind::Null);
+        REQUIRE_FALSE(facade.Available());
+        REQUIRE_FALSE(facade.RunFixture(1));
+        REQUIRE_FALSE(facade.CompareParity(1));
+    }
+}

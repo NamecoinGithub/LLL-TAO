@@ -1,0 +1,30 @@
+Julia Bridge Architecture
+
+Application Layer
+    │
+    ▼
+QTV Engine Facade
+    │   deterministic backend selection
+    │   no implicit runtime heuristics
+    ▼
+Selected Backend
+    ├── C++ backend   (production authority)
+    ├── Julia backend (research / parity only)
+    └── Null backend  (safe disabled fallback)
+
+Selection policy
+1. Preferred C++ + C++ available     -> select C++
+2. Preferred C++ + C++ unavailable   -> select Null
+3. Preferred Julia + Julia available -> select Julia
+4. Preferred Julia + Julia missing
+   + C++ available + fallback enabled -> select C++
+5. Preferred Julia + no safe fallback -> select Null
+6. Preferred Null                    -> select Null
+
+Rules
+- Keep one authoritative Julia bridge at include/qtv/QTVJuliaBridge.hpp.
+- Preserve C++ as the production runtime authority.
+- Allow Julia only behind the QTV facade and deterministic fixture/parity hooks.
+- Never auto-promote from C++ preference to Julia.
+- Never call Julia directly from miner, session, packet, auth, or submit control flow.
+- Keep Julia-specific types out of broad runtime interfaces.

@@ -166,6 +166,8 @@ Supported deterministic cases:
 
 The matching C++ boundary is intentionally isolated in:
 
+- `include/qtv/QTVJuliaBridge.hpp`
+- `include/qtv/QTVEngineFacade.hpp`
 - `src/LLC/include/qtv_julia_bridge.h`
 - `src/LLC/include/qtv_engine.h`
 
@@ -173,6 +175,10 @@ These headers define a narrow adapter + backend surface:
 
 - `QTVJuliaBridge` — function-pointer adapter for `run_fixture` and
   `compare_parity`
+- `QTVBackendKind`, `QTVCapabilities` — deterministic backend selection and
+  safe fallback inputs
+- `QTVEngineFacade` — authoritative selection point that keeps Julia behind a
+  single bridge
 - `IQTVEngine` — swap-engine interface for fixture/parity execution
 - `CppQTVEngine`, `JuliaQTVEngine`, `NullQTVEngine` — explicit backends for
   native, Julia-backed, and disabled research modes
