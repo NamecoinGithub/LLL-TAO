@@ -288,7 +288,8 @@ namespace TAO
             if(nChannel == 1)
             {
                 std::vector<uint8_t> vData = Serialize();
-                return LLC::SK1024(vData.begin(), vData.end() - 8);
+                const auto nNonceOffset = static_cast<std::vector<uint8_t>::difference_type>(sizeof(nNonce));
+                return LLC::SK1024(vData.begin(), vData.end() - nNonceOffset);
             }
 
             /** Hashing template for GPU uses nVersion to nNonce **/

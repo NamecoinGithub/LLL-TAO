@@ -21,12 +21,14 @@ ________________________________________________________________________________
 
 namespace
 {
+    constexpr size_t PRIME_TEMPLATE_BYTES = 216;
+    constexpr size_t PRIME_NONCE_BYTES = sizeof(uint64_t);
+
     uint1024_t PrimeProofHashFromSerializedTemplate(const TAO::Ledger::Block& block)
     {
         std::vector<uint8_t> vData = block.Serialize();
-        REQUIRE(vData.size() == 216);
 
-        return LLC::SK1024(vData.begin(), vData.end() - 8);
+        return LLC::SK1024(vData.begin(), vData.end() - PRIME_NONCE_BYTES);
     }
 
     uint1024_t PrimeProofHashFromLegacyMemorySpan(const TAO::Ledger::Block& block)
@@ -218,6 +220,7 @@ TEST_CASE("Prime ProofHash uses miner-compatible serialized template bytes", "[l
 
     SECTION("Channel 1 ProofHash matches serialized template without nonce")
     {
+        REQUIRE(block.Serialize().size() == PRIME_TEMPLATE_BYTES);
         REQUIRE(block.ProofHash() == PrimeProofHashFromSerializedTemplate(block));
     }
 
