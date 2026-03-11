@@ -8,7 +8,7 @@ struct QTVCapabilities
 {
     bool cpp_backend_available = false;
     bool julia_bridge_available = false;
-    bool allow_cpp_fallback_from_julia = true;
+    bool allow_cpp_fallback_from_julia = false;
 
     bool Supports(const QTVBackendKind backend) const noexcept
     {
