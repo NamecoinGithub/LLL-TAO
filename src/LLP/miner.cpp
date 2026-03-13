@@ -1943,6 +1943,46 @@ namespace LLP
 
         debug::log(0, FUNCTION, "Miner subscribed to channel ", nChannel, " (", GetChannelName(nChannel), ")");
 
+        /* Write-ahead guard: persist session state before template push.
+         * Ensures recovery data is current if the node crashes or the connection
+         * drops between here and the actual template send. */
+        if(fMinerAuthenticated && !vMinerPubKey.empty())
+        {
+            const uint256_t hashKeyID = LLC::SK256(vMinerPubKey);
+            if(hashKeyID != 0)
+            {
+                const std::string strAddr = GetAddress().ToStringIP() + ":" +
+                                            std::to_string(GetAddress().GetPort());
+
+                MiningContext readyContext(
+                    nChannel,
+                    nBestHeight,
+                    runtime::unifiedtimestamp(),
+                    strAddr,
+                    1,   /* nProtocolVersion */
+                    fMinerAuthenticated,
+                    nSessionId,
+                    hashKeyID,
+                    hashGenesis
+                );
+
+                readyContext = readyContext
+                    .WithPubKey(vMinerPubKey)
+                    .WithProtocolLane(ProtocolLane::LEGACY);
+
+                if(fRewardBound)
+                    readyContext = readyContext.WithRewardAddress(hashRewardAddress);
+
+                if(fEncryptionReady && !vChaChaKey.empty())
+                    readyContext = readyContext.WithChaChaKey(vChaChaKey);
+
+                SessionRecoveryManager::Get().SaveSession(readyContext);
+
+                debug::log(2, FUNCTION, "MINER_READY: session saved before template push"
+                           " (keyID=", hashKeyID.SubString(), ")");
+            }
+        }
+
         /* Send immediate notification.
          * Force-bypass the push throttle — miner explicitly re-subscribed and needs
          * fresh work immediately regardless of when the previous push was sent.
