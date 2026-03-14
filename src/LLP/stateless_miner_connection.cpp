@@ -3367,29 +3367,16 @@ namespace LLP
             {
                 debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "🔬 === PRIME CHANNEL DIAGNOSTIC (Training Wheels Mode) ===", ANSI_COLOR_RESET);
                 
-                /* Calculate hashPrime (same calculation miner did) */
+                /* Calculate prime offsets via node derivation — matches upstream Nexusoft/LLL-TAO.
+                 * GetOffsets(GetPrime()) is called unconditionally; cross-validation against
+                 * miner-submitted vOffsets is NOT performed because GetOffsets() requires
+                 * PrimeCheck(hashPrime) to pass on the base value, which may not hold for all
+                 * valid Cunningham chain configurations (the chain may start above hashPrime).
+                 * VerifyWork() → GetPrimeDifficulty() validates the full chain downstream. */
+                TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
+
+                /* Retain hashPrime for diagnostic logging below. */
                 uint1024_t hashPrime = pBlock->GetPrime();
-                pBlock->vOffsets = vOffsets;
-                /* Cross-validate miner-submitted Prime offsets against node-derived offsets.
-                 * The Falcon signature already covers vOffsets, but this defence-in-depth
-                 * check catches any divergence between the miner and the node's prime derivation. */
-                if(!pBlock->vOffsets.empty())
-                {
-                    std::vector<uint8_t> vDerivedOffsets;
-                    TAO::Ledger::GetOffsets(hashPrime, vDerivedOffsets);
-                    if(vDerivedOffsets != pBlock->vOffsets)
-                    {
-                        debug::error(FUNCTION, "Prime vOffsets mismatch: miner-submitted (", pBlock->vOffsets.size(),
-                                     " bytes) != node-derived (", vDerivedOffsets.size(), " bytes) — BLOCK_REJECTED");
-                        return false;
-                    }
-                    debug::log(2, FUNCTION, "Prime vOffsets cross-validated OK (", pBlock->vOffsets.size(), " bytes)");
-                }
-                /* Preserve miner-submitted Prime offsets when present, but retain
-                 * the legacy local-derivation fallback for compact wrappers and
-                 * zero-offset Prime submissions. */
-                if(pBlock->vOffsets.empty())
-                    TAO::Ledger::GetOffsets(hashPrime, pBlock->vOffsets);
                 
                 debug::log(0, "📊 PRIME BASE CALCULATION:");
                 debug::log(0, "   ProofHash() = ", pBlock->ProofHash().ToString().substr(0, 64), "...");

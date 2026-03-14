@@ -880,7 +880,7 @@ TEST_CASE("T21: ChaCha20 failure diagnostic includes payload size", "[stateless_
  * GROUP 6 — Defence-in-Depth Gaps (T25–T28)
  * ══════════════════════════════════════════════════════════════════════ */
 
-TEST_CASE("T25: vOffsets cross-validation rejects mismatched offsets", "[stateless_miner_crypto][submit_block][voffsets]")
+TEST_CASE("T25: Node derives Prime vOffsets from GetPrime() — no miner cross-validation in sign_block", "[stateless_miner_crypto][submit_block][voffsets]")
 {
     /* Build a Prime payload with offsets {1,2,3,4,5} */
     std::vector<uint8_t> offsets = {1, 2, 3, 4, 5};
@@ -892,13 +892,17 @@ TEST_CASE("T25: vOffsets cross-validation rejects mismatched offsets", "[statele
     REQUIRE(result.nChannel == 1);
     REQUIRE(result.vOffsets == offsets);
 
-    /* Simulate cross-validation: miner-submitted offsets vs a mismatched node-derived set */
-    std::vector<uint8_t> vDerivedOffsets = {9, 9, 9};  /* Simulated mismatched derived offsets */
-    REQUIRE(result.vOffsets != vDerivedOffsets);         /* Cross-validation logic would return false */
+    /* sign_block now derives vOffsets via GetOffsets(GetPrime()) on the node side (upstream
+     * Nexusoft/LLL-TAO pattern).  Miner-submitted vOffsets are NOT cross-validated against
+     * node-derived offsets in sign_block; VerifyWork() validates the full chain downstream.
+     * Verify that the parsed miner offsets are distinct from an arbitrary node-derived set
+     * (illustrates what the old cross-validation was comparing — now removed). */
+    std::vector<uint8_t> vDerivedOffsets = {9, 9, 9};  /* Arbitrary set — different from miner submission */
+    REQUIRE(result.vOffsets != vDerivedOffsets);         /* They differ — but sign_block no longer rejects on this */
 
-    /* Verify that matching offsets pass the same check */
+    /* Verify that the parsed offsets round-trip correctly */
     std::vector<uint8_t> vMatchingOffsets = offsets;
-    REQUIRE(result.vOffsets == vMatchingOffsets);        /* Cross-validation logic would return true */
+    REQUIRE(result.vOffsets == vMatchingOffsets);        /* Parsed offsets match what was submitted */
 }
 
 

@@ -1520,36 +1520,18 @@ namespace LLP
             /* Update the block's timestamp. */
             pBlock->UpdateTime();
 
-            /* Enforce channel invariant before any diagnostic branch */
-            if(pBlock->nChannel != TAO::Ledger::CHANNEL::PRIME)
-                pBlock->vOffsets.clear();
-
             if(pBlock->nChannel == TAO::Ledger::CHANNEL::PRIME)
             {
-                pBlock->vOffsets = vOffsets;
-                /* Cross-validate miner-submitted Prime offsets against node-derived offsets.
-                 * The Falcon signature already covers vOffsets, but this defence-in-depth
-                 * check catches any divergence between the miner and the node's prime derivation. */
-                if(!pBlock->vOffsets.empty())
-                {
-                    std::vector<uint8_t> vDerivedOffsets;
-                    TAO::Ledger::GetOffsets(pBlock->GetPrime(), vDerivedOffsets);
-                    if(vDerivedOffsets != pBlock->vOffsets)
-                    {
-                        debug::error(FUNCTION, "Prime vOffsets mismatch: miner-submitted (", pBlock->vOffsets.size(),
-                                     " bytes) != node-derived (", vDerivedOffsets.size(), " bytes) — BLOCK_REJECTED");
-                        return false;
-                    }
-                    debug::log(2, FUNCTION, "Prime vOffsets cross-validated OK (", pBlock->vOffsets.size(), " bytes)");
-                }
-                /* Preserve miner-submitted Prime offsets when present, but retain
-                 * the legacy local-derivation fallback for compact wrappers and
-                 * zero-offset Prime submissions. */
-                if(pBlock->vOffsets.empty())
-                    TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
+                /* Calculate prime offsets before signing — matches upstream Nexusoft/LLL-TAO design.
+                 * The node always derives offsets from GetPrime() (ProofHash + nNonce).
+                 * Cross-validation against miner-submitted vOffsets is NOT performed here because
+                 * GetOffsets() requires PrimeCheck(hashPrime) to pass on the base value, which may
+                 * not hold for all valid Cunningham chain configurations (the chain may start above
+                 * hashPrime). VerifyWork() validates the full chain correctly downstream. */
+                TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
             }
             else
-                pBlock->vOffsets.clear();
+                pBlock->vOffsets.clear();  /* Enforce channel invariant: non-Prime blocks carry no offsets. */
 
             /* Unlock sigchain to create new block. */
             SecureString strPIN;
