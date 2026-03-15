@@ -2080,12 +2080,10 @@ namespace LLP
             }
         }
 
-        /* Derive ChaCha20 session key from genesis (for diagnostics only when pCrypto unavailable) */
-        std::vector<uint8_t> vChaChaKey;
-        if(!context.pCrypto || !context.pCrypto->HasSessionKey())
+        /* Key for diagnostic logging: use alias if available, otherwise derive from genesis */
+        std::vector<uint8_t> vChaChaKey = context.vChaChaKey;
+        if(vChaChaKey.empty())
             vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
-        else
-            vChaChaKey = context.vChaChaKey;  // Use alias for diagnostic logging
         const auto optRecoveredSession = SessionRecoveryManager::Get().RecoverSessionByIdentity(
             context.hashKeyID,
             context.strAddress
@@ -2206,18 +2204,19 @@ namespace LLP
         /* The MINER_SET_REWARD packet already proved the live session can decrypt with the
          * session-derived ChaCha20 key. Persist that same key into the authoritative
          * recovery container so a later lane switch keeps reward binding and
-         * decryption state attached to the same miner session. */
-        if(context.pCrypto && context.pCrypto->HasSessionKey())
+         * decryption state attached to the same miner session.
+         *
+         * IMPORTANT: When pCrypto is already valid (the common path), it is inherited via
+         * WithRewardAddress's copy-and-update — do NOT call WithChaChaKey here as that
+         * would create a new manager with nonce=0, breaking monotonic nonce safety.
+         * Only call WithChaChaKey when there is no pCrypto yet (first-time key setup). */
+        if(!context.pCrypto || !context.pCrypto->HasSessionKey())
         {
-            /* pCrypto is already inherited via WithRewardAddress copy — just ensure
-             * the deprecated vChaChaKey alias is also populated */
-            if(newContext.vChaChaKey.empty() && !vChaChaKey.empty())
+            if(!vChaChaKey.empty())
                 newContext = newContext.WithChaChaKey(vChaChaKey);
         }
-        else if(!vChaChaKey.empty())
-        {
-            newContext = newContext.WithChaChaKey(vChaChaKey);
-        }
+        /* When pCrypto is set, it is already inherited in newContext and vChaChaKey was
+         * set alongside it — no action needed to preserve either. */
 
         /* Update the context in StatelessMinerManager to persist the change */
         StatelessMinerManager::Get().UpdateMiner(context.strAddress, newContext, 0);

@@ -267,11 +267,18 @@ namespace LLP
 
         if(fEncryptionReady && !vChaCha20Key.empty())
         {
-            /* WithChaChaKey will create pCrypto automatically */
-            context = context.WithChaChaKey(vChaCha20Key);
-            /* Override pCrypto with the saved manager if it has a key (preserves nonce counter) */
             if(pCrypto && pCrypto->HasSessionKey())
-                context = context.WithCrypto(pCrypto);
+            {
+                /* Restore with saved manager directly — preserves the nonce counter.
+                 * WithChaChaKey sets vChaChaKey (deprecated alias) then WithCrypto
+                 * replaces the new manager with the saved one. */
+                context = context.WithChaChaKey(vChaCha20Key).WithCrypto(pCrypto);
+            }
+            else
+            {
+                /* No saved manager: create one from the stored key bytes */
+                context = context.WithChaChaKey(vChaCha20Key);
+            }
         }
 
         return context;
