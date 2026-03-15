@@ -454,8 +454,13 @@ namespace LLP
         uint32_t             nSessionId = 0;     // Session ID derived from Falcon key hash
 
         /* ChaCha20 encryption state (established after Falcon auth) */
-        std::vector<uint8_t> vChaChaKey;         // ChaCha20 session key
-        bool                 fEncryptionReady;   // ChaCha20 encryption established
+        std::vector<uint8_t> vChaChaKey;         // ChaCha20 session key (deprecated alias: use pCrypto)
+        bool                 fEncryptionReady;   // ChaCha20 encryption established (deprecated alias: use pCrypto)
+
+        /* ChaCha20EvpManager: centralized crypto lifecycle object for this session (PR: ChaCha20EvpManager).
+         * Owns the session key, monotonic nonce counter, and typed decrypt helpers.
+         * Created alongside vChaChaKey whenever fEncryptionReady transitions to true. */
+        std::shared_ptr<LLC::ChaCha20EvpManager> pCrypto;
 
         /* Reward address binding (can be different from genesis!) */
         uint256_t            hashRewardAddress;  // Where to send mining rewards

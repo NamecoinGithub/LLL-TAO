@@ -104,6 +104,9 @@ namespace LLP
                 resolved.vChaCha20Key = liveContext.vChaChaKey;
                 resolved.fEncryptionReady = true;
                 resolved.hashChaCha20Key = uint256_t(liveContext.vChaChaKey);
+                /* Carry forward the EvpManager from the live context when available */
+                if(liveContext.pCrypto && liveContext.pCrypto->HasSessionKey())
+                    resolved.pCrypto = liveContext.pCrypto;
             }
 
             if(!liveContext.vDisposablePubKey.empty())
@@ -234,6 +237,9 @@ namespace LLP
             vChaCha20Key = context.vChaChaKey;
             fEncryptionReady = true;
             hashChaCha20Key = uint256_t(context.vChaChaKey);
+            /* Propagate the EvpManager if available — enables immediate decrypt on reconnect */
+            if(context.pCrypto && context.pCrypto->HasSessionKey())
+                pCrypto = context.pCrypto;
         }
     }
 
@@ -260,7 +266,13 @@ namespace LLP
             context = context.WithRewardAddress(hashRewardAddress);
 
         if(fEncryptionReady && !vChaCha20Key.empty())
+        {
+            /* WithChaChaKey will create pCrypto automatically */
             context = context.WithChaChaKey(vChaCha20Key);
+            /* Override pCrypto with the saved manager if it has a key (preserves nonce counter) */
+            if(pCrypto && pCrypto->HasSessionKey())
+                context = context.WithCrypto(pCrypto);
+        }
 
         return context;
     }
@@ -305,7 +317,7 @@ namespace LLP
         if(fRewardBound && hashRewardAddress == 0)
             return SessionConsistencyResult::RewardBoundMissingHash;
 
-        if(fEncryptionReady && vChaCha20Key.empty())
+        if(fEncryptionReady && vChaCha20Key.empty() && (!pCrypto || !pCrypto->HasSessionKey()))
             return SessionConsistencyResult::EncryptionReadyMissingKey;
 
         return SessionConsistencyResult::Ok;

@@ -823,6 +823,10 @@ namespace LLP
                     {
                         vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(hashGenesis);
                         fEncryptionReady = true;
+
+                        /* Create ChaCha20EvpManager for this connection */
+                        pCrypto = std::make_shared<LLC::ChaCha20EvpManager>();
+                        pCrypto->SetSessionKey(vChaChaKey);
                     }
 
                     /* Update the context with the ChaCha20 key before sending to manager.
@@ -834,7 +838,10 @@ namespace LLP
                     MiningContext updatedContext = result.context;
                     if(fEncryptionReady && !vChaChaKey.empty())
                     {
-                        updatedContext = updatedContext.WithChaChaKey(vChaChaKey);
+                        if(pCrypto)
+                            updatedContext = updatedContext.WithCrypto(pCrypto);
+                        else
+                            updatedContext = updatedContext.WithChaChaKey(vChaChaKey);
                     }
 
                     if(updatedContext.fAuthenticated && updatedContext.nSessionId != 0)
@@ -2050,7 +2057,10 @@ namespace LLP
            PACKET.DATA.size() >= FalconConstants::SUBMIT_BLOCK_WRAPPER_MIN)
         {
             std::vector<uint8_t> vDecrypted;
-            if(LLC::DecryptPayloadChaCha20(PACKET.DATA, vChaChaKey, vDecrypted))
+            const bool fDecOk = (pCrypto && pCrypto->HasSessionKey())
+                ? pCrypto->DecryptSubmitBlock(PACKET.DATA, vDecrypted)
+                : LLC::DecryptPayloadChaCha20(PACKET.DATA, vChaChaKey, vDecrypted);
+            if(fDecOk)
             {
                 debug::log(2, FUNCTION, "SUBMIT_BLOCK: ChaCha20 decryption succeeded");
                 vWorkData = std::move(vDecrypted);

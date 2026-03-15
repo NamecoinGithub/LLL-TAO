@@ -387,6 +387,28 @@ namespace LLP
         MiningContext c = *this;
         c.vChaChaKey = vKey_;
         c.fEncryptionReady = !vKey_.empty();
+
+        /* Create a ChaCha20EvpManager loaded with the new key */
+        if(!vKey_.empty())
+        {
+            auto pMgr = std::make_shared<LLC::ChaCha20EvpManager>();
+            pMgr->SetSessionKey(vKey_);
+            c.pCrypto = pMgr;
+        }
+        else
+        {
+            c.pCrypto.reset();
+        }
+
+        return c;
+    }
+
+    MiningContext MiningContext::WithCrypto(std::shared_ptr<LLC::ChaCha20EvpManager> pCrypto_) const
+    {
+        MiningContext c = *this;
+        c.pCrypto = pCrypto_;
+        /* Keep deprecated aliases in sync */
+        c.fEncryptionReady = (pCrypto_ && pCrypto_->HasSessionKey());
         return c;
     }
 
@@ -475,7 +497,7 @@ namespace LLP
         if(fRewardBound && hashRewardAddress == 0)
             return SessionConsistencyResult::RewardBoundMissingHash;
 
-        if(fEncryptionReady && vChaChaKey.empty())
+        if(fEncryptionReady && vChaChaKey.empty() && (!pCrypto || !pCrypto->HasSessionKey()))
             return SessionConsistencyResult::EncryptionReadyMissingKey;
 
         return SessionConsistencyResult::Ok;
@@ -1949,25 +1971,56 @@ namespace LLP
     }
 
 
-    /* Decrypts reward address payload using ChaCha20-Poly1305 */
+    /* Decrypts reward address payload using ChaCha20-Poly1305.
+     * Delegates to context.pCrypto when available; falls back to raw key derivation. */
     bool StatelessMiner::DecryptRewardPayload(
+        const MiningContext& context,
         const std::vector<uint8_t>& vEncrypted,
-        const std::vector<uint8_t>& vKey,
         std::vector<uint8_t>& vPlaintext
     )
     {
-        /* Use LLC helper with domain-specific AAD for AEAD authentication */
+        /* Use pCrypto when available — preferred path */
+        if(context.pCrypto && context.pCrypto->HasSessionKey())
+            return context.pCrypto->DecryptRewardAddress(vEncrypted, vPlaintext);
+
+        /* Fallback: derive key from genesis and use the LLC helper */
+        if(context.hashGenesis == 0)
+        {
+            debug::error(FUNCTION, "DecryptRewardPayload: no pCrypto and no genesis for key derivation");
+            return false;
+        }
+
+        const std::vector<uint8_t> vKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
         return LLC::DecryptPayloadChaCha20(vEncrypted, vKey, vPlaintext, AAD_REWARD_ADDRESS);
     }
 
 
-    /* Encrypts reward result response using ChaCha20-Poly1305 */
+    /* Encrypts reward result response using ChaCha20-Poly1305.
+     * Delegates to context.pCrypto when available; falls back to raw key derivation. */
     std::vector<uint8_t> StatelessMiner::EncryptRewardResult(
-        const std::vector<uint8_t>& vPlaintext,
-        const std::vector<uint8_t>& vKey
+        const MiningContext& context,
+        const std::vector<uint8_t>& vPlaintext
     )
     {
-        /* Use LLC helper with domain-specific AAD for AEAD authentication */
+        /* Use pCrypto when available — preferred path */
+        if(context.pCrypto && context.pCrypto->HasSessionKey())
+        {
+            const auto result = context.pCrypto->EncryptRewardResult(vPlaintext);
+            if(result.success)
+                return result.data;
+
+            debug::error(FUNCTION, "pCrypto->EncryptRewardResult failed: ", result.error_message);
+            return std::vector<uint8_t>();
+        }
+
+        /* Fallback: derive key from genesis and use the LLC helper */
+        if(context.hashGenesis == 0)
+        {
+            debug::error(FUNCTION, "EncryptRewardResult: no pCrypto and no genesis for key derivation");
+            return std::vector<uint8_t>();
+        }
+
+        const std::vector<uint8_t> vKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
         return LLC::EncryptPayloadChaCha20(vPlaintext, vKey, AAD_REWARD_RESULT);
     }
 
@@ -2027,8 +2080,12 @@ namespace LLP
             }
         }
 
-        /* Derive ChaCha20 session key from genesis */
-        std::vector<uint8_t> vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
+        /* Derive ChaCha20 session key from genesis (for diagnostics only when pCrypto unavailable) */
+        std::vector<uint8_t> vChaChaKey;
+        if(!context.pCrypto || !context.pCrypto->HasSessionKey())
+            vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
+        else
+            vChaChaKey = context.vChaChaKey;  // Use alias for diagnostic logging
         const auto optRecoveredSession = SessionRecoveryManager::Get().RecoverSessionByIdentity(
             context.hashKeyID,
             context.strAddress
@@ -2037,9 +2094,9 @@ namespace LLP
         const bool fRecoveryGenesisMatches = fRecoveredSessionState &&
             optRecoveredSession->hashGenesis == context.hashGenesis;
 
-        /* Decrypt the payload */
+        /* Decrypt the payload — delegates to pCrypto when available */
         std::vector<uint8_t> vDecrypted;
-        if(!DecryptRewardPayload(packet.DATA, vChaChaKey, vDecrypted))
+        if(!DecryptRewardPayload(context, packet.DATA, vDecrypted))
         {
             debug::error(FUNCTION, "Failed to decrypt reward address payload");
             debug::log(0, FUNCTION, "REWARD BINDING DIAGNOSTIC");
@@ -2057,7 +2114,7 @@ namespace LLP
             
             /* Build encrypted error response */
             std::vector<uint8_t> vErrorMsg = {0x00};  // Failure status
-            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(vErrorMsg, vChaChaKey);
+            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context, vErrorMsg);
             
             StatelessPacket errorResponse(REWARD_RESULT);
             errorResponse.DATA = vEncryptedError;
@@ -2073,7 +2130,7 @@ namespace LLP
             debug::error(FUNCTION, "Invalid reward address payload size: ", vDecrypted.size(), " (expected 32)");
             
             std::vector<uint8_t> vErrorMsg = {0x00};
-            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(vErrorMsg, vChaChaKey);
+            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context, vErrorMsg);
             
             StatelessPacket errorResponse(REWARD_RESULT);
             errorResponse.DATA = vEncryptedError;
@@ -2133,7 +2190,7 @@ namespace LLP
             debug::error(FUNCTION, "Invalid reward address");
             
             std::vector<uint8_t> vErrorMsg = {0x00};
-            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(vErrorMsg, vChaChaKey);
+            std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context, vErrorMsg);
             
             StatelessPacket errorResponse(REWARD_RESULT);
             errorResponse.DATA = vEncryptedError;
@@ -2150,8 +2207,17 @@ namespace LLP
          * session-derived ChaCha20 key. Persist that same key into the authoritative
          * recovery container so a later lane switch keeps reward binding and
          * decryption state attached to the same miner session. */
-        if(!vChaChaKey.empty())
+        if(context.pCrypto && context.pCrypto->HasSessionKey())
+        {
+            /* pCrypto is already inherited via WithRewardAddress copy — just ensure
+             * the deprecated vChaChaKey alias is also populated */
+            if(newContext.vChaChaKey.empty() && !vChaChaKey.empty())
+                newContext = newContext.WithChaChaKey(vChaChaKey);
+        }
+        else if(!vChaChaKey.empty())
+        {
             newContext = newContext.WithChaChaKey(vChaChaKey);
+        }
 
         /* Update the context in StatelessMinerManager to persist the change */
         StatelessMinerManager::Get().UpdateMiner(context.strAddress, newContext, 0);
@@ -2182,7 +2248,7 @@ namespace LLP
 
         /* Build success response (encrypted) */
         std::vector<uint8_t> vSuccessMsg = {0x01};  // Success status
-        std::vector<uint8_t> vEncryptedSuccess = EncryptRewardResult(vSuccessMsg, vChaChaKey);
+        std::vector<uint8_t> vEncryptedSuccess = EncryptRewardResult(newContext, vSuccessMsg);
         
         StatelessPacket response(StatelessOpcodes::REWARD_RESULT);
         response.DATA = vEncryptedSuccess;

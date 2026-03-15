@@ -22,6 +22,7 @@ ________________________________________________________________________________
 #include <LLC/types/uint1024.h>
 #include <TAO/Ledger/types/block.h>
 #include <LLC/include/flkey.h>
+#include <LLC/include/chacha20_evp_manager.h>
 #include <Util/include/hex.h>
 
 #include <algorithm>
@@ -551,8 +552,14 @@ namespace LLP
         bool fRewardBound;           // Whether reward address has been set
 
         /* ChaCha20 encryption state for secure communication */
-        std::vector<uint8_t> vChaChaKey; // ChaCha20 session key derived from genesis
-        bool fEncryptionReady;           // Whether ChaCha20 encryption is established
+        std::vector<uint8_t> vChaChaKey; // ChaCha20 session key derived from genesis (deprecated alias: use pCrypto)
+        bool fEncryptionReady;           // Whether ChaCha20 encryption is established (deprecated alias: use pCrypto)
+
+        /* ChaCha20EvpManager: centralized crypto lifecycle object for this session.
+         * Owns the session key, monotonic nonce counter, and typed encrypt/decrypt helpers.
+         * Supersedes the raw vChaChaKey / fEncryptionReady fields.
+         * Set via WithChaChaKey() or WithCrypto(). */
+        std::shared_ptr<LLC::ChaCha20EvpManager> pCrypto;
 
         /* Falcon version tracking */
         LLC::FalconVersion nFalconVersion;      // Detected Falcon version (512 or 1024)
@@ -852,11 +859,23 @@ namespace LLP
          *  Returns a new context with updated ChaCha20 encryption key.
          *  CRITICAL: This ensures encryption state is synchronized between
          *  Miner connection and StatelessMinerManager.
+         *  Also creates a ChaCha20EvpManager (pCrypto) loaded with this key.
          *
          *  @param[in] vKey_ The ChaCha20 session key
          *
          **/
         MiningContext WithChaChaKey(const std::vector<uint8_t>& vKey_) const;
+
+        /** WithCrypto
+         *
+         *  Returns a new context with an externally-constructed ChaCha20EvpManager.
+         *  Use when the caller has already created and loaded the manager.
+         *  Also updates vChaChaKey / fEncryptionReady for backward-compat aliases.
+         *
+         *  @param[in] pCrypto_ Shared pointer to the loaded ChaCha20EvpManager
+         *
+         **/
+        MiningContext WithCrypto(std::shared_ptr<LLC::ChaCha20EvpManager> pCrypto_) const;
 
         /** WithFalconVersion
          *
@@ -1249,33 +1268,35 @@ namespace LLP
         /** DecryptRewardPayload
          *
          *  Decrypts reward address payload using ChaCha20-Poly1305.
+         *  Delegates to context.pCrypto when available; falls back to raw key derivation.
          *
+         *  @param[in] context  Current miner state (provides pCrypto or hashGenesis for KDF)
          *  @param[in] vEncrypted The encrypted payload (nonce + ciphertext + tag)
-         *  @param[in] vKey The ChaCha20 session key
          *  @param[out] vPlaintext The decrypted data
          *
          *  @return True if decryption succeeded
          *
          **/
         static bool DecryptRewardPayload(
+            const MiningContext& context,
             const std::vector<uint8_t>& vEncrypted,
-            const std::vector<uint8_t>& vKey,
             std::vector<uint8_t>& vPlaintext
         );
 
         /** EncryptRewardResult
          *
          *  Encrypts reward result response using ChaCha20-Poly1305.
+         *  Delegates to context.pCrypto when available; falls back to raw key derivation.
          *
+         *  @param[in] context  Current miner state (provides pCrypto or hashGenesis for KDF)
          *  @param[in] vPlaintext The data to encrypt
-         *  @param[in] vKey The ChaCha20 session key
          *
          *  @return Encrypted payload (nonce + ciphertext + tag)
          *
          **/
         static std::vector<uint8_t> EncryptRewardResult(
-            const std::vector<uint8_t>& vPlaintext,
-            const std::vector<uint8_t>& vKey
+            const MiningContext& context,
+            const std::vector<uint8_t>& vPlaintext
         );
 
         /** ValidateRewardAddress

@@ -1299,16 +1299,25 @@ namespace LLP
                                 debug::log(0, "🔓 CHACHA20 DECRYPTION:");
                                 debug::log(0, "   Encrypted payload size: ", PACKET.DATA.size(), " bytes");
                                 
-                                /* Decrypt using ChaCha20-Poly1305 helper
+                                /* Decrypt using ChaCha20-Poly1305.
                                  * Note: No AAD (Additional Authenticated Data) is used here because
                                  * the entire SUBMIT_BLOCK packet is encrypted as-is without domain separation.
                                  * Unlike MINER_SET_REWARD which uses AAD for context binding, SUBMIT_BLOCK
-                                 * encrypts the complete payload for transport-layer confidentiality. */
-                                bool fDecrypted = LLC::DecryptPayloadChaCha20(
-                                    PACKET.DATA,
-                                    context.vChaChaKey,
-                                    decryptedData
-                                );
+                                 * encrypts the complete payload for transport-layer confidentiality.
+                                 * Use pCrypto when available; fall back to the raw key helper otherwise. */
+                                bool fDecrypted = false;
+                                if(context.pCrypto && context.pCrypto->HasSessionKey())
+                                {
+                                    fDecrypted = context.pCrypto->DecryptSubmitBlock(PACKET.DATA, decryptedData);
+                                }
+                                else
+                                {
+                                    fDecrypted = LLC::DecryptPayloadChaCha20(
+                                        PACKET.DATA,
+                                        context.vChaChaKey,
+                                        decryptedData
+                                    );
+                                }
                                 
                                 if(!fDecrypted)
                                 {
@@ -1480,7 +1489,10 @@ namespace LLP
                             {
                                 /* Fallback: legacy Falcon wrapper [merkle][nonce][timestamp][sig_len][signature] */
                                 std::vector<uint8_t> decryptedData;
-                                if(!LLC::DecryptPayloadChaCha20(PACKET.DATA, context.vChaChaKey, decryptedData))
+                                const bool fDecLegacy = (context.pCrypto && context.pCrypto->HasSessionKey())
+                                    ? context.pCrypto->DecryptSubmitBlock(PACKET.DATA, decryptedData)
+                                    : LLC::DecryptPayloadChaCha20(PACKET.DATA, context.vChaChaKey, decryptedData);
+                                if(!fDecLegacy)
                                 {
                                     const auto optRecovery = SessionRecoveryManager::Get().RecoverSessionByIdentity(
                                         context.hashKeyID,

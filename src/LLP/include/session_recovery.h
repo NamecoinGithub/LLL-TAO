@@ -62,6 +62,11 @@ namespace LLP
         std::vector<uint8_t> vDisposablePubKey; // Disposable Falcon session public key
         uint256_t hashDisposableKeyID;          // Disposable Falcon session key ID
 
+        /** ChaCha20EvpManager: saved session crypto object for cross-lane recovery.
+         *  When non-null and HasSessionKey(), restored MiningContext will have a fully
+         *  loaded pCrypto that can decrypt SUBMIT_BLOCK immediately without re-auth. */
+        std::shared_ptr<LLC::ChaCha20EvpManager> pCrypto;
+
         /** Default Constructor **/
         MinerSessionContainer();
 
