@@ -2050,7 +2050,7 @@ namespace LLP
         const NodeCryptoMode mode = GetNodeCryptoMode();
         if(mode == NodeCryptoMode::EVP && nSessionId == 0)
         {
-            debug::error(FUNCTION, "REWARD_RESULT (0xD0D6) EVP build reject mode=evp sid=", nSessionId,
+            debug::error(FUNCTION, "REWARD_RESULT (0xD0D6) EVP build reject: session-bound mode requires non-zero sid",
                          " result_reason=", RewardResultBuildReasonString(RewardResultBuildReason::AUTHENTICATED_SID_ZERO));
             return std::vector<uint8_t>();
         }
@@ -2070,9 +2070,10 @@ namespace LLP
             const size_t nExpectedMinLen = MinEncryptedFrameBytes(mode);
             const size_t nExpectedLen = EncryptedOverheadBytes(mode) + vPlaintext.size();
             assert(nExpectedMinLen >= MIN_ENVELOPE_HEADER_BYTES);
+            assert(nExpectedLen >= nExpectedMinLen);
             RewardResultBuildReason nBuildReason = RewardResultBuildReason::OK;
             RewardResultEvpReason nReason = RewardResultEvpReason::OK;
-            if(vEncrypted.size() != nExpectedLen || vEncrypted.size() < nExpectedMinLen)
+            if(vEncrypted.size() != nExpectedLen)
             {
                 nReason = RewardResultEvpReason::FRAME_TOO_SHORT;
                 nBuildReason = RewardResultBuildReason::FRAME_LENGTH_MISMATCH;

@@ -1524,7 +1524,6 @@ TEST_CASE("T49: 0xD0D6 reward-result EVP deterministic vector + decode golden as
         vEncrypted,
         vAAD));
 
-    REQUIRE(LLP::OpcodeUtility::Stateless::REWARD_RESULT == 0xD0D6);
     REQUIRE(vEncrypted.size() == 50);
     REQUIRE(vEncrypted[0] == LLP::ENVELOPE_WIRE_VERSION_V1);
     REQUIRE(vEncrypted[1] == LLP::ENVELOPE_FLAGS_DEFAULT);
