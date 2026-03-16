@@ -1357,7 +1357,8 @@ TEST_CASE("T44: 0xD0D6 reward-result EVP decode succeeds with canonical envelope
     config::mapArgs["-crypto_mode"] = "evp";
 
     std::vector<uint8_t> vKey(32, 0xB1);
-    std::vector<uint8_t> vPayload{0x01};
+    std::vector<uint8_t> vPayload(16, 0x00);
+    vPayload[0] = 0x01;
     std::vector<uint8_t> vEncrypted;
     std::vector<uint8_t> vDecrypted;
     std::vector<uint8_t> vAAD{'R','E','W','A','R','D','_','R','E','S','U','L','T'};
@@ -1366,6 +1367,15 @@ TEST_CASE("T44: 0xD0D6 reward-result EVP decode succeeds with canonical envelope
     LLP::SessionKeyLifecycle::EstablishSession(TEST_SESSION_ID, vKey);
     const uint64_t nGenerationBefore = LLP::SessionKeyLifecycle::SessionGeneration(TEST_SESSION_ID);
     REQUIRE(LLP::PacketCryptoService::Encode(TEST_SESSION_ID, TEST_MESSAGE_TYPE, vKey, vPayload, vEncrypted, vAAD));
+    REQUIRE(vEncrypted.size() == 50);
+    REQUIRE(vEncrypted[0] == LLP::ENVELOPE_WIRE_VERSION_V1);
+    REQUIRE(vEncrypted[1] == LLP::ENVELOPE_FLAGS_DEFAULT);
+    const uint32_t nEncodedSid =
+        static_cast<uint32_t>(vEncrypted[2]) |
+        (static_cast<uint32_t>(vEncrypted[3]) << 8) |
+        (static_cast<uint32_t>(vEncrypted[4]) << 16) |
+        (static_cast<uint32_t>(vEncrypted[5]) << 24);
+    REQUIRE(nEncodedSid == TEST_SESSION_ID);
     REQUIRE(LLP::StatelessMiner::DecryptRewardResult(TEST_SESSION_ID, vEncrypted, vKey, vDecrypted, &nReason));
     REQUIRE(nReason == LLP::RewardResultEvpReason::OK);
     REQUIRE(vDecrypted == vPayload);
@@ -1455,9 +1465,146 @@ TEST_CASE("T47: 0xD0D6 reward-result legacy decode remains unchanged", "[statele
     LLP::RewardResultEvpReason nReason = LLP::RewardResultEvpReason::DECRYPT_FAILED;
 
     REQUIRE(LLP::PacketCryptoService::Encode(TEST_SESSION_ID, TEST_MESSAGE_TYPE, vKey, vPayload, vEncrypted, vAAD));
+    REQUIRE(vEncrypted.size() == LLP::EncryptedOverheadBytes(LLP::NodeCryptoMode::LEGACY) + vPayload.size());
     REQUIRE(LLP::StatelessMiner::DecryptRewardResult(TEST_SESSION_ID, vEncrypted, vKey, vDecrypted, &nReason));
     REQUIRE(nReason == LLP::RewardResultEvpReason::OK);
     REQUIRE(vDecrypted == vPayload);
 
+    config::mapArgs = mapOriginalArgs;
+}
+
+
+TEST_CASE("T48: 0xD0D6 reward-result EVP encode rejects sid=0 and preserves diagnostics", "[stateless_miner_crypto][crypto_mode][evp][reward_result]")
+{
+    const auto mapOriginalArgs = config::mapArgs;
+    config::mapArgs["-crypto_mode"] = "evp";
+
+    uint256_t hashGenesis;
+    hashGenesis.SetHex("8c2cf304e1bb28f03a88c2b5b412a120c58b9dbd40e0e0f38b9dc8ec94c6e2ac");
+    LLP::MiningContext context = LLP::MiningContext()
+        .WithAuth(true)
+        .WithSession(0)
+        .WithGenesis(hashGenesis);
+
+    LLP::StatelessPacket packet(LLP::OpcodeUtility::Stateless::SET_REWARD);
+    packet.DATA = {0x00, 0x01, 0x02};
+    packet.LENGTH = static_cast<uint32_t>(packet.DATA.size());
+
+    LLP::ProcessResult result = LLP::StatelessMiner::ProcessPacket(context, packet);
+    REQUIRE(result.fSuccess);
+    REQUIRE_FALSE(result.response.IsNull());
+    REQUIRE(result.response.HEADER == LLP::OpcodeUtility::Stateless::REWARD_RESULT);
+    REQUIRE(result.response.DATA.empty());
+
+    config::mapArgs = mapOriginalArgs;
+}
+
+
+TEST_CASE("T49: 0xD0D6 reward-result EVP deterministic vector + decode golden assertions", "[stateless_miner_crypto][crypto_mode][evp][reward_result][golden]")
+{
+    static constexpr uint32_t TEST_SESSION_ID = 0x44332211;
+    const auto mapOriginalArgs = config::mapArgs;
+    config::mapArgs["-crypto_mode"] = "evp";
+
+    std::vector<uint8_t> vKey(32, 0xB6);
+    std::vector<uint8_t> vPayload(16, 0x00);
+    vPayload[0] = 0x01;
+    vPayload[1] = 0x7F;
+    std::vector<uint8_t> vEncrypted;
+    std::vector<uint8_t> vDecrypted;
+    std::vector<uint8_t> vAAD{'R','E','W','A','R','D','_','R','E','S','U','L','T'};
+    LLP::RewardResultEvpReason nReason = LLP::RewardResultEvpReason::DECRYPT_FAILED;
+
+    LLP::SessionKeyLifecycle::EstablishSession(TEST_SESSION_ID, vKey);
+    REQUIRE(LLP::PacketCryptoService::Encode(
+        TEST_SESSION_ID,
+        LLP::OpcodeUtility::Stateless::REWARD_RESULT,
+        vKey,
+        vPayload,
+        vEncrypted,
+        vAAD));
+
+    REQUIRE(LLP::OpcodeUtility::Stateless::REWARD_RESULT == 0xD0D6);
+    REQUIRE(vEncrypted.size() == 50);
+    REQUIRE(vEncrypted[0] == LLP::ENVELOPE_WIRE_VERSION_V1);
+    REQUIRE(vEncrypted[1] == LLP::ENVELOPE_FLAGS_DEFAULT);
+
+    const std::vector<uint8_t> vExpectedSid{
+        static_cast<uint8_t>(TEST_SESSION_ID & 0xFF),
+        static_cast<uint8_t>((TEST_SESSION_ID >> 8) & 0xFF),
+        static_cast<uint8_t>((TEST_SESSION_ID >> 16) & 0xFF),
+        static_cast<uint8_t>((TEST_SESSION_ID >> 24) & 0xFF)};
+    REQUIRE(std::equal(vExpectedSid.begin(), vExpectedSid.end(), vEncrypted.begin() + 2));
+
+    const std::vector<uint8_t> vExpectedNonce{0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    REQUIRE(std::equal(vExpectedNonce.begin(), vExpectedNonce.end(), vEncrypted.begin() + 6));
+
+    REQUIRE(LLP::StatelessMiner::DecryptRewardResult(TEST_SESSION_ID, vEncrypted, vKey, vDecrypted, &nReason));
+    REQUIRE(nReason == LLP::RewardResultEvpReason::OK);
+    REQUIRE(vDecrypted == vPayload);
+
+    LLP::SessionKeyLifecycle::TeardownSession(TEST_SESSION_ID);
+    config::mapArgs = mapOriginalArgs;
+}
+
+
+TEST_CASE("T50: EVP auth -> set_reward -> reward_result emits canonical 0xD0D6 envelope", "[stateless_miner_crypto][crypto_mode][evp][reward_result][integration]")
+{
+    static constexpr uint32_t TEST_SESSION_ID = 3105;
+    const auto mapOriginalArgs = config::mapArgs;
+    config::mapArgs["-crypto_mode"] = "evp";
+
+    uint256_t hashGenesis;
+    hashGenesis.SetHex("8c2cf304e1bb28f03a88c2b5b412a120c58b9dbd40e0e0f38b9dc8ec94c6e2ac");
+    std::vector<uint8_t> vKey = LLC::MiningSessionKeys::DeriveChaCha20Key(hashGenesis);
+    std::vector<uint8_t> vRewardPayload(32, 0xAB);
+    std::vector<uint8_t> vEncryptedRewardPayload;
+    std::vector<uint8_t> vDecryptedResult;
+    std::vector<uint8_t> vRewardAAD{'R','E','W','A','R','D','_','A','D','D','R','E','S','S'};
+    LLP::RewardResultEvpReason nReason = LLP::RewardResultEvpReason::DECRYPT_FAILED;
+
+    LLP::SessionKeyLifecycle::EstablishSession(TEST_SESSION_ID, vKey);
+
+    REQUIRE(LLP::PacketCryptoService::Encode(
+        TEST_SESSION_ID,
+        LLP::OpcodeUtility::Stateless::SET_REWARD,
+        vKey,
+        vRewardPayload,
+        vEncryptedRewardPayload,
+        vRewardAAD));
+
+    LLP::MiningContext context = LLP::MiningContext()
+        .WithAuth(true)
+        .WithSession(TEST_SESSION_ID)
+        .WithGenesis(hashGenesis);
+
+    LLP::StatelessPacket packet(LLP::OpcodeUtility::Stateless::SET_REWARD);
+    packet.DATA = vEncryptedRewardPayload;
+    packet.LENGTH = static_cast<uint32_t>(packet.DATA.size());
+
+    LLP::ProcessResult result = LLP::StatelessMiner::ProcessPacket(context, packet);
+    REQUIRE(result.fSuccess);
+    REQUIRE_FALSE(result.response.IsNull());
+    REQUIRE(result.response.HEADER == LLP::OpcodeUtility::Stateless::REWARD_RESULT);
+    REQUIRE(result.response.DATA.size() == 50);
+
+    const uint32_t nEncodedSid =
+        static_cast<uint32_t>(result.response.DATA[2]) |
+        (static_cast<uint32_t>(result.response.DATA[3]) << 8) |
+        (static_cast<uint32_t>(result.response.DATA[4]) << 16) |
+        (static_cast<uint32_t>(result.response.DATA[5]) << 24);
+    REQUIRE(nEncodedSid == TEST_SESSION_ID);
+
+    REQUIRE(LLP::StatelessMiner::DecryptRewardResult(
+        TEST_SESSION_ID,
+        result.response.DATA,
+        vKey,
+        vDecryptedResult,
+        &nReason));
+    REQUIRE(nReason == LLP::RewardResultEvpReason::OK);
+    REQUIRE(vDecryptedResult.size() == 16);
+    REQUIRE(vDecryptedResult[0] == 0x01);
+
+    LLP::SessionKeyLifecycle::TeardownSession(TEST_SESSION_ID);
     config::mapArgs = mapOriginalArgs;
 }

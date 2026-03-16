@@ -63,6 +63,8 @@ namespace LLP
         using Diagnostics::PassFail;
         static constexpr size_t MIN_ENVELOPE_HEADER_BYTES =
             WIRE_VERSION_BYTES + CRYPTO_FLAGS_BYTES + SESSION_ID_BYTES;
+        static constexpr size_t REWARD_RESULT_LEGACY_PLAINTEXT_BYTES = 1;
+        static constexpr size_t REWARD_RESULT_EVP_PLAINTEXT_BYTES = 16;
 
         /* EVP wire header layout: [version(1)][flags(1)][session_id(4 LE)]...
          * Session binding is validated from bytes [2..5] in little-endian order. */
@@ -73,6 +75,42 @@ namespace LLP
                    (static_cast<uint32_t>(vEncrypted[3]) << 8) |
                    (static_cast<uint32_t>(vEncrypted[4]) << 16) |
                    (static_cast<uint32_t>(vEncrypted[5]) << 24);
+        }
+
+        enum class RewardResultBuildReason : uint8_t
+        {
+            OK = 0,
+            AUTHENTICATED_SID_ZERO,
+            ENCRYPT_FAILED,
+            FRAME_LENGTH_MISMATCH,
+            FLAGS_MISMATCH,
+            SESSION_MISMATCH
+        };
+
+        const char* RewardResultBuildReasonString(const RewardResultBuildReason reason)
+        {
+            switch(reason)
+            {
+                case RewardResultBuildReason::OK:                    return "OK";
+                case RewardResultBuildReason::AUTHENTICATED_SID_ZERO:return "AUTHENTICATED_SID_ZERO";
+                case RewardResultBuildReason::ENCRYPT_FAILED:        return "ENCRYPT_FAILED";
+                case RewardResultBuildReason::FRAME_LENGTH_MISMATCH: return "FRAME_LENGTH_MISMATCH";
+                case RewardResultBuildReason::FLAGS_MISMATCH:        return "FLAGS_MISMATCH";
+                case RewardResultBuildReason::SESSION_MISMATCH:      return "SESSION_MISMATCH";
+            }
+
+            return "UNKNOWN";
+        }
+
+        std::vector<uint8_t> BuildRewardResultPayload(const bool fSuccess, const NodeCryptoMode mode)
+        {
+            const size_t nPayloadSize = (mode == NodeCryptoMode::EVP)
+                ? REWARD_RESULT_EVP_PLAINTEXT_BYTES
+                : REWARD_RESULT_LEGACY_PLAINTEXT_BYTES;
+
+            std::vector<uint8_t> vPayload(nPayloadSize, 0x00);
+            vPayload[0] = fSuccess ? 0x01 : 0x00;
+            return vPayload;
         }
 
         static const char* const SESSION_CONSISTENCY_RESULT_STRINGS[] =
@@ -2009,33 +2047,57 @@ namespace LLP
         const std::vector<uint8_t>& vKey
     )
     {
+        const NodeCryptoMode mode = GetNodeCryptoMode();
+        if(mode == NodeCryptoMode::EVP && nSessionId == 0)
+        {
+            debug::error(FUNCTION, "REWARD_RESULT (0xD0D6) EVP build reject mode=evp sid=", nSessionId,
+                         " result_reason=", RewardResultBuildReasonString(RewardResultBuildReason::AUTHENTICATED_SID_ZERO));
+            return std::vector<uint8_t>();
+        }
+
         std::vector<uint8_t> vEncrypted;
         if(!PacketCryptoService::Encode(
             nSessionId, static_cast<uint16_t>(REWARD_RESULT), vKey, vPlaintext, vEncrypted, AAD_REWARD_RESULT))
         {
+            debug::error(FUNCTION, "REWARD_RESULT (0xD0D6) build failed sid=", nSessionId,
+                         " mode=", NodeCryptoModeString(mode),
+                         " result_reason=", RewardResultBuildReasonString(RewardResultBuildReason::ENCRYPT_FAILED));
             return std::vector<uint8_t>();
         }
 
-        if(GetNodeCryptoMode() == NodeCryptoMode::EVP)
+        if(mode == NodeCryptoMode::EVP)
         {
-            const size_t nExpectedMinLen = MinEncryptedFrameBytes(NodeCryptoMode::EVP);
+            const size_t nExpectedMinLen = MinEncryptedFrameBytes(mode);
+            const size_t nExpectedLen = EncryptedOverheadBytes(mode) + vPlaintext.size();
             assert(nExpectedMinLen >= MIN_ENVELOPE_HEADER_BYTES);
+            RewardResultBuildReason nBuildReason = RewardResultBuildReason::OK;
             RewardResultEvpReason nReason = RewardResultEvpReason::OK;
-            if(vEncrypted.size() < nExpectedMinLen)
+            if(vEncrypted.size() != nExpectedLen || vEncrypted.size() < nExpectedMinLen)
+            {
                 nReason = RewardResultEvpReason::FRAME_TOO_SHORT;
+                nBuildReason = RewardResultBuildReason::FRAME_LENGTH_MISMATCH;
+            }
             else if(vEncrypted[1] != ENVELOPE_FLAGS_DEFAULT)
+            {
                 nReason = RewardResultEvpReason::FLAGS_MISMATCH;
+                nBuildReason = RewardResultBuildReason::FLAGS_MISMATCH;
+            }
             else
             {
                 const uint32_t nEnvelopeSessionId = ExtractEnvelopeSessionId(vEncrypted);
                 if(nEnvelopeSessionId != nSessionId)
+                {
                     nReason = RewardResultEvpReason::SESSION_MISMATCH;
+                    nBuildReason = RewardResultBuildReason::SESSION_MISMATCH;
+                }
             }
 
             debug::log(2, FUNCTION, "REWARD_RESULT (0xD0D6) EVP frame validation mode=evp sid=", nSessionId,
                        " expected_min_len=", nExpectedMinLen,
+                       " expected_len=", nExpectedLen,
                        " actual_len=", vEncrypted.size(),
-                       " result_reason=", RewardResultEvpReasonString(nReason));
+                       " result_reason=", RewardResultEvpReasonString(nReason),
+                       " build_reason=", RewardResultBuildReasonString(nBuildReason));
 
             if(nReason != RewardResultEvpReason::OK)
                 return std::vector<uint8_t>();
@@ -2173,6 +2235,8 @@ namespace LLP
             }
         }
 
+        const NodeCryptoMode cryptoMode = GetNodeCryptoMode();
+
         /* Derive ChaCha20 session key from genesis */
         std::vector<uint8_t> vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(context.hashGenesis);
         const auto optRecoveredSession = SessionRecoveryManager::Get().RecoverSessionByIdentity(
@@ -2202,7 +2266,7 @@ namespace LLP
             debug::log(0, FUNCTION, "- consistency result: FAIL");
             
             /* Build encrypted error response */
-            std::vector<uint8_t> vErrorMsg = {0x00};  // Failure status
+            std::vector<uint8_t> vErrorMsg = BuildRewardResultPayload(false, cryptoMode);
             std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context.nSessionId, vErrorMsg, vChaChaKey);
             
             StatelessPacket errorResponse(REWARD_RESULT);
@@ -2218,7 +2282,7 @@ namespace LLP
         {
             debug::error(FUNCTION, "Invalid reward address payload size: ", vDecrypted.size(), " (expected 32)");
             
-            std::vector<uint8_t> vErrorMsg = {0x00};
+            std::vector<uint8_t> vErrorMsg = BuildRewardResultPayload(false, cryptoMode);
             std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context.nSessionId, vErrorMsg, vChaChaKey);
             
             StatelessPacket errorResponse(REWARD_RESULT);
@@ -2278,7 +2342,7 @@ namespace LLP
         {
             debug::error(FUNCTION, "Invalid reward address");
             
-            std::vector<uint8_t> vErrorMsg = {0x00};
+            std::vector<uint8_t> vErrorMsg = BuildRewardResultPayload(false, cryptoMode);
             std::vector<uint8_t> vEncryptedError = EncryptRewardResult(context.nSessionId, vErrorMsg, vChaChaKey);
             
             StatelessPacket errorResponse(REWARD_RESULT);
@@ -2327,7 +2391,7 @@ namespace LLP
         debug::log(1, FUNCTION, "  Consistency result: ", PassFail(fExistingRewardMatches && (!fRecoveredSessionState || fRecoveryGenesisMatches)));
 
         /* Build success response (encrypted) */
-        std::vector<uint8_t> vSuccessMsg = {0x01};  // Success status
+        std::vector<uint8_t> vSuccessMsg = BuildRewardResultPayload(true, cryptoMode);
         std::vector<uint8_t> vEncryptedSuccess = EncryptRewardResult(context.nSessionId, vSuccessMsg, vChaChaKey);
 
         const bool fRewardResultSessionInvariant = (newContext.nSessionId == context.nSessionId);
