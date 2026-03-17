@@ -1813,6 +1813,9 @@ namespace LLP
                         context.hashGenesis.SubString(8), pTritium->nChannel, true, "");
                 }
 
+                /* Look up the block entry for reward calculation and detailed logging */
+                auto it = mapBlocks.find(hashMerkle);
+
                 /* Notify local pool if enabled */
                 if(PoolDiscovery::IsLocalPoolEnabled() && context.hashGenesis != 0)
                 {
@@ -1820,7 +1823,6 @@ namespace LLP
                     
                     /* Calculate reward for block found notification */
                     uint64_t nReward = 0;
-                    auto it = mapBlocks.find(hashMerkle);
                     if(it != mapBlocks.end() && it->second.pBlock)
                     {
                         /* Get previous block state for reward calculation */
