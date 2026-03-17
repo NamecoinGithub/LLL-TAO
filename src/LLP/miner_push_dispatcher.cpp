@@ -12,11 +12,16 @@
 ____________________________________________________________________________________________*/
 
 #include <LLP/include/miner_push_dispatcher.h>
+#include <LLP/include/channel_template_cache.h>
 #include <LLP/include/global.h>
+
+#include <LLC/types/uint1024.h>
 
 #include <Util/include/debug.h>
 #include <Util/include/config.h>
+#include <thread>
 #include <vector>
+
 namespace LLP
 {
 
@@ -87,6 +92,18 @@ namespace LLP
                                                       std::memory_order_release,
                                                       std::memory_order_relaxed))
             {
+                /* Proactively rebuild the Prime channel template cache BEFORE sending
+                 * push notifications.  By the time miners receive the notification and
+                 * poll GET_BLOCK, the rebuild may already be complete so they get a
+                 * cached template with zero additional new_block() calls.
+                 *
+                 * Reward address is uint256_t(0) → CreateBlock() falls back to the
+                 * autologin user genesis (same default as per-connection new_block()).
+                 * Runs on a detached thread so SetBest() is never blocked. */
+                std::thread([]{
+                    GetChannelCache(1).Rebuild(uint256_t(0));
+                }).detach();
+
                 BroadcastChannel(1 /* Prime */, nHeight, hashPrefix4);
             }
             else if (nOldPrime == nNewKey)
@@ -105,6 +122,11 @@ namespace LLP
                                                      std::memory_order_release,
                                                      std::memory_order_relaxed))
             {
+                /* Same proactive rebuild for the Hash channel. */
+                std::thread([]{
+                    GetChannelCache(2).Rebuild(uint256_t(0));
+                }).detach();
+
                 BroadcastChannel(2 /* Hash */, nHeight, hashPrefix4);
             }
             else if (nOldHash == nNewKey)
