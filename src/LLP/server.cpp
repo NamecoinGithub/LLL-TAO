@@ -28,6 +28,9 @@ ________________________________________________________________________________
 
 #include <LLP/include/trust_address.h>
 #include <LLP/include/auto_cooldown_manager.h>
+#include <LLP/include/stateless_manager.h>
+#include <LLP/include/node_session_registry.h>
+#include <LLP/include/node_cache.h>
 
 #include <Util/include/args.h>
 #include <Util/include/signals.h>
@@ -1204,6 +1207,24 @@ namespace LLP
             if(CLEANUP_TIMER.Elapsed() >= 60)
             {
                 AutoCooldownManager::Get().CleanupExpired();
+
+                /* Mining-server periodic maintenance: evict idle sessions and dead registry
+                 * entries so the miner table doesn't grow unbounded and dead sessions cannot
+                 * interfere with reconnect logic.  Only compiled/run for mining protocol types.
+                 * If a new mining protocol type is added, add it to the disjunction below so
+                 * its Meter() thread also participates in maintenance. */
+                if constexpr (std::is_same_v<ProtocolType, StatelessMinerConnection> ||
+                              std::is_same_v<ProtocolType, Miner>)
+                {
+                    StatelessMinerManager::Get().CleanupInactive();
+                    StatelessMinerManager::Get().PurgeInactiveMiners();
+                    /* SweepExpired removes registry entries whose ports have all been dead
+                     * for longer than SESSION_LIVENESS_TIMEOUT_SECONDS (24 h).  This is the
+                     * correct timeout here: if no port has reconnected within the same window
+                     * that a keepalive is required, the miner is assumed gone. */
+                    NodeSessionRegistry::Get().SweepExpired(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
+                }
+
                 CLEANUP_TIMER.Reset();
             }
         }

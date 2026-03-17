@@ -433,6 +433,21 @@ namespace LLP
                 {
                     ColinMiningAgent::Get().on_miner_disconnected(hashGenesis.SubString(8));
                 }
+
+                /* Mark this protocol lane as disconnected in NodeSessionRegistry.
+                 * This allows IsExpired() to start the inactivity timer, so SweepExpired()
+                 * can eventually reclaim the entry if the miner does not reconnect. */
+                if(nSessionId != 0)
+                {
+                    auto optEntry = NodeSessionRegistry::Get().Lookup(nSessionId);
+                    if(optEntry.has_value() && optEntry->hashKeyID != 0)
+                    {
+                        NodeSessionRegistry::Get().MarkDisconnected(optEntry->hashKeyID, ProtocolLane::LEGACY);
+                        debug::log(2, FUNCTION, "Marked legacy lane disconnected for sessionId=",
+                                   nSessionId, " keyId=", optEntry->hashKeyID.SubString());
+                    }
+                }
+
                 return;
             }
         }
@@ -549,8 +564,14 @@ namespace LLP
 
                 MiningContext sessionContext = optContext.value();
                 uint64_t nNow = runtime::unifiedtimestamp();
+                /* Use SESSION_LIVENESS_TIMEOUT_SECONDS (24h) for session liveness decisions.
+                 * This is intentionally separate from NodeCache::GetPurgeTimeout() (7 days),
+                 * which governs cache eviction.  Using the purge timeout here would allow
+                 * sessions to accumulate in the manager for up to 7 days without a keepalive,
+                 * and would cause IsSessionExpired() to return false for sessions that are
+                 * effectively dead from a mining perspective. */
                 const uint32_t nExpirySeconds =
-                    static_cast<uint32_t>(NodeCache::GetPurgeTimeout(sessionContext.strAddress));
+                    static_cast<uint32_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
 
                 sessionContext = sessionContext
                     .WithTimestamp(nNow)
@@ -842,8 +863,11 @@ namespace LLP
                     if(updatedContext.fAuthenticated && updatedContext.nSessionId != 0)
                     {
                         uint64_t nNow = runtime::unifiedtimestamp();
+                        /* Use SESSION_LIVENESS_TIMEOUT_SECONDS (24h) for session liveness decisions.
+                         * This is intentionally separate from NodeCache::GetPurgeTimeout() (7 days),
+                         * which governs cache eviction. */
                         const uint32_t nExpirySeconds =
-                            static_cast<uint32_t>(NodeCache::GetPurgeTimeout(updatedContext.strAddress));
+                            static_cast<uint32_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
 
                         if(updatedContext.nSessionStart == 0)
                             updatedContext = updatedContext.WithSessionStart(nNow);
