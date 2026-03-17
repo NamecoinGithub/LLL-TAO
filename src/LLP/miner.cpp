@@ -2153,6 +2153,10 @@ namespace LLP
 
         TAO::Ledger::TritiumBlock* pTritium = nullptr;
 
+        /* Holds the deep-copied cross-lane block so pTritium remains valid
+         * for the rest of this scope without mutating the shared session-store template. */
+        std::unique_ptr<TAO::Ledger::TritiumBlock> pCrossLaneCopy;
+
         if(fLocalBlock)
         {
             /* Local path: sign_block mutates the block in-place via mapBlocks */
@@ -2167,20 +2171,26 @@ namespace LLP
         else
         {
             /* Cross-lane path: template was issued on the stateless port (9323) and
-             * submitted here on the legacy port (8323).  Apply nonce/offsets directly
-             * to the shared_ptr<Block> copy from the session store.
+             * submitted here on the legacy port (8323).  Deep-copy the template so
+             * nonce/offsets are applied to a local copy, not the shared session-store object.
              * NOTE: This channel-dispatch logic mirrors the cross-lane path in
              * StatelessMinerConnection::ProcessPacket (SUBMIT_BLOCK handler). */
             debug::log(1, FUNCTION, "SIM-LINK cross-lane SUBMIT_BLOCK resolved: session=",
                        nCrossLaneSessionId, " merkle=", hashMerkle.SubString());
 
-            pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(spCrossLane.get());
-            if(!pTritium)
+            TAO::Ledger::TritiumBlock* pCrossRaw =
+                dynamic_cast<TAO::Ledger::TritiumBlock*>(spCrossLane.get());
+            if(!pCrossRaw)
             {
                 debug::error(FUNCTION, "SIM-LINK cross-lane block is not a TritiumBlock");
                 respond(BLOCK_REJECTED);
                 return true;
             }
+
+            /* Deep-copy: Clone() returns a heap-allocated TritiumBlock*.
+             * All subsequent mutations apply to this local copy only. */
+            pCrossLaneCopy.reset(pCrossRaw->Clone());
+            pTritium = pCrossLaneCopy.get();
 
             if(pTritium->nChannel == TAO::Ledger::CHANNEL::PRIME)
             {
