@@ -25,6 +25,7 @@ ________________________________________________________________________________
 #include <LLP/include/push_notification.h>
 #include <LLP/include/keepalive_v2.h>
 #include <LLP/include/session_status.h>
+#include <LLP/include/channel_template_cache.h>
 #include <LLP/types/miner.h>
 #include <LLP/templates/events.h>
 #include <LLP/templates/ddos.h>
@@ -1799,34 +1800,72 @@ namespace LLP
         {
             LOCK(MUTEX);
 
-            /* Create a new block */
-            pBlock = new_block();
+            /* Register reward address for future server-level cache rebuilds. */
+            if(hashRewardAddress != uint256_t(0))
+                ChannelTemplateCache::ForChannel(nChannel).StoreRewardAddress(hashRewardAddress);
 
-            /* Handle if the block failed to be created — retry once in case chain advanced mid-creation */
-            if(!pBlock)
+            /* Server-level cache fast path: check for a pre-built template that matches
+             * this miner's channel and reward address before calling new_block(). */
             {
-                debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                std::shared_ptr<TAO::Ledger::TritiumBlock> pCached;
+                if(hashRewardAddress != uint256_t(0))
+                {
+                    pCached = ChannelTemplateCache::ForChannel(nChannel)
+                                  .GetCurrentForReward(hashRewardAddress);
+                }
+
+                if(pCached)
+                {
+                    /* Cache hit: clone for per-connection mapBlocks. */
+                    const uint64_t nHits = ++g_channel_cache_hits_total;
+                    debug::log(2, FUNCTION, "metric channel_cache_hits_total=", nHits);
+                    debug::log(2, FUNCTION, "🏎️  GET_BLOCK (legacy lane) served from server-level cache");
+
+                    pBlock = new TAO::Ledger::TritiumBlock(*pCached);
+
+                    /* Store in mapBlocks and mapBlockHashes for SUBMIT_BLOCK lookup. */
+                    mapBlocks[pBlock->hashMerkleRoot]      = pBlock;
+                    mapBlockHashes[pBlock->hashMerkleRoot] = TAO::Ledger::ChainState::hashBestChain.load();
+
+                    vData = pBlock->Serialize();
+                }
+            }
+
+            if(pBlock == nullptr)
+            {
+                /* Cache miss — create a new block the normal way. */
+                const uint64_t nMisses = ++g_channel_cache_misses_total;
+                debug::log(2, FUNCTION, "metric channel_cache_misses_total=", nMisses);
+
+                /* Create a new block */
                 pBlock = new_block();
+
+                /* Handle if the block failed to be created — retry once in case chain advanced mid-creation */
+                if(!pBlock)
+                {
+                    debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                    pBlock = new_block();
+                }
+
+                if(!pBlock)
+                {
+                    debug::log(2, FUNCTION, "Failed to create block after retry.");
+                    respond(BLOCK_REJECTED,
+                        BuildGetBlockControlPayload(GetBlockPolicyReason::INTERNAL_RETRY,
+                        MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS));
+                    return true;
+                }
+
+                /* Store the new block in the memory map of recent blocks being worked on. */
+                mapBlocks[pBlock->hashMerkleRoot] = pBlock;
+
+                /* Snapshot hashBestChain alongside the block for hash-based staleness detection.
+                 * This catches same-height reorgs that nBestHeight cannot detect. */
+                mapBlockHashes[pBlock->hashMerkleRoot] = TAO::Ledger::ChainState::hashBestChain.load();
+
+                /* Serialize the block vData */
+                vData = pBlock->Serialize();
             }
-
-            if(!pBlock)
-            {
-                debug::log(2, FUNCTION, "Failed to create block after retry.");
-                respond(BLOCK_REJECTED,
-                    BuildGetBlockControlPayload(GetBlockPolicyReason::INTERNAL_RETRY,
-                    MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS));
-                return true;
-            }
-
-            /* Store the new block in the memory map of recent blocks being worked on. */
-            mapBlocks[pBlock->hashMerkleRoot] = pBlock;
-
-            /* Snapshot hashBestChain alongside the block for hash-based staleness detection.
-             * This catches same-height reorgs that nBestHeight cannot detect. */
-            mapBlockHashes[pBlock->hashMerkleRoot] = TAO::Ledger::ChainState::hashBestChain.load();
-
-            /* Serialize the block vData */
-            vData = pBlock->Serialize();
         }
 
         /* Build 12-byte metadata prefix + 216-byte block = 228 bytes total.

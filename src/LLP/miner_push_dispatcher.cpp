@@ -12,6 +12,7 @@
 ____________________________________________________________________________________________*/
 
 #include <LLP/include/miner_push_dispatcher.h>
+#include <LLP/include/channel_template_cache.h>
 #include <LLP/include/global.h>
 
 #include <Util/include/debug.h>
@@ -61,6 +62,28 @@ namespace LLP
                    " hash=", std::hex, hashPrefix4, std::dec,
                    " | Stateless=", nStateless, " Legacy=", nLegacy,
                    " | no duplicates (one send per miner per lane)");
+
+        /* Pre-build the server-level template for this channel so that the next
+         * GET_BLOCK request is served from cache with near-zero latency.
+         * Uses the most-recently registered miner reward address for this channel.
+         * If no miner has authenticated yet (node startup), the cache remains empty
+         * and GET_BLOCK falls through to per-connection new_block() as before. */
+        const uint256_t hashCacheReward =
+            ChannelTemplateCache::ForChannel(nChannel).GetLastRewardAddress();
+
+        if(hashCacheReward != uint256_t(0))
+        {
+            debug::log(1, FUNCTION, "[PUSH][", strChannel,
+                       "] Triggering server-level template rebuild"
+                       " (reward=", hashCacheReward.SubString(8), ")");
+            ChannelTemplateCache::ForChannel(nChannel).Rebuild(nChannel, hashCacheReward);
+        }
+        else
+        {
+            debug::log(1, FUNCTION, "[PUSH][", strChannel,
+                       "] No reward address registered yet — skipping pre-build"
+                       " (first miner GET_BLOCK will populate cache)");
+        }
     }
 
 

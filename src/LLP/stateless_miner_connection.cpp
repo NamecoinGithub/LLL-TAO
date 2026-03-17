@@ -27,6 +27,7 @@ ________________________________________________________________________________
 #include <LLP/include/push_notification.h>
 #include <LLP/include/mining_constants.h>
 #include <LLP/include/session_status.h>
+#include <LLP/include/channel_template_cache.h>
 #include <LLP/templates/events.h>
 
 #include <TAO/Ledger/include/create.h>
@@ -867,37 +868,112 @@ namespace LLP
                 debug::log(2, FUNCTION, "Invariant: authenticated + in-budget + channel set → BLOCK_DATA MUST follow");
                 debug::log(0, "   ✅ Validation passed");
 
-                /* CRITICAL: Release MUTEX before new_block() — new_block() acquires MUTEX internally.
-                 * std::mutex is non-recursive; holding lk and calling new_block() causes a deadlock. */
-                lk.unlock();
-
-                debug::log(0, "   Calling new_block()...");
+                /* Register this miner's reward address for future server-level cache rebuilds.
+                 * Called on every GET_BLOCK so the cache always knows the most-recently active
+                 * reward address for this channel, even before the first push-triggered Rebuild(). */
+                if(context.hashRewardAddress != uint256_t(0))
+                {
+                    ChannelTemplateCache::ForChannel(context.nChannel)
+                        .StoreRewardAddress(context.hashRewardAddress);
+                }
 
                 /* Track GET_BLOCK response latency for observability. */
                 const auto tGetBlockStart = std::chrono::steady_clock::now();
 
-                /* Create a new block */
-                TAO::Ledger::Block* pBlock = new_block();
+                /* Acquire block for this request.
+                 *
+                 * FAST PATH  — server-level ChannelTemplateCache:
+                 *   If the cache holds a valid (non-stale) pre-built template whose reward
+                 *   address matches this miner, clone it for this connection's mapBlocks entry
+                 *   and skip the expensive new_block() call entirely.  This is the steady-state
+                 *   path for pool miners: zero ledger reads, zero wallet I/O.
+                 *
+                 * SLOW PATH  — per-connection new_block():
+                 *   Cache miss (startup, reward-address mismatch, or post-rebuild race).
+                 *   Requires releasing MUTEX (new_block() re-acquires it internally). */
+                TAO::Ledger::Block* pBlock = nullptr;
+                int64_t nGetBlockLatencyMs = 0;
 
-                /* Handle if the block failed to be created. */
-                if(!pBlock)
                 {
-                    /* Chain may have advanced during template creation — retry once with fresh chain state */
-                    debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
-                    pBlock = new_block();
+                    std::shared_ptr<TAO::Ledger::TritiumBlock> pCached;
+                    if(context.hashRewardAddress != uint256_t(0))
+                    {
+                        pCached = ChannelTemplateCache::ForChannel(context.nChannel)
+                                      .GetCurrentForReward(context.hashRewardAddress);
+                    }
+
+                    if(pCached)
+                    {
+                        /* ── Cache hit ── */
+                        const uint64_t nHits = ++g_channel_cache_hits_total;
+                        debug::log(2, FUNCTION, "metric channel_cache_hits_total=", nHits);
+                        debug::log(2, FUNCTION, "🏎️  GET_BLOCK served from server-level cache"
+                                   " — skipping new_block() (zero ledger overhead)");
+
+                        /* Clone the cached block so each connection has its own mapBlocks entry.
+                         * TritiumBlock has a copy constructor.  The clone costs a single heap
+                         * allocation plus memcopy of a ~216-byte struct and a few std::vector
+                         * members — negligible compared to a full new_block() call. */
+                        pBlock = new TAO::Ledger::TritiumBlock(*pCached);
+
+                        /* Add to per-connection mapBlocks under the held MUTEX so that
+                         * SUBMIT_BLOCK can look up the template by merkle root.
+                         * TemplateMetadata takes ownership of pBlock via unique_ptr. */
+                        {
+                            const uint64_t nCT = runtime::unifiedtimestamp();
+                            const uint32_t nUH =
+                                static_cast<uint32_t>(TAO::Ledger::ChainState::nBestHeight.load());
+                            uint32_t nCH = 0;
+                            TAO::Ledger::BlockState stCh = TAO::Ledger::ChainState::tStateBest.load();
+                            if(TAO::Ledger::GetLastState(stCh, pBlock->nChannel))
+                                nCH = stCh.nChannelHeight;
+                            mapBlocks[pBlock->hashMerkleRoot] = TemplateMetadata(
+                                pBlock, nCT, nUH, nCH,
+                                pBlock->hashMerkleRoot, pBlock->nChannel,
+                                TAO::Ledger::ChainState::hashBestChain.load());
+                        }
+                        /* pBlock is a raw observer pointer into mapBlocks; valid while
+                         * lk (MUTEX) is held and the mapBlocks entry exists. */
+                    }
+                    else
+                    {
+                        /* ── Cache miss — fall through to per-connection new_block() ── */
+                        const uint64_t nMisses = ++g_channel_cache_misses_total;
+                        debug::log(2, FUNCTION, "metric channel_cache_misses_total=", nMisses);
+                        debug::log(0, "   Cache miss — calling new_block()...");
+                    }
                 }
 
-                const auto tGetBlockEnd = std::chrono::steady_clock::now();
-                const auto nGetBlockLatencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    tGetBlockEnd - tGetBlockStart).count();
-                debug::log(2, FUNCTION, "metric get_block_response_latency_ms=", nGetBlockLatencyMs);
+                if(pBlock == nullptr)
+                {
+                    /* CRITICAL: Release MUTEX before new_block() — new_block() acquires MUTEX
+                     * internally.  std::mutex is non-recursive; holding lk causes deadlock. */
+                    lk.unlock();
+
+                    /* Create a new block */
+                    pBlock = new_block();
+
+                    /* Handle if the block failed to be created. */
+                    if(!pBlock)
+                    {
+                        /* Chain may have advanced during template creation — retry once */
+                        debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once"
+                                   " (chain may have advanced mid-creation)");
+                        pBlock = new_block();
+                    }
+
+                    const auto tGetBlockEnd = std::chrono::steady_clock::now();
+                    nGetBlockLatencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        tGetBlockEnd - tGetBlockStart).count();
+                    debug::log(2, FUNCTION, "metric get_block_response_latency_ms=", nGetBlockLatencyMs);
+
+                    /* Re-acquire MUTEX for respond() and context mutations */
+                    lk.lock();
+                }
 
                 /* Bounded deadline: if template build exceeded 500ms and failed,
                  * return TEMPLATE_REBUILD_IN_PROGRESS so caller retries quickly. */
                 constexpr int64_t GET_BLOCK_DEADLINE_MS = 500;
-
-                /* Re-acquire MUTEX for respond() and context mutations */
-                lk.lock();
 
                 if(!pBlock)
                 {
