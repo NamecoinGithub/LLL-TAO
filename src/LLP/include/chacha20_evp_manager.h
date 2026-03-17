@@ -213,6 +213,19 @@ namespace LLP
         std::string ModeString() const;
 
 
+        /** prune_expired_sessions
+         *
+         *  Remove any internally cached session material for sessions no longer
+         *  present in the live miner map. Called from
+         *  StatelessMinerManager::CleanupSessionScopedMaps() after each cleanup
+         *  cycle so that any future per-session key store stays bounded.
+         *
+         *  @param[in] live_session_ids  Set of session IDs still active in mapMiners.
+         *
+         **/
+        void prune_expired_sessions(const std::vector<uint32_t>& live_session_ids);
+
+
     private:
 
         /** Default constructor — private; use Get(). **/

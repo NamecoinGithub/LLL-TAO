@@ -174,4 +174,16 @@ namespace LLP
         }
     }
 
+
+    /* Prune any cached session material for sessions no longer in the live miner map */
+    void Chacha20EvpManager::prune_expired_sessions([[maybe_unused]] const std::vector<uint32_t>& live_session_ids)
+    {
+        /* The current implementation delegates all per-session key material to the
+         * LLC helpers (keys are held by MiningContext, not the manager). There is no
+         * internal session key store to prune at this time. This method exists as the
+         * stable hook point: if a future version adds an internal session key cache,
+         * it should iterate that cache here and remove any entry whose session ID is
+         * not found in live_session_ids. */
+    }
+
 } // namespace LLP
