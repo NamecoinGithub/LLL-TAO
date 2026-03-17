@@ -1562,6 +1562,10 @@ namespace LLP
 
                 TAO::Ledger::TritiumBlock* pTritium = nullptr;
 
+                /* Holds the deep-copied cross-lane block so pTritium remains valid
+                 * for the rest of this scope without mutating the shared session-store template. */
+                std::unique_ptr<TAO::Ledger::TritiumBlock> pCrossLaneCopy;
+
                 if(!fCrossLane)
                 {
                     debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   ✓ Found original template (wallet-signed)", ANSI_COLOR_RESET);
@@ -1644,17 +1648,24 @@ namespace LLP
                 } /* end if(!fCrossLane) */
                 else
                 {
-                    /* Cross-lane path: apply nonce/offsets directly to the session-store copy.
+                    /* Cross-lane path: deep-copy the template so nonce/offsets are applied
+                     * to a local copy, not the shared session-store object.
                      * NOTE: This channel-dispatch logic mirrors the cross-lane path in
                      * Miner::handle_submit_block_stateless (miner.cpp). */
-                    pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(spCrossLaneHolder.get());
-                    if(!pTritium)
+                    TAO::Ledger::TritiumBlock* pCrossRaw =
+                        dynamic_cast<TAO::Ledger::TritiumBlock*>(spCrossLaneHolder.get());
+                    if(!pCrossRaw)
                     {
                         debug::error(FUNCTION, "❌ SIM-LINK cross-lane block is not a TritiumBlock");
                         StatelessPacket response(STATELESS_BLOCK_REJECTED);
                         respond(response);
                         return true;
                     }
+
+                    /* Deep-copy: Clone() returns a heap-allocated TritiumBlock*.
+                     * All subsequent mutations apply to this local copy only. */
+                    pCrossLaneCopy.reset(pCrossRaw->Clone());
+                    pTritium = pCrossLaneCopy.get();
 
                     if(pTritium->nChannel == TAO::Ledger::CHANNEL::PRIME)
                     {
