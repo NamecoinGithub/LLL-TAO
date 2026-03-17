@@ -15,6 +15,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/global.h>
 #include <LLP/include/graceful_shutdown.h>
+#include <LLP/include/chacha20_evp_manager.h>
 #include <LLP/include/mining_config.h>
 #include <LLP/include/mining_server_factory.h>
 #include <LLP/include/network.h>
@@ -263,6 +264,11 @@ namespace LLP
         /* This server repurposes miningport as the canonical stateless miner LLP port */
         if(config::GetBoolArg(std::string("-mining"), false) && !config::fClient.load())
         {
+            /* Initialize transport encryption mode for both mining lanes before any
+             * miner connection is accepted. Must complete before server construction.
+             * @see src/LLP/include/chacha20_evp_manager.h */
+            Chacha20EvpManager::Get().Initialize();
+
             /* Load and validate mining configuration before starting server */
             if(!LoadMiningConfig())
             {

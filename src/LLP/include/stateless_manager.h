@@ -34,6 +34,10 @@ ________________________________________________________________________________
 /* Forward declaration to avoid including block.h in manager header */
 namespace TAO { namespace Ledger { class Block; } }
 
+/* Forward declaration: Chacha20EvpManager is the transport encryption gate for both lanes.
+ * @see src/LLP/include/chacha20_evp_manager.h */
+namespace LLP { class Chacha20EvpManager; }
+
 namespace LLP
 {
     /** MinerInfo
@@ -530,6 +534,9 @@ namespace LLP
          * miner session is simultaneously active on both the legacy (8323) and
          * stateless (9323) lanes, sharing a single rate-limit budget and block
          * template store across both connection threads.
+         *
+         * Transport encryption for both lanes is gated through Chacha20EvpManager.
+         * @see src/LLP/include/chacha20_evp_manager.h
          * ═══════════════════════════════════════════════════════════════════════ */
 
         /** GetSessionRateLimiter
