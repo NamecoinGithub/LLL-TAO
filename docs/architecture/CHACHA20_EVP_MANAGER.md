@@ -164,3 +164,32 @@ conflict resolution logic and `IsEvpActive()`/`IsTlsActive()` invariant remain.
 - `src/LLP/stateless_miner.cpp` — `DecryptRewardPayload` / `EncryptRewardResult`
 - `src/LLP/stateless_miner_connection.cpp` — SUBMIT_BLOCK decrypt call sites
 - `docs/architecture/SIMLINK_DUAL_LANE_ARCHITECTURE.md` — dual-lane overview
+
+---
+
+## Follow-Up Work
+
+The items below track wiring work completed in the PR that followed PR #417.
+
+### ✅ Completed (this PR)
+
+| Item | Location | Status |
+|------|----------|--------|
+| SESSION_STATUS incoming decrypt | `stateless_miner_connection.cpp` | ✅ Done — graceful fallback to plaintext |
+| SESSION_STATUS_ACK outgoing encrypt | `stateless_miner_connection.cpp` | ✅ Done — MITM hardening for SessionID packets |
+| SESSION_KEEPALIVE response encrypt | `stateless_miner.cpp::ProcessSessionKeepalive` | ✅ Done |
+| KEEPALIVE_V2_ACK response encrypt | `stateless_miner.cpp::ProcessKeepaliveV2` | ✅ Done |
+| `DecryptRewardPayload` EVP gate | `stateless_miner.cpp` | ✅ Done — `IsEvpActive()` guard added |
+| `EncryptRewardResult` EVP gate | `stateless_miner.cpp` | ✅ Done — `IsEvpActive()` guard added |
+| `prune_expired_sessions()` method | `chacha20_evp_manager.h` / `.cpp` | ✅ Done — stable hook; no-op until session key store added |
+| `prune_expired_sessions` tie-in | `stateless_manager.cpp::CleanupSessionScopedMaps` | ✅ Done |
+
+### 🔲 Remaining / Future
+
+| Item | Notes |
+|------|-------|
+| SUBMIT_BLOCK decrypt | Currently uses `LLC::DecryptPayloadChaCha20` directly — acceptable (constraint 7) |
+| GET_BLOCK / BLOCK_DATA body encryption | Template data; high-volume — low MITM risk; future work |
+| MINER_AUTH_INIT / MINER_AUTH_CHALLENGE / MINER_AUTH_RESPONSE | Protected by Falcon key exchange; no plaintext session ID exposed |
+| Internal session key store in `Chacha20EvpManager` | Required before `prune_expired_sessions` has real work to do |
+| TLS mode implementation | Stub exists; awaiting TLS infrastructure |

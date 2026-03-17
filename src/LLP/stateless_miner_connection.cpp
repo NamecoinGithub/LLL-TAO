@@ -67,6 +67,7 @@ ________________________________________________________________________________
 #include <LLP/include/failover_connection_tracker.h>
 #include <LLP/include/channel_state_manager.h>
 #include <LLP/include/node_session_registry.h>
+#include <LLP/include/chacha20_evp_manager.h>
 
 #include <chrono>
 #include <limits>
@@ -2456,8 +2457,21 @@ namespace LLP
             {
                 debug::log(2, FUNCTION, "SESSION_STATUS received from ", GetAddress().ToStringIP());
 
+                /* Attempt EVP decrypt of SESSION_STATUS payload (MITM hardening).
+                 * Graceful fallback: if decrypt fails, process as plaintext to allow
+                 * miners that have not yet upgraded to the encrypted keepalive. */
+                std::vector<uint8_t> vSessionStatusPayload = PACKET.DATA;
+                if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
+                {
+                    std::vector<uint8_t> vDecrypted;
+                    if(Chacha20EvpManager::Get().Decrypt(PACKET.DATA, context.vChaChaKey, vDecrypted))
+                        vSessionStatusPayload = std::move(vDecrypted);
+                    else
+                        debug::log(0, FUNCTION, "[EVP] SESSION_STATUS decrypt failed — processing as plaintext (migration fallback)");
+                }
+
                 SessionStatus::SessionStatusRequest req;
-                if(!req.Parse(PACKET.DATA))
+                if(!req.Parse(vSessionStatusPayload))
                 {
                     debug::error(FUNCTION, "SESSION_STATUS: malformed payload (size=", PACKET.DATA.size(), ")");
                     StatelessPacket errResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
@@ -2491,6 +2505,21 @@ namespace LLP
                 StatelessPacket ackResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                 ackResponse.DATA = vAck;
                 ackResponse.LENGTH = static_cast<uint32_t>(vAck.size());
+
+                /* Encrypt SESSION_STATUS_ACK payload (carries SessionID — MITM vector).
+                 * Best-effort: fall back to plaintext if context not ready. */
+                if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
+                {
+                    std::vector<uint8_t> vEncrypted;
+                    if(Chacha20EvpManager::Get().Encrypt(ackResponse.DATA, context.vChaChaKey, vEncrypted))
+                    {
+                        ackResponse.DATA   = std::move(vEncrypted);
+                        ackResponse.LENGTH = static_cast<uint32_t>(ackResponse.DATA.size());
+                    }
+                    else
+                        debug::log(0, FUNCTION, "[EVP] SESSION_STATUS_ACK encryption failed — sending plaintext");
+                }
+
                 respond(ackResponse);
 
                 debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent: lane_health=0x", std::hex, nLaneHealth, std::dec);
