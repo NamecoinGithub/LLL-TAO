@@ -227,7 +227,7 @@ TEST_CASE("ChannelTemplateCache: concurrent GET_BLOCK readers all wake on notify
     cache.TEST_Reset();
     cache.TEST_ForceBuilding();
 
-    constexpr int N_READERS = 8;
+    constexpr int NUM_READERS = 8;
 
     auto pFakeBlock = MakeFakeBlock(1);
 
@@ -236,8 +236,8 @@ TEST_CASE("ChannelTemplateCache: concurrent GET_BLOCK readers all wake on notify
 
     /* Start N_READERS threads — all will block on GetCurrent() in BUILDING state. */
     std::vector<std::thread> readers;
-    readers.reserve(N_READERS);
-    for(int i = 0; i < N_READERS; ++i)
+    readers.reserve(NUM_READERS);
+    for(int i = 0; i < NUM_READERS; ++i)
     {
         readers.emplace_back([&]() {
             auto pResult = cache.GetCurrent(std::chrono::milliseconds(500));
@@ -259,7 +259,7 @@ TEST_CASE("ChannelTemplateCache: concurrent GET_BLOCK readers all wake on notify
 
     SECTION("All N concurrent readers wake and serve the same template")
     {
-        REQUIRE(nSuccesses.load() == N_READERS);
+        REQUIRE(nSuccesses.load() == NUM_READERS);
         REQUIRE(nFailures.load()  == 0);
     }
 }

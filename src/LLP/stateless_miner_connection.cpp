@@ -902,16 +902,16 @@ namespace LLP
                                        " metric g_channel_cache_hits_total=", g_channel_cache_hits_total.load());
 
                             /* Store clone in per-connection mapBlocks so SUBMIT_BLOCK can validate. */
-                            const uint512_t hashMerkleKey = pClone->hashMerkleRoot;
-                            const uint64_t  nCreationTime = static_cast<uint64_t>(runtime::unifiedtimestamp());
-                            uint32_t nUnifiedHt  = static_cast<uint32_t>(TAO::Ledger::ChainState::nBestHeight.load());
-                            uint32_t nChannelHt  = 0;
+                            const uint512_t hashMerkleKey  = pClone->hashMerkleRoot;
+                            const uint64_t  nCreationTime  = static_cast<uint64_t>(runtime::unifiedtimestamp());
+                            uint32_t nUnifiedHeight = static_cast<uint32_t>(TAO::Ledger::ChainState::nBestHeight.load());
+                            uint32_t nChannelHeight = 0;
                             {
                                 TAO::Ledger::BlockState stateCh = TAO::Ledger::ChainState::tStateBest.load();
                                 if(TAO::Ledger::GetLastState(stateCh, pClone->nChannel))
-                                    nChannelHt = stateCh.nChannelHeight;
+                                    nChannelHeight = stateCh.nChannelHeight;
                             }
-                            TemplateMetadata meta(pClone, nCreationTime, nUnifiedHt, nChannelHt,
+                            TemplateMetadata meta(pClone, nCreationTime, nUnifiedHeight, nChannelHeight,
                                                   hashMerkleKey, pClone->nChannel,
                                                   TAO::Ledger::ChainState::hashBestChain.load());
                             lk.lock();
