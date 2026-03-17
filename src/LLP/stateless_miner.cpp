@@ -1956,7 +1956,9 @@ namespace LLP
         std::vector<uint8_t>& vPlaintext
     )
     {
-        /* Use LLC helper with domain-specific AAD for AEAD authentication */
+        /* Use LLC helper with domain-specific AAD for AEAD authentication.
+         * Future: route through Chacha20EvpManager::Get().Decrypt() as the
+         * unified gate for all encrypted packet types. */
         return LLC::DecryptPayloadChaCha20(vEncrypted, vKey, vPlaintext, AAD_REWARD_ADDRESS);
     }
 
@@ -1967,7 +1969,9 @@ namespace LLP
         const std::vector<uint8_t>& vKey
     )
     {
-        /* Use LLC helper with domain-specific AAD for AEAD authentication */
+        /* Use LLC helper with domain-specific AAD for AEAD authentication.
+         * Future: route through Chacha20EvpManager::Get().Encrypt() as the
+         * unified gate for all encrypted packet types. */
         return LLC::EncryptPayloadChaCha20(vPlaintext, vKey, AAD_REWARD_RESULT);
     }
 

@@ -1202,7 +1202,9 @@ namespace LLP
                                  * Note: No AAD (Additional Authenticated Data) is used here because
                                  * the entire SUBMIT_BLOCK packet is encrypted as-is without domain separation.
                                  * Unlike MINER_SET_REWARD which uses AAD for context binding, SUBMIT_BLOCK
-                                 * encrypts the complete payload for transport-layer confidentiality. */
+                                 * encrypts the complete payload for transport-layer confidentiality.
+                                 * Future: route through Chacha20EvpManager::Get().Decrypt() as the
+                                 * unified gate for all encrypted packet types. */
                                 bool fDecrypted = LLC::DecryptPayloadChaCha20(
                                     PACKET.DATA,
                                     context.vChaChaKey,
@@ -1378,6 +1380,8 @@ namespace LLP
                             else
                             {
                                 /* Fallback: legacy Falcon wrapper [merkle][nonce][timestamp][sig_len][signature] */
+                                /* Future: route through Chacha20EvpManager::Get().Decrypt() as the
+                                 * unified gate for all encrypted packet types. */
                                 std::vector<uint8_t> decryptedData;
                                 if(!LLC::DecryptPayloadChaCha20(PACKET.DATA, context.vChaChaKey, decryptedData))
                                 {
