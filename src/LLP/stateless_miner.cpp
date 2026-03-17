@@ -455,6 +455,9 @@ namespace LLP
         crypto.vChaCha20Key = vChaChaKey;
         crypto.strKeyFingerprint = Diagnostics::KeyFingerprint(vChaChaKey);
         crypto.nSessionId = nSessionId;
+        /* nSessionGeneration maps to nReconnectCount + 1 so that the first
+         * authenticated session has generation=1 (not 0, which signals uninitialised). */
+        crypto.nSessionGeneration = nReconnectCount + 1;
         crypto.hashGenesis = hashGenesis;
         crypto.hashKeyID = hashKeyID;
         crypto.nProtocolLane = nProtocolLane;
@@ -1421,6 +1424,20 @@ namespace LLP
 
         /* Set up ChaCha20 encryption context (CRITICAL for PR #111)
          * This MUST be set after successful authentication for SUBMIT_BLOCK to work */
+
+        /* SECURITY INVARIANT: session_id must be non-zero before AEAD is armed.
+         * A zero session_id in the AAD makes every session produce identical AAD,
+         * which collapses the AEAD domain separation and enables cross-session replay. */
+        assert(nSessionId != 0 && "EVP/AEAD service must not be initialised with session_id=0 — nonce AAD would be insecure");
+        if(nSessionId == 0)
+        {
+            debug::error(FUNCTION, "❌ SECURITY: session_id=0 — refusing to arm AEAD context");
+            StatelessPacket response(StatelessOpcodes::AUTH_RESULT);
+            response.DATA.push_back(0x00); // Failure
+            response.LENGTH = 1;
+            return ProcessResult::Success(context, response);
+        }
+
         std::vector<uint8_t> vChaChaKey = LLC::MiningSessionKeys::DeriveChaCha20Key(hashGenesisFinal);
         newContext = newContext.WithChaChaKey(vChaChaKey);
         

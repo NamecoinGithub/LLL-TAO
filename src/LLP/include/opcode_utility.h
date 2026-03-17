@@ -91,6 +91,22 @@ namespace OpcodeUtility
         /* Session management packets (221) */
         static constexpr uint8_t SESSION_EXPIRED    = 221; // 5-byte payload: session_id (4) + reason (1)
 
+        /** TEMPLATE_NOT_READY (222): Node → Miner: explicit "no template available yet" signal.
+         *
+         *  Sent by the node on the push notification path (SendStatelessTemplate) when
+         *  a block template cannot be constructed (chain not synced, new_block() failure,
+         *  or serialization error).  Replaces silent early-return to give miners a
+         *  concrete signal to retry via GET_BLOCK.
+         *
+         *  PAYLOAD (5 bytes):
+         *    [0]     uint8_t  reason_code
+         *              0x01 = BLOCK_CREATE_FAILED   (new_block() returned nullptr)
+         *              0x02 = SERIALIZE_FAILED      (Block::Serialize() empty/wrong size)
+         *              0x03 = CHAIN_STATE_UNAVAILABLE (GetLastState() failed)
+         *    [1-4]   uint32_t retry_after_ms  (big-endian, suggested retry interval)
+         **/
+        static constexpr uint8_t TEMPLATE_NOT_READY = 222; // 5-byte payload: reason (1) + retry_after_ms (4)
+
         /* Generic packets */
         static constexpr uint8_t PING  = 253;
         static constexpr uint8_t CLOSE = 254;
@@ -170,10 +186,15 @@ namespace OpcodeUtility
         static constexpr uint16_t SESSION_STATUS        = Mirror(Opcodes::SESSION_STATUS);         // 0xD0DB
         static constexpr uint16_t SESSION_STATUS_ACK    = Mirror(Opcodes::SESSION_STATUS_ACK);     // 0xD0DC
         static constexpr uint16_t SESSION_EXPIRED       = Mirror(Opcodes::SESSION_EXPIRED);        // 0xD0DD
+        /** TEMPLATE_NOT_READY (0xD0DE): node→miner explicit "no template available" signal.
+         *  Sent by SendStatelessTemplate() when block creation or serialization fails.
+         *  Replaces silent early-return so miners get a concrete retry hint. */
+        static constexpr uint16_t TEMPLATE_NOT_READY    = Mirror(Opcodes::TEMPLATE_NOT_READY);    // 0xD0DE
         /* Backward compat aliases */
         static constexpr uint16_t STATELESS_SESSION_STATUS     = SESSION_STATUS;
         static constexpr uint16_t STATELESS_SESSION_STATUS_ACK = SESSION_STATUS_ACK;
         static constexpr uint16_t STATELESS_SESSION_EXPIRED    = SESSION_EXPIRED;
+        static constexpr uint16_t STATELESS_TEMPLATE_NOT_READY = TEMPLATE_NOT_READY;
         static constexpr uint16_t PING  = Mirror(Opcodes::PING);   // 0xD0FD
         static constexpr uint16_t CLOSE = Mirror(Opcodes::CLOSE);  // 0xD0FE
 

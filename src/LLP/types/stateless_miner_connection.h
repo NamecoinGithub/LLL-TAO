@@ -457,6 +457,18 @@ namespace LLP
 
         /** Send BLOCK_DATA and enforce authenticated-path non-empty payload invariant. **/
         void SendGetBlockDataResponse(const std::vector<uint8_t>& vPayload, bool fAuthenticatedPath);
+
+        /** Send TEMPLATE_NOT_READY (0xD0DE) when the push-path template build fails.
+         *
+         *  Called by SendStatelessTemplate() when new_block() or Serialize() fails.
+         *  Allows miners to distinguish "no template yet" from a network stall, so they
+         *  can schedule a retry via GET_BLOCK rather than waiting indefinitely for a push.
+         *
+         *  @param[in] nReasonCode    1=BLOCK_CREATE_FAILED, 2=SERIALIZE_FAILED, 3=CHAIN_STATE_UNAVAILABLE
+         *  @param[in] nRetryAfterMs  Suggested retry interval in milliseconds (big-endian in payload)
+         *
+         **/
+        void SendTemplateNotReady(uint8_t nReasonCode, uint32_t nRetryAfterMs);
         
         /** IsThrottled
          *

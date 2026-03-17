@@ -99,14 +99,17 @@ namespace LLP
     bool Chacha20EvpManager::Encrypt(
         const std::vector<uint8_t>& vPlain,
         const std::vector<uint8_t>& vKey,
-        std::vector<uint8_t>& vOut) const
+        std::vector<uint8_t>& vOut,
+        const std::vector<uint8_t>& vAAD) const
     {
         const MiningTransportMode eMode = m_mode.load();
 
         if(eMode == MiningTransportMode::EVP)
         {
-            /* Delegate to the LLC ChaCha20-Poly1305 helper */
-            vOut = LLC::EncryptPayloadChaCha20(vPlain, vKey);
+            /* Delegate to the LLC ChaCha20-Poly1305 helper, passing session-bound AAD.
+             * Non-empty AAD binds the ciphertext to a specific session+generation,
+             * preventing cross-session replay even when the key is deterministic. */
+            vOut = LLC::EncryptPayloadChaCha20(vPlain, vKey, vAAD);
             return !vOut.empty();
         }
 
@@ -127,14 +130,17 @@ namespace LLP
     bool Chacha20EvpManager::Decrypt(
         const std::vector<uint8_t>& vCipher,
         const std::vector<uint8_t>& vKey,
-        std::vector<uint8_t>& vOut) const
+        std::vector<uint8_t>& vOut,
+        const std::vector<uint8_t>& vAAD) const
     {
         const MiningTransportMode eMode = m_mode.load();
 
         if(eMode == MiningTransportMode::EVP)
         {
-            /* Delegate to the LLC ChaCha20-Poly1305 helper */
-            return LLC::DecryptPayloadChaCha20(vCipher, vKey, vOut);
+            /* Delegate to the LLC ChaCha20-Poly1305 helper, passing session-bound AAD.
+             * The AAD must exactly match what was used during encryption; a mismatch
+             * will cause authentication tag verification to fail (replay detected). */
+            return LLC::DecryptPayloadChaCha20(vCipher, vKey, vOut, vAAD);
         }
 
         if(eMode == MiningTransportMode::TLS)

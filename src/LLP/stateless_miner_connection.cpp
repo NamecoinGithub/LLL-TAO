@@ -2463,8 +2463,9 @@ namespace LLP
                 std::vector<uint8_t> vSessionStatusPayload = PACKET.DATA;
                 if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
                 {
+                    const std::vector<uint8_t> vAAD = context.GetCryptoContext().BuildAAD();
                     std::vector<uint8_t> vDecrypted;
-                    if(Chacha20EvpManager::Get().Decrypt(PACKET.DATA, context.vChaChaKey, vDecrypted))
+                    if(Chacha20EvpManager::Get().Decrypt(PACKET.DATA, context.vChaChaKey, vDecrypted, vAAD))
                         vSessionStatusPayload = std::move(vDecrypted);
                     else
                         debug::log(0, FUNCTION, "[EVP] SESSION_STATUS decrypt failed — processing as plaintext (migration fallback)");
@@ -2510,8 +2511,9 @@ namespace LLP
                  * Best-effort: fall back to plaintext if context not ready. */
                 if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
                 {
+                    const std::vector<uint8_t> vAAD = context.GetCryptoContext().BuildAAD();
                     std::vector<uint8_t> vEncrypted;
-                    if(Chacha20EvpManager::Get().Encrypt(ackResponse.DATA, context.vChaChaKey, vEncrypted))
+                    if(Chacha20EvpManager::Get().Encrypt(ackResponse.DATA, context.vChaChaKey, vEncrypted, vAAD))
                     {
                         ackResponse.DATA   = std::move(vEncrypted);
                         ackResponse.LENGTH = static_cast<uint32_t>(ackResponse.DATA.size());
@@ -3940,6 +3942,25 @@ namespace LLP
                GetAddress().ToStringIP();
     }
 
+    void StatelessMinerConnection::SendTemplateNotReady(uint8_t nReasonCode, uint32_t nRetryAfterMs)
+    {
+        /* TEMPLATE_NOT_READY (0xD0DE): explicit "no template available" signal for the push path.
+         * Payload format (5 bytes):
+         *   [0]     uint8_t  reason_code      (1=BLOCK_CREATE_FAILED, 2=SERIALIZE_FAILED, 3=CHAIN_STATE_UNAVAILABLE)
+         *   [1-4]   uint32_t retry_after_ms   (big-endian, suggested retry interval) */
+        StatelessPacket packet(OpcodeUtility::Stateless::TEMPLATE_NOT_READY);
+        packet.DATA.push_back(nReasonCode);
+        packet.DATA.push_back(static_cast<uint8_t>((nRetryAfterMs >> 24) & 0xFF));
+        packet.DATA.push_back(static_cast<uint8_t>((nRetryAfterMs >> 16) & 0xFF));
+        packet.DATA.push_back(static_cast<uint8_t>((nRetryAfterMs >>  8) & 0xFF));
+        packet.DATA.push_back(static_cast<uint8_t>( nRetryAfterMs        & 0xFF));
+        packet.LENGTH = static_cast<uint32_t>(packet.DATA.size());
+        respond(packet);
+        debug::log(1, FUNCTION, "TEMPLATE_NOT_READY (0xD0DE) sent to ", GetAddress().ToStringIP(),
+                   " reason=", static_cast<uint32_t>(nReasonCode),
+                   " retry_after_ms=", nRetryAfterMs);
+    }
+
     void StatelessMinerConnection::SendGetBlockDataResponse(const std::vector<uint8_t>& vPayload, bool fAuthenticatedPath)
     {
         if(fAuthenticatedPath)
@@ -4522,6 +4543,7 @@ namespace LLP
         
         /* Thread-safe context access */
         uint32_t nChannel;
+        bool fAuthenticatedSnapshot;
         {
             LOCK(MUTEX);
 
@@ -4562,8 +4584,9 @@ namespace LLP
                 return;
             }
             
-            /* Copy channel for use outside lock */
+            /* Copy channel and auth state for use outside lock */
             nChannel = context.nChannel;
+            fAuthenticatedSnapshot = context.fAuthenticated;
         }  // MUTEX automatically unlocked here
         
         debug::log(2, "════════════════════════════════════════════════════════════");
@@ -4581,6 +4604,9 @@ namespace LLP
         {
             debug::error(FUNCTION, "Failed to get channel state for channel ", nChannel);
             debug::log(2, "════════════════════════════════════════════════════════════");
+            /* Notify authenticated miners so they can retry via GET_BLOCK */
+            if(fAuthenticatedSnapshot)
+                SendTemplateNotReady(0x03, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         
@@ -4607,6 +4633,9 @@ namespace LLP
         {
             debug::error(FUNCTION, "Failed to create block template after retry");
             debug::log(2, "════════════════════════════════════════════════════════════");
+            /* Notify authenticated miners so they can retry via GET_BLOCK */
+            if(fAuthenticatedSnapshot)
+                SendTemplateNotReady(0x01, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         
@@ -4617,6 +4646,9 @@ namespace LLP
             debug::error(FUNCTION, "Invalid block serialization: ", vBlockData.size(), 
                         " bytes (expected ", TRITIUM_BLOCK_SIZE, ")");
             debug::log(2, "════════════════════════════════════════════════════════════");
+            /* Notify authenticated miners so they can retry via GET_BLOCK */
+            if(fAuthenticatedSnapshot)
+                SendTemplateNotReady(0x02, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         

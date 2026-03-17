@@ -284,6 +284,9 @@ namespace LLP
         crypto.vChaCha20Key = vChaCha20Key;
         crypto.strKeyFingerprint = Diagnostics::KeyFingerprint(vChaCha20Key);
         crypto.nSessionId = nSessionId;
+        /* nSessionGeneration maps to nReconnectCount + 1 so that the first
+         * authenticated session has generation=1 (not 0, which signals uninitialised). */
+        crypto.nSessionGeneration = nReconnectCount + 1;
         crypto.hashGenesis = hashGenesis;
         crypto.hashKeyID = hashKeyID;
         crypto.nProtocolLane = nProtocolLane;

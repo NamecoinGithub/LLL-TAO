@@ -156,13 +156,18 @@ namespace LLP
          *  @param[in]  vPlain  Plaintext payload to encrypt.
          *  @param[in]  vKey    32-byte symmetric session key.
          *  @param[out] vOut    Encrypted output (nonce + ciphertext + tag).
+         *  @param[in]  vAAD    Additional Authenticated Data (session-bound; default empty).
+         *                      Callers SHOULD pass CryptoContext::BuildAAD() to prevent
+         *                      cross-session replay.  Empty AAD is accepted for backward
+         *                      compatibility with in-flight sessions that pre-date this API.
          *
          *  @return true on success, false on failure.
          *
          **/
         bool Encrypt(const std::vector<uint8_t>& vPlain,
                      const std::vector<uint8_t>& vKey,
-                     std::vector<uint8_t>& vOut) const;
+                     std::vector<uint8_t>& vOut,
+                     const std::vector<uint8_t>& vAAD = std::vector<uint8_t>()) const;
 
 
         /** Decrypt
@@ -175,13 +180,16 @@ namespace LLP
          *  @param[in]  vCipher Ciphertext payload (nonce + ciphertext + tag).
          *  @param[in]  vKey    32-byte symmetric session key.
          *  @param[out] vOut    Decrypted plaintext output.
+         *  @param[in]  vAAD    Additional Authenticated Data (must match the value used
+         *                      during encryption).  Default empty for backward compatibility.
          *
          *  @return true on success, false on failure.
          *
          **/
         bool Decrypt(const std::vector<uint8_t>& vCipher,
                      const std::vector<uint8_t>& vKey,
-                     std::vector<uint8_t>& vOut) const;
+                     std::vector<uint8_t>& vOut,
+                     const std::vector<uint8_t>& vAAD = std::vector<uint8_t>()) const;
 
 
         /** AllowPlaintext

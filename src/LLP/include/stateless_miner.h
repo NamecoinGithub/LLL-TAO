@@ -111,12 +111,22 @@ namespace LLP
      *  Canonical encrypted-session snapshot so callers do not need to manually
      *  reassemble session ID, genesis, lane, and key material.
      *
+     *  nSessionGeneration is incremented each time the same Falcon key re-authenticates.
+     *  It must be included in the AEAD AAD so that ciphertexts from session N cannot
+     *  be replayed in session N+1 even though the key is deterministic per-genesis.
+     *  A value of 0 means the encryption context has NOT been properly initialised;
+     *  callers should assert HasUsableKey() before use.
+     *
      **/
     struct CryptoContext
     {
         std::vector<uint8_t> vChaCha20Key;
         std::string strKeyFingerprint;
         uint32_t nSessionId = 0;
+        /** Session generation counter (maps to MiningContext::nReconnectCount).
+         *  Included in AEAD AAD to prevent cross-session replay. Must be non-zero
+         *  for any live authenticated session (first auth sets it to 1). */
+        uint32_t nSessionGeneration = 0;
         uint256_t hashGenesis = 0;
         uint256_t hashKeyID = 0;
         ProtocolLane nProtocolLane = ProtocolLane::LEGACY;
@@ -124,7 +134,35 @@ namespace LLP
 
         bool HasUsableKey() const
         {
-            return fEncryptionReady && !vChaCha20Key.empty();
+            return fEncryptionReady && !vChaCha20Key.empty() && nSessionId != 0;
+        }
+
+        /** Build the AEAD Additional Authenticated Data for this session.
+         *
+         *  Format: "nexus-session-aead-v1" (21 bytes)
+         *        + session_id       (4 bytes, big-endian)
+         *        + session_generation (4 bytes, big-endian)
+         *
+         *  Including both session_id and session_generation in the AAD prevents:
+         *  - Cross-session replay (different session_id → auth tag mismatch)
+         *  - Cross-generation replay (same session_id, different reconnect → mismatch)
+         **/
+        std::vector<uint8_t> BuildAAD() const
+        {
+            static const char* PREFIX = "nexus-session-aead-v1";
+            static const size_t PREFIX_LEN = 21;
+            std::vector<uint8_t> vAAD;
+            vAAD.reserve(PREFIX_LEN + 8);
+            vAAD.insert(vAAD.end(), PREFIX, PREFIX + PREFIX_LEN);
+            vAAD.push_back(static_cast<uint8_t>((nSessionId       >> 24) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>((nSessionId       >> 16) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>((nSessionId       >>  8) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>( nSessionId             & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>((nSessionGeneration >> 24) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>((nSessionGeneration >> 16) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>((nSessionGeneration >>  8) & 0xFF));
+            vAAD.push_back(static_cast<uint8_t>( nSessionGeneration       & 0xFF));
+            return vAAD;
         }
     };
 
