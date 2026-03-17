@@ -149,8 +149,8 @@ namespace LLP
          **/
         std::vector<uint8_t> BuildAAD() const
         {
-            static const char* PREFIX = "nexus-session-aead-v1";
-            static const size_t PREFIX_LEN = 21;
+            static constexpr const char PREFIX[] = "nexus-session-aead-v1";
+            static constexpr size_t PREFIX_LEN = sizeof(PREFIX) - 1; // exclude null terminator
             std::vector<uint8_t> vAAD;
             vAAD.reserve(PREFIX_LEN + 8);
             vAAD.insert(vAAD.end(), PREFIX, PREFIX + PREFIX_LEN);

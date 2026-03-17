@@ -3942,12 +3942,13 @@ namespace LLP
                GetAddress().ToStringIP();
     }
 
-    void StatelessMinerConnection::SendTemplateNotReady(uint8_t nReasonCode, uint32_t nRetryAfterMs)
+    void StatelessMinerConnection::SendTemplateNotReady(OpcodeUtility::TemplateNotReadyReason eReason, uint32_t nRetryAfterMs)
     {
         /* TEMPLATE_NOT_READY (0xD0DE): explicit "no template available" signal for the push path.
          * Payload format (5 bytes):
-         *   [0]     uint8_t  reason_code      (1=BLOCK_CREATE_FAILED, 2=SERIALIZE_FAILED, 3=CHAIN_STATE_UNAVAILABLE)
+         *   [0]     uint8_t  reason_code      (TemplateNotReadyReason enum value)
          *   [1-4]   uint32_t retry_after_ms   (big-endian, suggested retry interval) */
+        const uint8_t nReasonCode = static_cast<uint8_t>(eReason);
         StatelessPacket packet(OpcodeUtility::Stateless::TEMPLATE_NOT_READY);
         packet.DATA.push_back(nReasonCode);
         packet.DATA.push_back(static_cast<uint8_t>((nRetryAfterMs >> 24) & 0xFF));
@@ -4606,7 +4607,8 @@ namespace LLP
             debug::log(2, "════════════════════════════════════════════════════════════");
             /* Notify authenticated miners so they can retry via GET_BLOCK */
             if(fAuthenticatedSnapshot)
-                SendTemplateNotReady(0x03, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
+                SendTemplateNotReady(OpcodeUtility::TemplateNotReadyReason::CHAIN_STATE_UNAVAILABLE,
+                                     MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         
@@ -4635,7 +4637,8 @@ namespace LLP
             debug::log(2, "════════════════════════════════════════════════════════════");
             /* Notify authenticated miners so they can retry via GET_BLOCK */
             if(fAuthenticatedSnapshot)
-                SendTemplateNotReady(0x01, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
+                SendTemplateNotReady(OpcodeUtility::TemplateNotReadyReason::BLOCK_CREATE_FAILED,
+                                     MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         
@@ -4648,7 +4651,8 @@ namespace LLP
             debug::log(2, "════════════════════════════════════════════════════════════");
             /* Notify authenticated miners so they can retry via GET_BLOCK */
             if(fAuthenticatedSnapshot)
-                SendTemplateNotReady(0x02, MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
+                SendTemplateNotReady(OpcodeUtility::TemplateNotReadyReason::SERIALIZE_FAILED,
+                                     MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS);
             return;
         }
         

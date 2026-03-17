@@ -105,7 +105,7 @@ namespace OpcodeUtility
          *              0x03 = CHAIN_STATE_UNAVAILABLE (GetLastState() failed)
          *    [1-4]   uint32_t retry_after_ms  (big-endian, suggested retry interval)
          **/
-        static constexpr uint8_t TEMPLATE_NOT_READY = 222; // 5-byte payload: reason (1) + retry_after_ms (4)
+        static constexpr uint8_t TEMPLATE_NOT_READY = 222; // 5-byte payload: reason_code (1) + retry_after_ms (4)
 
         /* Generic packets */
         static constexpr uint8_t PING  = 253;
@@ -333,6 +333,19 @@ namespace OpcodeUtility
         INVALID_SIG = 3,  // Falcon signature verification failed
         DUPLICATE   = 4,  // Block already submitted
         FORK        = 5,  // Block on an alternate chain
+    };
+
+
+    //=========================================================================
+    // TEMPLATE_NOT_READY REASON CODES
+    // 1-byte reason code in the TEMPLATE_NOT_READY (0xD0DE) payload.
+    // Sent by SendStatelessTemplate() on push-path template build failures.
+    //=========================================================================
+    enum class TemplateNotReadyReason : uint8_t
+    {
+        BLOCK_CREATE_FAILED      = 0x01,  // new_block() returned nullptr after retry
+        SERIALIZE_FAILED         = 0x02,  // Block::Serialize() empty or wrong size
+        CHAIN_STATE_UNAVAILABLE  = 0x03,  // GetLastState() failed for the channel
     };
 
 

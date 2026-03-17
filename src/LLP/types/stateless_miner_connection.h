@@ -464,11 +464,11 @@ namespace LLP
          *  Allows miners to distinguish "no template yet" from a network stall, so they
          *  can schedule a retry via GET_BLOCK rather than waiting indefinitely for a push.
          *
-         *  @param[in] nReasonCode    1=BLOCK_CREATE_FAILED, 2=SERIALIZE_FAILED, 3=CHAIN_STATE_UNAVAILABLE
+         *  @param[in] eReason        Reason code (see OpcodeUtility::TemplateNotReadyReason)
          *  @param[in] nRetryAfterMs  Suggested retry interval in milliseconds (big-endian in payload)
          *
          **/
-        void SendTemplateNotReady(uint8_t nReasonCode, uint32_t nRetryAfterMs);
+        void SendTemplateNotReady(OpcodeUtility::TemplateNotReadyReason eReason, uint32_t nRetryAfterMs);
         
         /** IsThrottled
          *
