@@ -920,15 +920,15 @@ namespace LLP
                          * SUBMIT_BLOCK can look up the template by merkle root.
                          * TemplateMetadata takes ownership of pBlock via unique_ptr. */
                         {
-                            const uint64_t nCT = runtime::unifiedtimestamp();
-                            const uint32_t nUH =
+                            const uint64_t nTimestampCreated = runtime::unifiedtimestamp();
+                            const uint32_t nUnifiedHeight =
                                 static_cast<uint32_t>(TAO::Ledger::ChainState::nBestHeight.load());
-                            uint32_t nCH = 0;
+                            uint32_t nChannelHeight = 0;
                             TAO::Ledger::BlockState stCh = TAO::Ledger::ChainState::tStateBest.load();
                             if(TAO::Ledger::GetLastState(stCh, pBlock->nChannel))
-                                nCH = stCh.nChannelHeight;
+                                nChannelHeight = stCh.nChannelHeight;
                             mapBlocks[pBlock->hashMerkleRoot] = TemplateMetadata(
-                                pBlock, nCT, nUH, nCH,
+                                pBlock, nTimestampCreated, nUnifiedHeight, nChannelHeight,
                                 pBlock->hashMerkleRoot, pBlock->nChannel,
                                 TAO::Ledger::ChainState::hashBestChain.load());
                         }
