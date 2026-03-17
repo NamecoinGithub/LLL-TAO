@@ -621,9 +621,21 @@ namespace LLP
                     PoolDiscovery::OnMinerDisconnected(context.hashGenesis);
                 }
 
-                /* Remove from StatelessMinerManager tracking */
+                /* Mark this protocol lane as disconnected in NodeSessionRegistry.
+                 * This allows IsExpired() to start the inactivity timer so SweepExpired()
+                 * can eventually reclaim the entry when the miner does not reconnect.
+                 * MarkDisconnected takes hashKeyID (the primary key in the registry);
+                 * nSessionId is logged alongside it purely for human-readable diagnostics. */
                 {
                     LOCK(MUTEX);
+                    if(context.hashKeyID != 0)
+                    {
+                        NodeSessionRegistry::Get().MarkDisconnected(context.hashKeyID, ProtocolLane::STATELESS);
+                        debug::log(2, FUNCTION, "Marked stateless lane disconnected for sessionId=",
+                                   context.nSessionId, " keyId=", context.hashKeyID.SubString());
+                    }
+
+                    /* Remove from StatelessMinerManager tracking */
                     StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 

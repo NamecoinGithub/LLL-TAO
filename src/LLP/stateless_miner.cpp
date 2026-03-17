@@ -1807,6 +1807,12 @@ namespace LLP
 
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
+        /* NOTE: Push-subscription refresh is the responsibility of the caller.
+         * StatelessMinerConnection::ProcessPacket() calls
+         * StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, lane)
+         * after every successful packet dispatch (including this keepalive), which
+         * propagates the updated nTimestamp and nKeepaliveCount into the manager and
+         * keeps the miner's entry in the push-notification list alive. */
         return ProcessResult::Success(newContext, response);
     }
 

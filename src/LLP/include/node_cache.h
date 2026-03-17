@@ -63,6 +63,28 @@ namespace NodeCache
      **/
     static constexpr uint64_t LOCALHOST_CACHE_PURGE_TIMEOUT = 2592000;
 
+    /** SESSION_LIVENESS_TIMEOUT_SECONDS
+     *
+     *  Session liveness timeout — the window within which a keepalive must arrive
+     *  for the session to remain considered "live" for push-subscription purposes.
+     *
+     *  Distinct from DEFAULT_CACHE_PURGE_TIMEOUT (7 days), which governs cache eviction.
+     *  This value is used for:
+     *   - IsSessionExpired() decisions and WithSessionTimeout() on the legacy-lane
+     *     keepalive handler (miner.cpp).
+     *   - NodeSessionRegistry::SweepExpired(): after a session has had no live ports
+     *     for this long, the registry entry is eligible for removal.
+     *
+     *  Set to DEFAULT_KEEPALIVE_INTERVAL (24 hours) so that a miner that has not sent
+     *  any keepalive for a full day is treated as inactive, while still allowing
+     *  short-duration outages (and DEGRADED-mode stalls up to several hours) to recover
+     *  automatically via the session-extension path in ProcessSessionKeepalive().
+     *
+     *  Default: 86400 seconds (24 hours)
+     *
+     **/
+    static constexpr uint64_t SESSION_LIVENESS_TIMEOUT_SECONDS = 86400;
+
     /** LOCALHOST_ADDRESSES
      *
      *  Addresses that qualify for localhost exception handling.

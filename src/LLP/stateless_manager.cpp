@@ -153,6 +153,20 @@ namespace LLP
 
         const MiningContext& ctx = optContext.value();
 
+        /* Emit a visible log line if this miner was receiving push notifications.
+         * This lets node operators see when a miner is dropped from the push list
+         * and how long it was inactive, matching the 40k-second stall diagnostic
+         * surface from the session-hardening investigation (2026-03-17). */
+        if(ctx.fSubscribedToNotifications)
+        {
+            uint64_t nNow = runtime::unifiedtimestamp();
+            uint64_t nInactiveSec = (nNow > ctx.nTimestamp) ? (nNow - ctx.nTimestamp) : 0;
+            debug::log(0, FUNCTION, "Miner ", strAddress,
+                       " removed from push-notification list after ", nInactiveSec, "s of inactivity",
+                       " (sessionId=", ctx.nSessionId,
+                       " keepalives_rx=", ctx.nKeepaliveCount, ")");
+        }
+
         /* Update atomic counters */
         if(nTotalMiners > 0)
             --nTotalMiners;
