@@ -71,6 +71,8 @@ ________________________________________________________________________________
 
 #include <LLP/include/colin_mining_agent.h>
 #include <LLP/include/node_session_registry.h>
+#include <LLP/include/channel_template_cache.h>
+#include <LLP/include/mining_constants.h>
 
 #include <cstring>
 
@@ -1794,31 +1796,67 @@ namespace LLP
 
         TAO::Ledger::Block *pBlock = nullptr;
 
+        /* ── Server-level cache fast path ─────────────────────────────────────────
+         * Try the ChannelTemplateCache before spawning a per-connection new_block().
+         * GetCurrent() waits up to CACHE_REBUILD_WAIT_MS if a rebuild is in flight,
+         * so all concurrent GET_BLOCK handlers share one CreateBlockForStatelessMining()
+         * call per tip advance rather than N independent calls.
+         *
+         * Note: called outside MUTEX to avoid holding the connection lock during
+         * the up-to-500 ms condition-variable wait inside GetCurrent().             */
+        TAO::Ledger::TritiumBlock* pCacheClone = nullptr;
+        {
+            auto pCached = GetChannelCache(nChannel).GetCurrent(
+                std::chrono::milliseconds(MiningConstants::CACHE_REBUILD_WAIT_MS));
+
+            if(pCached)
+            {
+                pCacheClone = pCached->Clone();
+                if(!pCacheClone)
+                    debug::log(1, FUNCTION, "GET_BLOCK cache Clone() failed ch=", nChannel,
+                               " — falling back to per-connection new_block()");
+            }
+        }
+
         /* Prepare the data to serialize on request. */
         std::vector<uint8_t> vData;
         {
             LOCK(MUTEX);
 
-            /* Create a new block */
-            pBlock = new_block();
-
-            /* Handle if the block failed to be created — retry once in case chain advanced mid-creation */
-            if(!pBlock)
+            if(pCacheClone)
             {
-                debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                /* Cache hit path: use the cloned cached block. */
+                pBlock = pCacheClone;
+                debug::log(1, FUNCTION, "GET_BLOCK cache hit ch=", nChannel,
+                           " height=", pBlock->nHeight,
+                           " metric g_channel_cache_hits_total=", g_channel_cache_hits_total.load());
+            }
+            else
+            {
+                /* Cache miss (EMPTY, timeout, or clone failure): per-connection new_block(). */
+                debug::log(1, FUNCTION, "Cache miss ch=", nChannel, " — calling new_block()");
+
+                /* Create a new block */
                 pBlock = new_block();
+
+                /* Handle if the block failed to be created — retry once in case chain advanced mid-creation */
+                if(!pBlock)
+                {
+                    debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                    pBlock = new_block();
+                }
+
+                if(!pBlock)
+                {
+                    debug::log(2, FUNCTION, "Failed to create block after retry.");
+                    respond(BLOCK_REJECTED,
+                        BuildGetBlockControlPayload(GetBlockPolicyReason::INTERNAL_RETRY,
+                        MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS));
+                    return true;
+                }
             }
 
-            if(!pBlock)
-            {
-                debug::log(2, FUNCTION, "Failed to create block after retry.");
-                respond(BLOCK_REJECTED,
-                    BuildGetBlockControlPayload(GetBlockPolicyReason::INTERNAL_RETRY,
-                    MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS));
-                return true;
-            }
-
-            /* Store the new block in the memory map of recent blocks being worked on. */
+            /* Store the block in the memory map of recent blocks being worked on. */
             mapBlocks[pBlock->hashMerkleRoot] = pBlock;
 
             /* Snapshot hashBestChain alongside the block for hash-based staleness detection.

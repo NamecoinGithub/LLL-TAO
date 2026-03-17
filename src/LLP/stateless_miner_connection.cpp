@@ -63,6 +63,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/colin_mining_agent.h>
 #include <LLP/include/canonical_chain_state.h>
+#include <LLP/include/channel_template_cache.h>
 #include <LLP/include/failover_connection_tracker.h>
 #include <LLP/include/channel_state_manager.h>
 #include <LLP/include/node_session_registry.h>
@@ -867,24 +868,79 @@ namespace LLP
                 debug::log(2, FUNCTION, "Invariant: authenticated + in-budget + channel set → BLOCK_DATA MUST follow");
                 debug::log(0, "   ✅ Validation passed");
 
-                /* CRITICAL: Release MUTEX before new_block() — new_block() acquires MUTEX internally.
+                /* CRITICAL: Release MUTEX before new_block() / cache wait — both can block.
                  * std::mutex is non-recursive; holding lk and calling new_block() causes a deadlock. */
                 lk.unlock();
 
-                debug::log(0, "   Calling new_block()...");
+                /* Snapshot channel now — validated != 0 above, safe to read after unlock. */
+                const uint32_t nCachedChannel = context.nChannel;
 
                 /* Track GET_BLOCK response latency for observability. */
                 const auto tGetBlockStart = std::chrono::steady_clock::now();
 
-                /* Create a new block */
-                TAO::Ledger::Block* pBlock = new_block();
+                /* ── Server-level cache fast path ─────────────────────────────────────────
+                 * Try the ChannelTemplateCache before spawning a per-connection new_block().
+                 * GetCurrent() waits up to CACHE_REBUILD_WAIT_MS if a rebuild is in flight,
+                 * so all concurrent GET_BLOCK handlers share one CreateBlockForStatelessMining()
+                 * call per tip advance rather than N independent calls.                      */
+                TAO::Ledger::Block* pBlock = nullptr;
+                {
+                    auto pCached = GetChannelCache(nCachedChannel).GetCurrent(
+                        std::chrono::milliseconds(MiningConstants::CACHE_REBUILD_WAIT_MS));
 
-                /* Handle if the block failed to be created. */
+                    if(pCached)
+                    {
+                        /* Clone the cached block for this connection's mapBlocks.
+                         * The cache retains its own shared_ptr; the clone is owned
+                         * by TemplateMetadata via unique_ptr after emplace.          */
+                        TAO::Ledger::TritiumBlock* pClone = pCached->Clone();
+                        if(pClone)
+                        {
+                            pBlock = pClone;
+                            debug::log(1, FUNCTION, "GET_BLOCK cache hit ch=", nCachedChannel,
+                                       " height=", pClone->nHeight,
+                                       " metric g_channel_cache_hits_total=", g_channel_cache_hits_total.load());
+
+                            /* Store clone in per-connection mapBlocks so SUBMIT_BLOCK can validate. */
+                            const uint512_t hashMerkleKey = pClone->hashMerkleRoot;
+                            const uint64_t  nCreationTime = static_cast<uint64_t>(runtime::unifiedtimestamp());
+                            uint32_t nUnifiedHt  = static_cast<uint32_t>(TAO::Ledger::ChainState::nBestHeight.load());
+                            uint32_t nChannelHt  = 0;
+                            {
+                                TAO::Ledger::BlockState stateCh = TAO::Ledger::ChainState::tStateBest.load();
+                                if(TAO::Ledger::GetLastState(stateCh, pClone->nChannel))
+                                    nChannelHt = stateCh.nChannelHeight;
+                            }
+                            TemplateMetadata meta(pClone, nCreationTime, nUnifiedHt, nChannelHt,
+                                                  hashMerkleKey, pClone->nChannel,
+                                                  TAO::Ledger::ChainState::hashBestChain.load());
+                            lk.lock();
+                            mapBlocks.emplace(hashMerkleKey, std::move(meta));
+                        }
+                        else
+                        {
+                            debug::log(1, FUNCTION, "GET_BLOCK cache Clone() failed ch=", nCachedChannel,
+                                       " — falling back to per-connection new_block()");
+                        }
+                    }
+                }
+
                 if(!pBlock)
                 {
-                    /* Chain may have advanced during template creation — retry once with fresh chain state */
-                    debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                    /* Cache miss (EMPTY, timeout, or clone failure): per-connection new_block(). */
+                    debug::log(0, "   Cache miss — calling new_block()...");
                     pBlock = new_block();
+
+                    /* Handle if the block failed to be created. */
+                    if(!pBlock)
+                    {
+                        /* Chain may have advanced during template creation — retry once with fresh chain state */
+                        debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once (chain may have advanced mid-creation)");
+                        pBlock = new_block();
+                    }
+
+                    /* Re-acquire MUTEX for respond() and context mutations. */
+                    lk.lock();
                 }
 
                 const auto tGetBlockEnd = std::chrono::steady_clock::now();
@@ -896,8 +952,7 @@ namespace LLP
                  * return TEMPLATE_REBUILD_IN_PROGRESS so caller retries quickly. */
                 constexpr int64_t GET_BLOCK_DEADLINE_MS = 500;
 
-                /* Re-acquire MUTEX for respond() and context mutations */
-                lk.lock();
+                /* NOTE: MUTEX is already held (lk.lock()) at this point in both code paths above. */
 
                 if(!pBlock)
                 {

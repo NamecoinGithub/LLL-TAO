@@ -144,6 +144,24 @@ namespace MiningConstants
     constexpr bool DISABLE_LOCALHOST_AUTOCOOLDOWN = true;
 
     //=========================================================================
+    // CACHE REBUILD GUARD
+    //=========================================================================
+
+    /** Maximum time (ms) GET_BLOCK will wait for a ChannelTemplateCache rebuild
+     *  to complete before falling back to per-connection new_block().
+     *
+     *  Set to 500 ms — well within any reasonable block-creation latency, and
+     *  short enough that miners never stall perceptibly.  When multiple miners
+     *  poll simultaneously during a Stake-block tip advance, all waiters share
+     *  one rebuild and wake together via notify_all(), so no extra new_block()
+     *  calls are spawned while the rebuild is in flight.
+     *
+     *  Use std::chrono::milliseconds(MiningConstants::CACHE_REBUILD_WAIT_MS)
+     *  when passing to ChannelTemplateCache::GetCurrent().
+     */
+    constexpr uint32_t CACHE_REBUILD_WAIT_MS = 500;
+
+    //=========================================================================
     // DIFFICULTY CACHING
     //=========================================================================
     
