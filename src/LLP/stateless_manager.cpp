@@ -400,12 +400,35 @@ namespace LLP
         auto pairs = mapMiners.GetAllPairs();
         for(const auto& pair : pairs)
         {
+            const MiningContext& ctx = pair.second;
+
             /* Use context's own session timeout for expiry check */
-            if(pair.second.IsSessionExpired(nNow))
+            if(!ctx.IsSessionExpired(nNow))
+                continue;
+
+            /* Keepalive grace window: protect miners that have an active keepalive
+             * exchange within KEEPALIVE_GRACE_PERIOD_SEC, matching the logic used by
+             * CleanupInactive().  A miner in DEGRADED MODE continues sending keepalives
+             * even when the stored nTimestamp becomes stale (e.g. if an UpdateMiner call
+             * was missed).  Evicting it here would prevent session recovery and cause the
+             * miner to enter an 11-hour silent-death loop identical to the Bug 2 scenario.
+             *
+             * Both conditions must be true to suppress eviction:
+             *   1. At least one keepalive has been received (nKeepaliveCount > 0)
+             *   2. The most recent keepalive is within KEEPALIVE_GRACE_PERIOD_SEC */
+            uint64_t nTimeSinceKeepalive = (ctx.nLastKeepaliveTime > 0)
+                                         ? (nNow - ctx.nLastKeepaliveTime)
+                                         : (nNow - ctx.nTimestamp);
+            if(ctx.nKeepaliveCount > 0 && nTimeSinceKeepalive < KEEPALIVE_GRACE_PERIOD_SEC)
             {
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
+                debug::log(2, FUNCTION, "Session ", ctx.strAddress,
+                          " expired but has recent keepalive (", nTimeSinceKeepalive,
+                          "s ago < grace ", KEEPALIVE_GRACE_PERIOD_SEC, "s) — skipping eviction");
+                continue;
             }
+
+            if(RemoveMiner(pair.first))
+                ++nRemoved;
         }
 
         if(nRemoved > 0)

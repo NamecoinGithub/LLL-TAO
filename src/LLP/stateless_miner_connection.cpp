@@ -2546,6 +2546,40 @@ namespace LLP
                     context.fAuthenticated && (context.nChannel == 1 || context.nChannel == 2))
                 {
                     debug::log(0, FUNCTION, "⚠️ Miner reports DEGRADED — forcing recovery template push via SESSION_STATUS");
+
+                    /* Re-arm subscription if the miner reconnected in degraded mode and
+                     * has not yet re-sent MINER_READY on this new connection.  From the
+                     * miner's perspective the session is still live, so it skips MINER_READY
+                     * and goes straight to SESSION_STATUS with MINER_DEGRADED.  On the node
+                     * side the new TCP connection starts with fSubscribedToNotifications=false,
+                     * so SendChannelNotification() would silently drop the recovery push.
+                     * Restore the subscription using the authenticated channel so the push
+                     * delivery path works correctly. */
+                    {
+                        LOCK(MUTEX);
+                        if(!context.fSubscribedToNotifications)
+                        {
+                            context = context.WithSubscription(context.nChannel);
+                            debug::log(0, FUNCTION, "  Re-armed subscription (channel=", context.nChannel,
+                                       ") — miner in degraded mode without prior MINER_READY on this connection");
+                        }
+                    }
+
+                    /* Re-register the miner in StatelessMinerManager if it was evicted
+                     * (e.g. by CleanupExpiredSessions or CleanupInactive) during the long
+                     * degraded window.  Without this, BroadcastChannel will find zero
+                     * subscribers and future pushes are silently dropped. */
+                    {
+                        auto optRegistered = StatelessMinerManager::Get().GetMinerContext(context.strAddress);
+                        if(!optRegistered.has_value() && context.nSessionId != 0)
+                        {
+                            debug::log(0, FUNCTION, "  Re-registering evicted miner in StatelessMinerManager "
+                                       "(sessionId=0x", std::hex, context.nSessionId, std::dec, ")");
+                            StatelessMinerManager::Get().UpdateMiner(
+                                context.strAddress, context, context.nSubscribedChannel);
+                        }
+                    }
+
                     {
                         LOCK(MUTEX);
                         m_force_next_push = true;
@@ -2563,6 +2597,15 @@ namespace LLP
                     SendStatelessTemplate();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed — miner should exit DEGRADED");
                 }
+
+                /* Persist updated context in StatelessMinerManager after every SESSION_STATUS
+                 * (including any subscription re-arm or re-registration done above).  The
+                 * SESSION_STATUS handler returns early (bypasses the generic ProcessPacket
+                 * tail that calls UpdateMiner for all other packets), so we must call it
+                 * explicitly here to keep the keepalive rolling-window timestamp accurate. */
+                StatelessMinerManager::Get().UpdateMiner(
+                    context.strAddress, context,
+                    context.nSubscribedChannel > 0 ? context.nSubscribedChannel : 1);
 
                 return true;
             }
