@@ -22,7 +22,6 @@ ________________________________________________________________________________
 #include <LLP/include/disposable_falcon.h>
 #include <LLP/include/session_recovery.h>
 #include <LLP/include/auto_cooldown_manager.h>
-#include <LLP/include/pool_discovery.h>
 #include <LLP/include/opcode_utility.h>
 #include <LLP/include/push_notification.h>
 #include <LLP/include/mining_constants.h>
@@ -616,12 +615,6 @@ namespace LLP
                 debug::log(0, FUNCTION, "MinerLLP: [", strCategory, "] Disconnected from ", GetAddress().ToStringIP(),
                            " reason: ", strReason);
 
-                /* Notify local pool if enabled */
-                if(PoolDiscovery::IsLocalPoolEnabled() && context.fAuthenticated && context.hashGenesis != 0)
-                {
-                    PoolDiscovery::OnMinerDisconnected(context.hashGenesis);
-                }
-
                 /* Mark this protocol lane as disconnected in NodeSessionRegistry.
                  * This allows IsExpired() to start the inactivity timer so SweepExpired()
                  * can eventually reclaim the entry when the miner does not reconnect.
@@ -968,21 +961,6 @@ namespace LLP
 
                 debug::log(0, "   ✅ Packet sent!");
                 debug::log(2, "📥 === GET_BLOCK: SUCCESS (SIM-LINK) ===");
-
-                /* Notify local pool of authenticated miner (if not already notified) */
-                if(PoolDiscovery::IsLocalPoolEnabled() && context.fAuthenticated && context.hashGenesis != 0)
-                {
-                    bool fUsesFalcon1024 = false;
-                    if(context.fFalconVersionDetected)
-                        fUsesFalcon1024 = (context.nFalconVersion == LLC::FalconVersion::FALCON_1024);
-
-                    PoolDiscovery::OnMinerAuthenticated(
-                        context.hashGenesis,
-                        GetAddress().ToStringIP(),
-                        context.nChannel,
-                        fUsesFalcon1024
-                    );
-                }
 
                 /* Update context timestamp, height, last template channel height, and
                  * hashLastBlock snapshot (primary staleness anchor, StakeMinter pattern). */
@@ -1765,12 +1743,6 @@ namespace LLP
                             false, validationResult.reason);
                     }
 
-                    /* Notify local pool if enabled */
-                    if(PoolDiscovery::IsLocalPoolEnabled() && context.hashGenesis != 0)
-                    {
-                        PoolDiscovery::OnBlockSubmitted(context.hashGenesis, false);
-                    }
-                    
                     StatelessPacket response(STATELESS_BLOCK_REJECTED);
                     respond(response);
                     debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (", validationResult.reason, ") ===", ANSI_COLOR_RESET);
@@ -1791,12 +1763,6 @@ namespace LLP
                             false, acceptanceResult.reason);
                     }
 
-                    /* Notify local pool if enabled */
-                    if(PoolDiscovery::IsLocalPoolEnabled() && context.hashGenesis != 0)
-                    {
-                        PoolDiscovery::OnBlockSubmitted(context.hashGenesis, false);
-                    }
-
                     StatelessPacket response(STATELESS_BLOCK_REJECTED);
                     respond(response);
                     debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (", acceptanceResult.reason, ") ===", ANSI_COLOR_RESET);
@@ -1815,28 +1781,6 @@ namespace LLP
 
                 /* Look up the block entry for reward calculation and detailed logging */
                 auto it = mapBlocks.find(hashMerkle);
-
-                /* Notify local pool if enabled */
-                if(PoolDiscovery::IsLocalPoolEnabled() && context.hashGenesis != 0)
-                {
-                    PoolDiscovery::OnBlockSubmitted(context.hashGenesis, true);
-                    
-                    /* Calculate reward for block found notification */
-                    uint64_t nReward = 0;
-                    if(it != mapBlocks.end() && it->second.pBlock)
-                    {
-                        /* Get previous block state for reward calculation */
-                        TAO::Ledger::BlockState statePrev = TAO::Ledger::ChainState::tStateBest.load();
-                        
-                        /* Get block reward (in NXS base units) */
-                        nReward = TAO::Ledger::GetCoinbaseReward(
-                            statePrev, 
-                            it->second.pBlock->nChannel, 
-                            0);  // nType = 0 for mining rewards
-                        
-                        PoolDiscovery::OnBlockFound(context.hashGenesis, nReward);
-                    }
-                }
 
                 /* Generate an Accepted response. */
                 debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   ✅ Block accepted by network!", ANSI_COLOR_RESET);
@@ -4339,12 +4283,6 @@ namespace LLP
     void StatelessMinerConnection::RecordViolation(const std::string& strReason)
     {
         m_rateLimit.nViolationCount++;
-        
-        /* Notify local pool metrics if enabled */
-        if(PoolDiscovery::IsLocalPoolEnabled())
-        {
-            PoolDiscovery::IncrementRateLimitViolations();
-        }
         
         debug::warning(FUNCTION, "⚠️ Rate limit violation #", m_rateLimit.nViolationCount,
             " from ", GetAddress().ToStringIP(), ": ", strReason);
