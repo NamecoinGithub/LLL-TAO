@@ -23,7 +23,6 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_opcodes.h>
 #include <LLP/include/keepalive_v2.h>
 #include <LLP/include/colin_mining_agent.h>
-#include <LLP/include/chacha20_evp_manager.h>
 
 #include <LLD/include/global.h>
 
@@ -1808,20 +1807,6 @@ namespace LLP
 
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
-        /* Encrypt SESSION_KEEPALIVE response payload via EVP gate (carries session/chain state).
-         * Best-effort: fall back to plaintext if context not ready. */
-        if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
-        {
-            std::vector<uint8_t> vEncrypted;
-            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted))
-            {
-                response.DATA   = std::move(vEncrypted);
-                response.LENGTH = static_cast<uint32_t>(response.DATA.size());
-            }
-            else
-                debug::log(0, FUNCTION, "[EVP] SESSION_KEEPALIVE response encryption failed — sending plaintext");
-        }
-
         return ProcessResult::Success(newContext, response);
     }
 
@@ -1939,20 +1924,6 @@ namespace LLP
         response.DATA   = vAck;
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
-        /* Encrypt KEEPALIVE_V2_ACK payload via EVP gate (carries session/chain state).
-         * Best-effort: fall back to plaintext if context not ready. */
-        if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
-        {
-            std::vector<uint8_t> vEncrypted;
-            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted))
-            {
-                response.DATA   = std::move(vEncrypted);
-                response.LENGTH = static_cast<uint32_t>(response.DATA.size());
-            }
-            else
-                debug::log(0, FUNCTION, "[EVP] KEEPALIVE_V2_ACK encryption failed — sending plaintext");
-        }
-
         /* Notify Colin agent with keepalive telemetry */
         {
             std::string genesis_prefix = context.hashGenesis != uint256_t(0)
@@ -1985,15 +1956,9 @@ namespace LLP
         std::vector<uint8_t>& vPlaintext
     )
     {
-        /* EVP gate: Chacha20EvpManager owns the transport-encryption mode decision.
-         * Reward payloads use domain-specific AAD (AAD_REWARD_ADDRESS) for AEAD
-         * authentication, which is preserved in the LLC helper call below. The manager
-         * is consulted to confirm EVP mode; the actual decrypt delegates to the LLC
-         * helper so that the AAD domain separation contract is maintained.
-         * In non-EVP mode the LLC helper is still used as a best-effort fallback so
-         * that callers are not broken during any mode-transition period. */
-        if(!Chacha20EvpManager::Get().IsEvpActive())
-            debug::log(0, FUNCTION, "[EVP] DecryptRewardPayload: EVP mode inactive — attempting decrypt anyway");
+        /* Use LLC helper with domain-specific AAD for AEAD authentication.
+         * Future: route through Chacha20EvpManager::Get().Decrypt() as the
+         * unified gate for all encrypted packet types. */
         return LLC::DecryptPayloadChaCha20(vEncrypted, vKey, vPlaintext, AAD_REWARD_ADDRESS);
     }
 
@@ -2004,14 +1969,9 @@ namespace LLP
         const std::vector<uint8_t>& vKey
     )
     {
-        /* EVP gate: Chacha20EvpManager owns the transport-encryption mode decision.
-         * Reward result payloads use domain-specific AAD (AAD_REWARD_RESULT) for AEAD
-         * authentication, which is preserved in the LLC helper call below. The manager
-         * is consulted to confirm EVP mode; the actual encrypt delegates to the LLC
-         * helper so that the AAD domain separation contract is maintained.
-         * In non-EVP mode the LLC helper is still used as a best-effort fallback. */
-        if(!Chacha20EvpManager::Get().IsEvpActive())
-            debug::log(0, FUNCTION, "[EVP] EncryptRewardResult: EVP mode inactive — encrypting anyway");
+        /* Use LLC helper with domain-specific AAD for AEAD authentication.
+         * Future: route through Chacha20EvpManager::Get().Encrypt() as the
+         * unified gate for all encrypted packet types. */
         return LLC::EncryptPayloadChaCha20(vPlaintext, vKey, AAD_REWARD_RESULT);
     }
 

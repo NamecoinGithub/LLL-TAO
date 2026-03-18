@@ -14,7 +14,6 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/genesis_constants.h>
 #include <LLP/include/node_cache.h>
-#include <LLP/include/chacha20_evp_manager.h>
 
 #include <TAO/Ledger/types/block.h>
 #include <TAO/Register/types/address.h>
@@ -486,18 +485,6 @@ namespace LLP
         {
             debug::log(2, FUNCTION, "SIM-LINK cleanup: removed ", nLimitersRemoved,
                 " session limiters, ", nBlocksRemoved, " session block maps");
-        }
-
-        /* Pass C — EVP manager session key pruning.
-         * Collect all live session IDs from mapMiners and forward to the manager so
-         * that any future internal per-session key store it maintains stays bounded. */
-        {
-            std::vector<uint32_t> vLiveSessionIds;
-            auto pairs = mapMiners.GetAllPairs();
-            vLiveSessionIds.reserve(pairs.size());
-            for(const auto& pair : pairs)
-                vLiveSessionIds.push_back(pair.second.nSessionId);
-            Chacha20EvpManager::Get().prune_expired_sessions(vLiveSessionIds);
         }
 
         return nLimitersRemoved + nBlocksRemoved;
