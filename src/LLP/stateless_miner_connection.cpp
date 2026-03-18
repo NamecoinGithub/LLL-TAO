@@ -2472,12 +2472,14 @@ namespace LLP
 
                 /* Attempt EVP decrypt of SESSION_STATUS payload (MITM hardening).
                  * Graceful fallback: if decrypt fails, process as plaintext to allow
-                 * miners that have not yet upgraded to the encrypted keepalive. */
+                 * miners that have not yet upgraded to the encrypted keepalive.
+                 * AAD = opcode bytes in LE order (matches NexusMiner convention). */
                 std::vector<uint8_t> vSessionStatusPayload = PACKET.DATA;
                 if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
                 {
                     std::vector<uint8_t> vDecrypted;
-                    if(Chacha20EvpManager::Get().Decrypt(PACKET.DATA, context.vChaChaKey, vDecrypted))
+                    const auto vAAD = OpcodeAAD(OpcodeUtility::Stateless::SESSION_STATUS);
+                    if(Chacha20EvpManager::Get().Decrypt(PACKET.DATA, context.vChaChaKey, vDecrypted, vAAD))
                         vSessionStatusPayload = std::move(vDecrypted);
                     else
                         debug::log(0, FUNCTION, "[EVP] SESSION_STATUS decrypt failed — processing as plaintext (migration fallback)");
@@ -2520,11 +2522,13 @@ namespace LLP
                 ackResponse.LENGTH = static_cast<uint32_t>(vAck.size());
 
                 /* Encrypt SESSION_STATUS_ACK payload (carries SessionID — MITM vector).
-                 * Best-effort: fall back to plaintext if context not ready. */
+                 * Best-effort: fall back to plaintext if context not ready.
+                 * AAD = opcode bytes in LE order (matches NexusMiner convention). */
                 if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
                 {
                     std::vector<uint8_t> vEncrypted;
-                    if(Chacha20EvpManager::Get().Encrypt(ackResponse.DATA, context.vChaChaKey, vEncrypted))
+                    const auto vAAD = OpcodeAAD(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
+                    if(Chacha20EvpManager::Get().Encrypt(ackResponse.DATA, context.vChaChaKey, vEncrypted, vAAD))
                     {
                         ackResponse.DATA   = std::move(vEncrypted);
                         ackResponse.LENGTH = static_cast<uint32_t>(ackResponse.DATA.size());
