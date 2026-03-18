@@ -49,6 +49,25 @@ namespace LLP
     };
 
 
+    /** OpcodeAAD
+     *
+     *  Build a 2-byte AAD vector from a 16-bit stateless opcode.
+     *  Bytes are stored in little-endian order to match the NexusMiner convention.
+     *
+     *  @param[in] nOpcode  16-bit stateless opcode (e.g. 0xD0D4).
+     *
+     *  @return 2-byte vector {low_byte, high_byte}.
+     *
+     **/
+    inline std::vector<uint8_t> OpcodeAAD(uint16_t nOpcode)
+    {
+        return {
+            static_cast<uint8_t>(nOpcode & 0xFF),
+            static_cast<uint8_t>((nOpcode >> 8) & 0xFF)
+        };
+    }
+
+
     /** Chacha20EvpManager
      *
      *  NODE-side transport encryption gate. Singleton.
@@ -156,13 +175,16 @@ namespace LLP
          *  @param[in]  vPlain  Plaintext payload to encrypt.
          *  @param[in]  vKey    32-byte symmetric session key.
          *  @param[out] vOut    Encrypted output (nonce + ciphertext + tag).
+         *  @param[in]  vAAD    Additional Authenticated Data (optional, for domain separation).
+         *                      Convention: opcode byte(s) in little-endian order.
          *
          *  @return true on success, false on failure.
          *
          **/
         bool Encrypt(const std::vector<uint8_t>& vPlain,
                      const std::vector<uint8_t>& vKey,
-                     std::vector<uint8_t>& vOut) const;
+                     std::vector<uint8_t>& vOut,
+                     const std::vector<uint8_t>& vAAD = std::vector<uint8_t>()) const;
 
 
         /** Decrypt
@@ -175,13 +197,16 @@ namespace LLP
          *  @param[in]  vCipher Ciphertext payload (nonce + ciphertext + tag).
          *  @param[in]  vKey    32-byte symmetric session key.
          *  @param[out] vOut    Decrypted plaintext output.
+         *  @param[in]  vAAD    Additional Authenticated Data (must match encryption).
+         *                      Convention: opcode byte(s) in little-endian order.
          *
          *  @return true on success, false on failure.
          *
          **/
         bool Decrypt(const std::vector<uint8_t>& vCipher,
                      const std::vector<uint8_t>& vKey,
-                     std::vector<uint8_t>& vOut) const;
+                     std::vector<uint8_t>& vOut,
+                     const std::vector<uint8_t>& vAAD = std::vector<uint8_t>()) const;
 
 
         /** AllowPlaintext

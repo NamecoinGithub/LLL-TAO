@@ -1809,11 +1809,13 @@ namespace LLP
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
         /* Encrypt SESSION_KEEPALIVE response payload via EVP gate (carries session/chain state).
-         * Best-effort: fall back to plaintext if context not ready. */
+         * Best-effort: fall back to plaintext if context not ready.
+         * AAD = opcode bytes in LE order (matches NexusMiner convention). */
         if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
         {
             std::vector<uint8_t> vEncrypted;
-            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted))
+            const auto vAAD = OpcodeAAD(StatelessOpcodes::SESSION_KEEPALIVE);
+            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted, vAAD))
             {
                 response.DATA   = std::move(vEncrypted);
                 response.LENGTH = static_cast<uint32_t>(response.DATA.size());
@@ -1940,11 +1942,13 @@ namespace LLP
         response.LENGTH = static_cast<uint32_t>(response.DATA.size());
 
         /* Encrypt KEEPALIVE_V2_ACK payload via EVP gate (carries session/chain state).
-         * Best-effort: fall back to plaintext if context not ready. */
+         * Best-effort: fall back to plaintext if context not ready.
+         * AAD = opcode bytes in LE order (matches NexusMiner convention). */
         if(Chacha20EvpManager::Get().IsEvpActive() && context.fEncryptionReady && !context.vChaChaKey.empty())
         {
             std::vector<uint8_t> vEncrypted;
-            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted))
+            const auto vAAD = OpcodeAAD(StatelessOpcodes::KEEPALIVE_V2_ACK);
+            if(Chacha20EvpManager::Get().Encrypt(response.DATA, context.vChaChaKey, vEncrypted, vAAD))
             {
                 response.DATA   = std::move(vEncrypted);
                 response.LENGTH = static_cast<uint32_t>(response.DATA.size());
