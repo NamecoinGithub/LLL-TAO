@@ -99,15 +99,14 @@ namespace LLP
     bool Chacha20EvpManager::Encrypt(
         const std::vector<uint8_t>& vPlain,
         const std::vector<uint8_t>& vKey,
-        std::vector<uint8_t>& vOut,
-        const std::vector<uint8_t>& vAAD) const
+        std::vector<uint8_t>& vOut) const
     {
         const MiningTransportMode eMode = m_mode.load();
 
         if(eMode == MiningTransportMode::EVP)
         {
             /* Delegate to the LLC ChaCha20-Poly1305 helper */
-            vOut = LLC::EncryptPayloadChaCha20(vPlain, vKey, vAAD);
+            vOut = LLC::EncryptPayloadChaCha20(vPlain, vKey);
             return !vOut.empty();
         }
 
@@ -128,15 +127,14 @@ namespace LLP
     bool Chacha20EvpManager::Decrypt(
         const std::vector<uint8_t>& vCipher,
         const std::vector<uint8_t>& vKey,
-        std::vector<uint8_t>& vOut,
-        const std::vector<uint8_t>& vAAD) const
+        std::vector<uint8_t>& vOut) const
     {
         const MiningTransportMode eMode = m_mode.load();
 
         if(eMode == MiningTransportMode::EVP)
         {
             /* Delegate to the LLC ChaCha20-Poly1305 helper */
-            return LLC::DecryptPayloadChaCha20(vCipher, vKey, vOut, vAAD);
+            return LLC::DecryptPayloadChaCha20(vCipher, vKey, vOut);
         }
 
         if(eMode == MiningTransportMode::TLS)
