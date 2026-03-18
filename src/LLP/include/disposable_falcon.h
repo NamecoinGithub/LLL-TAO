@@ -180,6 +180,23 @@ namespace DisposableFalcon
             uint64_t nNonce
         ) = 0;
 
+        /** UnwrapWorkSubmission
+         *
+         *  Deserialize and verify a signed work submission produced by WrapWorkSubmission.
+         *  The session public key is used to verify the Falcon signature.
+         *  Complements WrapWorkSubmission() to enable round-trip tests and node-side verify.
+         *
+         *  @param[in] vData    Serialized submission bytes (from SignedWorkSubmission::Serialize())
+         *  @param[in] vPubKey  Falcon public key to verify the signature against
+         *
+         *  @return WrapperResult containing the verified submission, or failure on any error
+         *
+         **/
+        virtual WrapperResult UnwrapWorkSubmission(
+            const std::vector<uint8_t>& vData,
+            const std::vector<uint8_t>& vPubKey
+        ) = 0;
+
         /** GetSessionKeyId
          *
          *  Get the key ID of the current session's disposable key.

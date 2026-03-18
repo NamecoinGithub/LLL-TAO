@@ -543,7 +543,23 @@ namespace LLP
                  * ChannelStateManager and update the Colin report. */
                 MiningContext recoveredContext;
                 bool fRecovered = SessionRecoveryManager::Get().RecoverSessionByAddress(strAddr, recoveredContext);
-                if(!fRecovered && strAddr != "127.0.0.1" && strAddr != "::1")
+                if(fRecovered)
+                {
+                    /* Restore the previously authenticated session so that miners that
+                     * reconnect after a brief TCP drop do not need to re-authenticate
+                     * before keepalives and mining operations resume.
+                     * Preserve the current address and refresh the activity timestamp. */
+                    recoveredContext.strAddress = strAddr;
+                    recoveredContext = recoveredContext
+                        .WithTimestamp(runtime::unifiedtimestamp())
+                        .WithProtocolLane(ProtocolLane::STATELESS);
+                    context = recoveredContext;
+
+                    debug::log(0, FUNCTION, "Session recovered for reconnecting miner ",
+                               strAddr, " sessionId=", context.nSessionId,
+                               " keyId=", FullHexOrUnset(context.hashKeyID));
+                }
+                else if(strAddr != "127.0.0.1" && strAddr != "::1")
                 {
                     FailoverConnectionTracker::Get().RecordConnection(strAddr);
                     debug::log(0, FUNCTION, "No prior session for ", strAddr,
@@ -2787,6 +2803,22 @@ namespace LLP
                     errorResponse.LENGTH = 1;
                     respond(errorResponse);
                     debug::log(2, FUNCTION, "Sent MINER_AUTH_RESULT error response");
+                }
+                else if(PACKET.HEADER == OpcodeUtility::Stateless::KEEPALIVE_V2)
+                {
+                    /* KEEPALIVE_V2 failed (typically: session not authenticated on reconnect).
+                     * Send SESSION_EXPIRED so the miner knows to re-authenticate rather
+                     * than looping on keepalive timeouts with no response. */
+                    errorResponse.HEADER = OpcodeUtility::Stateless::SESSION_EXPIRED;
+                    const uint32_t nSessionId = context.nSessionId;
+                    errorResponse.DATA.push_back(static_cast<uint8_t>(nSessionId & 0xFF));
+                    errorResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 8) & 0xFF));
+                    errorResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 16) & 0xFF));
+                    errorResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 24) & 0xFF));
+                    errorResponse.DATA.push_back(0x01);  /* EXPIRED_INACTIVITY */
+                    errorResponse.LENGTH = 5;
+                    respond(errorResponse);
+                    debug::log(2, FUNCTION, "Sent SESSION_EXPIRED for unauthenticated KEEPALIVE_V2");
                 }
                 
                 /* For other packet types, connection will be closed gracefully */

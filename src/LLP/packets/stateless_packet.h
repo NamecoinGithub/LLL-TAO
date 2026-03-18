@@ -211,6 +211,47 @@ namespace LLP
         }
 
 
+        /** HasDataPayload
+         *
+         *  Check whether this stateless opcode carries a data payload (LENGTH + DATA fields).
+         *  Mirrors OpcodeUtility::HasDataPayload16() logic without requiring that header.
+         *
+         *  Un-mirrored stateless-only data-bearing opcodes (0xD100, 0xD101, 0xD0E0, 0xD0E1)
+         *  always have payloads.  For mirrored opcodes (0xD0xx), the high byte is 0xD0
+         *  and the low byte is the legacy 8-bit opcode whose payload rules apply:
+         *   - 0-127: traditional data packets
+         *   - 204-205: mining round response (NEW_ROUND / OLD_ROUND)
+         *   - 206: CHANNEL_ACK
+         *   - 207-212: Falcon auth/session packets
+         *   - 213-214: reward-binding packets
+         *   - 217-218: push-notification packets
+         *   - 219-220: SESSION_STATUS / SESSION_STATUS_ACK
+         *
+         *  @return true if the opcode carries a payload
+         *
+         **/
+        bool HasDataPayload() const
+        {
+            /* Un-mirrored stateless-only opcodes */
+            if(HEADER == 0xD100 || HEADER == 0xD101 ||  // KEEPALIVE_V2 / KEEPALIVE_V2_ACK
+               HEADER == 0xD0E0 || HEADER == 0xD0E1)    // PING_DIAG / PONG_DIAG
+                return true;
+
+            /* Mirrored opcodes: extract 8-bit base opcode from low byte */
+            if((HEADER & 0xFF00) == 0xD000)
+            {
+                const uint8_t op = static_cast<uint8_t>(HEADER & 0xFF);
+                if(op < 128)                return true;  // traditional data
+                if(op >= 204 && op <= 206)  return true;  // NEW_ROUND/OLD_ROUND/CHANNEL_ACK
+                if(op >= 207 && op <= 212)  return true;  // Falcon auth + keepalive
+                if(op >= 213 && op <= 214)  return true;  // reward-binding
+                if(op == 217 || op == 218)  return true;  // push notifications
+                if(op == 219 || op == 220)  return true;  // SESSION_STATUS / ACK
+            }
+            return false;
+        }
+
+
         /** GetBytes
          *
          *  Serializes class into a byte vector. Used to write packet to sockets.

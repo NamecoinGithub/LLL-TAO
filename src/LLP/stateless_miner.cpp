@@ -774,6 +774,17 @@ namespace LLP
         return ProcessResult(ctx, true, "", resp);
     }
 
+    ProcessResult ProcessResult::Success(const MiningContext& ctx, const Packet& legacyResp)
+    {
+        /* Wrap legacy 8-bit Packet into a StatelessPacket so callers using the
+         * legacy overload (e.g., unit tests) continue to compile and run. */
+        StatelessPacket sp;
+        sp.HEADER = static_cast<uint16_t>(legacyResp.HEADER);
+        sp.LENGTH = legacyResp.LENGTH;
+        sp.DATA   = legacyResp.DATA;
+        return ProcessResult(ctx, true, "", sp);
+    }
+
     ProcessResult ProcessResult::Error(const MiningContext& ctx, const std::string& error)
     {
         return ProcessResult(ctx, false, error, StatelessPacket());

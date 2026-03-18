@@ -408,6 +408,20 @@ namespace DisposableFalcon
             hashKeyID = 0;
             fHasSession = false;
         }
+
+
+        /* Deserialize and verify a signed work submission using the provided public key */
+        WrapperResult UnwrapWorkSubmission(
+            const std::vector<uint8_t>& vData,
+            const std::vector<uint8_t>& vPubKey
+        ) override
+        {
+            SignedWorkSubmission result;
+            if(!VerifyWorkSubmission(vData, vPubKey, result))
+                return WrapperResult::Failure("UnwrapWorkSubmission: signature verification failed");
+
+            return WrapperResult::Success(result);
+        }
     };
 
 

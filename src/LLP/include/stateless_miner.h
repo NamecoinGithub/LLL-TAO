@@ -1042,6 +1042,18 @@ namespace LLP
             const StatelessPacket& resp = StatelessPacket()
         );
 
+        /** Success (legacy Packet overload)
+         *
+         *  Convenience overload that accepts a legacy 8-bit Packet response.
+         *  Wraps the Packet in a StatelessPacket so tests written against the
+         *  legacy API continue to compile; the HEADER is preserved as-is.
+         *
+         **/
+        static ProcessResult Success(
+            const MiningContext& ctx,
+            const Packet& legacyResp
+        );
+
         /** Error
          *
          *  Create an error result with unchanged context and error message.
