@@ -752,8 +752,18 @@ namespace LLP
         /** Track whether NODE_SHUTDOWN was already sent on this connection. **/
         GracefulShutdown::NotificationState m_nodeShutdownNotification;
 
+        /** Set when disconnect/shutdown begins so in-flight push notifications can abort early. **/
+        std::atomic<bool> m_shutdownRequested{false};
+
 
     public:
+
+        /** Mark this miner as shutting down and close the socket to interrupt any in-flight notification work. **/
+        void RequestShutdown()
+        {
+            m_shutdownRequested.store(true, std::memory_order_release);
+            Disconnect();
+        }
 
         /** SendNodeShutdown
          *
@@ -771,6 +781,12 @@ namespace LLP
         bool NodeShutdownSent() const
         {
             return m_nodeShutdownNotification.Sent();
+        }
+
+        /** Check whether disconnect/shutdown has been requested on this connection. **/
+        bool ShutdownRequested() const
+        {
+            return m_shutdownRequested.load(std::memory_order_acquire);
         }
 
     };

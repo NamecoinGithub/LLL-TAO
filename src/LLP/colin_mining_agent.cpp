@@ -134,8 +134,10 @@ namespace LLP
     , m_global()
     , m_interval_s(60)
     , m_report_thread()
+    , m_shutdownReportThread()
     , m_stop(false)
     , m_running(false)
+    , m_shutdownReportPending(false)
     {
     }
 
@@ -178,12 +180,20 @@ namespace LLP
     void ColinMiningAgent::stop()
     {
         if(!m_running.load())
+        {
+            if(m_shutdownReportThread.joinable())
+                m_shutdownReportThread.join();
+
             return;
+        }
 
         m_stop.store(true);
 
         if(m_report_thread.joinable())
             m_report_thread.join();
+
+        if(m_shutdownReportThread.joinable())
+            m_shutdownReportThread.join();
 
         m_running.store(false);
         debug::log(1, FUNCTION, "Colin mining agent stopped");
@@ -192,8 +202,40 @@ namespace LLP
 
     void ColinMiningAgent::on_node_shutdown()
     {
-        debug::log(0, FUNCTION, "Node shutdown — emitting final Colin report before miner disconnect");
-        emit_report();
+        if(m_running.load())
+        {
+            debug::log(0, FUNCTION, "Node shutdown — requesting final Colin report on background report thread");
+            m_stop.store(true);
+            return;
+        }
+
+        if(m_shutdownReportPending.exchange(true, std::memory_order_acq_rel))
+        {
+            debug::log(1, FUNCTION, "Node shutdown Colin report already pending");
+            return;
+        }
+
+        debug::log(0, FUNCTION, "Node shutdown — queueing final Colin report in background");
+        if(m_shutdownReportThread.joinable())
+            m_shutdownReportThread.join();
+
+        m_shutdownReportThread = std::thread([this]()
+        {
+            try
+            {
+                emit_report();
+            }
+            catch(const std::exception& e)
+            {
+                debug::error(FUNCTION, "Background Colin shutdown report failed: ", e.what());
+            }
+            catch(...)
+            {
+                debug::error(FUNCTION, "Background Colin shutdown report failed: unknown exception");
+            }
+
+            m_shutdownReportPending.store(false, std::memory_order_release);
+        });
     }
 
 

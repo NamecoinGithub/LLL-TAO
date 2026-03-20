@@ -429,6 +429,9 @@ namespace LLP
                 }
                 debug::log(0, FUNCTION, "[", strCategory, "] Disconnecting ", GetAddress().ToStringIP(), " (", strReason, ")");
 
+                /* Interrupt any in-flight SendChannelNotification() path immediately. */
+                m_shutdownRequested.store(true, std::memory_order_release);
+
                 /* Notify NodeSessionRegistry that this legacy lane miner has disconnected.
                  * hashKeyID is set during Falcon authentication; zero means never authenticated. */
                 if(fMinerAuthenticated && hashKeyID != 0)
@@ -1716,11 +1719,34 @@ namespace LLP
     /* SendChannelNotification - Send push notification to subscribed miner (legacy lane) */
     void Miner::SendChannelNotification()
     {
+        auto shouldAbortNotification = [this]()
+        {
+            return GracefulShutdown::ShouldAbortChannelNotification(
+                Connected(),
+                m_shutdownRequested.load(std::memory_order_acquire),
+                config::fShutdown.load()
+            );
+        };
+
+        if(shouldAbortNotification())
+        {
+            debug::log(1, FUNCTION, "Skipping channel notification for ", GetAddress().ToStringIP(),
+                       " due to disconnect/shutdown state");
+            return;
+        }
+
         /* Push throttle — drop if a template was sent less than
          * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
          * Re-subscription responses bypass via m_force_next_push. */
         {
             LOCK(MUTEX);
+            if(shouldAbortNotification())
+            {
+                debug::log(1, FUNCTION, "Aborting channel notification for ", GetAddress().ToStringIP(),
+                           " after acquiring lock due to disconnect/shutdown state");
+                return;
+            }
+
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
@@ -1756,6 +1782,13 @@ namespace LLP
         /* Keep the tip hash consistent with the loaded best-state snapshot. */
         const uint1024_t hashBestChain =
             PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
+        if(shouldAbortNotification())
+        {
+            debug::log(1, FUNCTION, "Aborting channel notification for ", GetAddress().ToStringIP(),
+                       " before send due to disconnect/shutdown state");
+            return;
+        }
         
         /* Build notification using unified builder (8-bit opcodes for legacy lane) */
         Packet notification = PushNotificationBuilder::BuildChannelNotification<Packet>(
