@@ -1657,22 +1657,11 @@ namespace LLP
                 debug::log(0, FUNCTION, "SESSION_KEEPALIVE rejected - session expired for sessionId=",
                            context.nSessionId, " last_activity=", context.nTimestamp);
 
-                /* Send SESSION_EXPIRED notification to miner instead of silent disconnect.
-                 * This allows the miner to know it needs to re-authenticate rather than
-                 * seeing a bare TCP disconnect error. */
+                /* Use canonical SESSION_EXPIRED payload builder (liveness_ack.h) */
                 StatelessPacket expiredResponse(StatelessOpcodes::SESSION_EXPIRED);
-
-                /* Build 5-byte payload: session_id (4 bytes LE) + reason (1 byte) */
-                uint32_t nSessionId = context.nSessionId;
-                expiredResponse.DATA.push_back(static_cast<uint8_t>(nSessionId & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 8) & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 16) & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 24) & 0xFF));
-
-                /* Reason code: 0x01 = EXPIRED_INACTIVITY (no keepalive within timeout) */
-                expiredResponse.DATA.push_back(0x01);
-
-                expiredResponse.LENGTH = 5;
+                expiredResponse.DATA = LivenessAck::BuildSessionExpiredPayload(
+                    context.nSessionId, LivenessAck::EXPIRED_REASON_INACTIVITY);
+                expiredResponse.LENGTH = static_cast<uint32_t>(expiredResponse.DATA.size());
 
                 debug::log(0, FUNCTION, "Sending SESSION_EXPIRED notification to miner (sessionId=",
                            context.nSessionId, ", reason=INACTIVITY)");
@@ -1688,20 +1677,16 @@ namespace LLP
         std::array<uint8_t, 4> prevblockSuffixBytes = {};
         bool fIsV2 = KeepaliveV2::ParsePayload(packet.DATA, nPayloadSession, prevblockSuffixBytes);
 
-        /* Update timestamp, keepalive counters, and v2 fields if applicable */
-        uint32_t nNewKeepaliveCount = context.nKeepaliveCount + 1;
-        uint32_t nNewKeepaliveSent = context.nKeepaliveSent + 1;
-        MiningContext newContext = context
-            .WithTimestamp(nNow)
-            .WithKeepaliveCount(nNewKeepaliveCount)
-            .WithKeepaliveSent(nNewKeepaliveSent)
-            .WithLastKeepaliveTime(nNow);
+        /* Apply canonical health-state update (nTimestamp, nKeepaliveCount,
+         * nKeepaliveSent, nLastKeepaliveTime).  Stake height populated below
+         * on the v2 path once chain heights are gathered. */
+        MiningContext newContext = ApplyKeepaliveHealth(context, nNow);
 
         if(fIsV2)
             newContext = newContext.WithMinerPrevblockSuffix(prevblockSuffixBytes);
 
         /* Log at different verbosity levels based on keepalive frequency */
-        uint32_t nLogLevel = (nNewKeepaliveCount % 10 == 0) ? 2 : 3;
+        uint32_t nLogLevel = (newContext.nKeepaliveCount % 10 == 0) ? 2 : 3;
         if(fIsV2)
         {
             char suffixHex[9];
@@ -1709,21 +1694,23 @@ namespace LLP
                           prevblockSuffixBytes[0], prevblockSuffixBytes[1],
                           prevblockSuffixBytes[2], prevblockSuffixBytes[3]);
             debug::log(nLogLevel, FUNCTION, "SESSION_KEEPALIVE v2 from sessionId=", context.nSessionId,
-                       " keepalive_rx=", nNewKeepaliveCount,
-                       " keepalive_tx=", nNewKeepaliveSent,
+                       " keepalive_rx=", newContext.nKeepaliveCount,
+                       " keepalive_tx=", newContext.nKeepaliveSent,
                        " prevblock_suffix=", suffixHex,
-                       " session_duration=", newContext.GetSessionDuration(nNow), "s");
+                       " session_duration=", newContext.GetSessionDuration(nNow), "s",
+                       " [liveness:SESSION_KEEPALIVE/v2-req]");
         }
         else
         {
             debug::log(nLogLevel, FUNCTION, "SESSION_KEEPALIVE from sessionId=", context.nSessionId,
-                       " keepalive_rx=", nNewKeepaliveCount,
-                       " keepalive_tx=", nNewKeepaliveSent,
-                       " session_duration=", newContext.GetSessionDuration(nNow), "s");
+                       " keepalive_rx=", newContext.nKeepaliveCount,
+                       " keepalive_tx=", newContext.nKeepaliveSent,
+                       " session_duration=", newContext.GetSessionDuration(nNow), "s",
+                       " [liveness:SESSION_KEEPALIVE/v1-req]");
         }
 
         /* Build keepalive response.
-         * v2 reply (28 bytes): BESTCURRENT telemetry if miner sent v2 this packet, or
+         * v2 reply (32 bytes): BESTCURRENT telemetry if miner sent v2 this packet, or
          *   if the session was previously negotiated to v2.
          * v1 reply (5 bytes): [status(1)][remaining_timeout(4)] for legacy miners. */
         StatelessPacket response(StatelessOpcodes::SESSION_KEEPALIVE);
@@ -1731,31 +1718,9 @@ namespace LLP
         bool fSendV2 = (fIsV2 || newContext.fKeepaliveV2);
         if(fSendV2)
         {
-            /* Gather current chain state for unified 32-byte reply.
-             * CRITICAL: Use stateBest.GetHash() instead of loading hashBestChain separately
-             * to prevent race conditions where heights come from block N but hash from block N+1.
-             * This ensures hash_tip_lo32 matches the unified height being reported. */
-            TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-            uint32_t nUnifiedHeight = stateBest.nHeight;
-
-            TAO::Ledger::BlockState stateChannel = stateBest;
-            uint32_t nPrimeHeight = 0;
-            if(TAO::Ledger::GetLastState(stateChannel, 1))
-                nPrimeHeight = stateChannel.nChannelHeight;
-
-            stateChannel = stateBest;
-            uint32_t nHashHeight = 0;
-            if(TAO::Ledger::GetLastState(stateChannel, 2))
-                nHashHeight = stateChannel.nChannelHeight;
-
-            stateChannel = stateBest;
-            uint32_t nStakeHeight = 0;
-            if(TAO::Ledger::GetLastState(stateChannel, 0))
-                nStakeHeight = stateChannel.nChannelHeight;
-
-            /* Extract hash from the same atomic snapshot to ensure consistency */
-            uint1024_t hashBestChain = stateBest.GetHash();
-            uint32_t nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
+            /* Use canonical chain height gatherer — single atomic snapshot,
+             * no separate hashBestChain.load() race. */
+            LivenessAck::ChainHeightSnapshot heights = GatherCurrentChainHeights();
 
             uint32_t nMinerPrevHashLo32 = 0u;
             if(fIsV2)
@@ -1765,29 +1730,49 @@ namespace LLP
                     (uint32_t(prevblockSuffixBytes[2]) <<  8) |
                      uint32_t(prevblockSuffixBytes[3]);
 
-            uint32_t nForkScore = (nMinerPrevHashLo32 != 0 && nMinerPrevHashLo32 != nHashTipLo32) ? 1u : 0u;
+            uint32_t nForkScore = (nMinerPrevHashLo32 != 0 &&
+                                   nMinerPrevHashLo32 != heights.nHashTipLo32) ? 1u : 0u;
 
             std::vector<uint8_t> vV2 = KeepaliveV2::BuildUnifiedResponse(
                 newContext.nSessionId,
-                nMinerPrevHashLo32,    // echo miner's fork canary (0 if v1 miner)
-                nUnifiedHeight,
-                nHashTipLo32,
-                nPrimeHeight,
-                nHashHeight,
-                nStakeHeight,
-                nForkScore);           // computed canary (0 if v1 miner, 0 if hashes match)
+                nMinerPrevHashLo32,         // echo miner's fork canary (0 if v1 miner)
+                heights.nUnifiedHeight,
+                heights.nHashTipLo32,
+                heights.nPrimeHeight,
+                heights.nHashHeight,
+                heights.nStakeHeight,
+                nForkScore);                // computed canary (0 if hashes match)
 
             response.DATA = vV2;
 
+            /* Persist stake height in context so it is available between keepalives */
+            newContext = newContext.WithStakeHeight(heights.nStakeHeight);
+
             debug::log(nLogLevel, FUNCTION, "SESSION_KEEPALIVE unified reply (32 bytes): sessionId=",
                        newContext.nSessionId,
-                       " unified=", nUnifiedHeight,
-                       " prime=", nPrimeHeight,
-                       " hash=", nHashHeight,
-                       " stake=", nStakeHeight,
-                       " hash_tip_lo32=0x", std::hex, nHashTipLo32,
+                       " unified=", heights.nUnifiedHeight,
+                       " prime=", heights.nPrimeHeight,
+                       " hash=", heights.nHashHeight,
+                       " stake=", heights.nStakeHeight,
+                       " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
                        " miner_prevhash_lo32=0x", nMinerPrevHashLo32,
-                       " fork_score=", std::dec, nForkScore);
+                       " fork_score=", std::dec, nForkScore,
+                       " [liveness:SESSION_KEEPALIVE/v2-ack]");
+
+            /* Notify Colin agent with keepalive telemetry — consistent with
+             * ProcessKeepaliveV2 so both ACK families update health observability. */
+            {
+                std::string genesis_prefix = context.hashGenesis != uint256_t(0)
+                    ? context.hashGenesis.SubString(8)
+                    : std::string{};
+                ColinMiningAgent::Get().on_keepalive_ack(
+                    genesis_prefix,
+                    heights.nUnifiedHeight,
+                    heights.nPrimeHeight,
+                    heights.nHashHeight,
+                    heights.nStakeHeight,
+                    nForkScore);
+            }
         }
         else
         {
@@ -1841,20 +1826,11 @@ namespace LLP
                 debug::log(0, FUNCTION, "KEEPALIVE_V2 rejected - session expired for sessionId=",
                            context.nSessionId, " last_activity=", context.nTimestamp);
 
-                /* Send SESSION_EXPIRED notification to miner instead of silent disconnect */
+                /* Use canonical SESSION_EXPIRED payload builder (liveness_ack.h) */
                 StatelessPacket expiredResponse(StatelessOpcodes::SESSION_EXPIRED);
-
-                /* Build 5-byte payload: session_id (4 bytes LE) + reason (1 byte) */
-                uint32_t nSessionId = context.nSessionId;
-                expiredResponse.DATA.push_back(static_cast<uint8_t>(nSessionId & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 8) & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 16) & 0xFF));
-                expiredResponse.DATA.push_back(static_cast<uint8_t>((nSessionId >> 24) & 0xFF));
-
-                /* Reason code: 0x01 = EXPIRED_INACTIVITY */
-                expiredResponse.DATA.push_back(0x01);
-
-                expiredResponse.LENGTH = 5;
+                expiredResponse.DATA = LivenessAck::BuildSessionExpiredPayload(
+                    context.nSessionId, LivenessAck::EXPIRED_REASON_INACTIVITY);
+                expiredResponse.LENGTH = static_cast<uint32_t>(expiredResponse.DATA.size());
 
                 debug::log(0, FUNCTION, "Sending SESSION_EXPIRED notification to miner (sessionId=",
                            context.nSessionId, ", reason=INACTIVITY)");
@@ -1871,54 +1847,34 @@ namespace LLP
             return ProcessResult::Error(context, "KEEPALIVE_V2: invalid payload");
         }
 
-        /* Gather live chain state.
-         * CRITICAL: Use stateBest.GetHash() instead of loading hashBestChain separately
-         * to prevent race conditions where heights come from block N but hash from block N+1.
-         * This ensures hash_tip_lo32 matches the unified height being reported. */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        uint32_t nUnifiedHeight = stateBest.nHeight;
-
-        TAO::Ledger::BlockState stateChannel = stateBest;
-        uint32_t nPrimeHeight = 0;
-        if(TAO::Ledger::GetLastState(stateChannel, 1))
-            nPrimeHeight = stateChannel.nChannelHeight;
-
-        stateChannel = stateBest;
-        uint32_t nHashHeight = 0;
-        if(TAO::Ledger::GetLastState(stateChannel, 2))
-            nHashHeight = stateChannel.nChannelHeight;
-
-        stateChannel = stateBest;
-        uint32_t nStakeHeight = 0;
-        if(TAO::Ledger::GetLastState(stateChannel, 0))
-            nStakeHeight = stateChannel.nChannelHeight;
-
-        /* Extract hash from the same atomic snapshot to ensure consistency */
-        uint1024_t hashBestChain = stateBest.GetHash();
-        uint32_t nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
+        /* Gather live chain state via canonical helper — single atomic snapshot,
+         * consistent heights and hash with no race between separate loads. */
+        LivenessAck::ChainHeightSnapshot heights = GatherCurrentChainHeights();
 
         /* fork_score: non-zero when miner's prevHash lo32 differs from node tip —
          * checked by Miner::IsForkDetected() as (hash_tip_lo32 != myHashPrevBlock_lo32 || fork_score > 0) */
-        uint32_t nForkScore = (frame.hashPrevBlock_lo32 != 0 && frame.hashPrevBlock_lo32 != nHashTipLo32) ? 1u : 0u;
+        uint32_t nForkScore = (frame.hashPrevBlock_lo32 != 0 &&
+                               frame.hashPrevBlock_lo32 != heights.nHashTipLo32) ? 1u : 0u;
 
         /* Build 32-byte unified ACK */
         std::vector<uint8_t> vAck = KeepaliveV2::BuildUnifiedResponse(
             context.nSessionId,        // session_id — authoritative session identifier
             frame.hashPrevBlock_lo32,  // echo miner's fork canary
-            nUnifiedHeight,
-            nHashTipLo32,
-            nPrimeHeight,
-            nHashHeight,
-            nStakeHeight,
+            heights.nUnifiedHeight,
+            heights.nHashTipLo32,
+            heights.nPrimeHeight,
+            heights.nHashHeight,
+            heights.nStakeHeight,
             nForkScore);
 
         debug::log(3, FUNCTION, "KEEPALIVE_V2 seq=", frame.sequence,
-                   " unified=", nUnifiedHeight,
-                   " prime=", nPrimeHeight,
-                   " hash=", nHashHeight,
-                   " stake=", nStakeHeight,
-                   " hash_tip_lo32=0x", std::hex, nHashTipLo32,
-                   " fork_score=", std::dec, nForkScore);
+                   " unified=", heights.nUnifiedHeight,
+                   " prime=", heights.nPrimeHeight,
+                   " hash=", heights.nHashHeight,
+                   " stake=", heights.nStakeHeight,
+                   " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
+                   " fork_score=", std::dec, nForkScore,
+                   " [liveness:KEEPALIVE_V2]");
 
         StatelessPacket response(StatelessOpcodes::KEEPALIVE_V2_ACK);
         response.DATA   = vAck;
@@ -1931,19 +1887,19 @@ namespace LLP
                 : std::string{};
             ColinMiningAgent::Get().on_keepalive_ack(
                 genesis_prefix,
-                nUnifiedHeight,
-                nPrimeHeight,
-                nHashHeight,
-                nStakeHeight,
+                heights.nUnifiedHeight,
+                heights.nPrimeHeight,
+                heights.nHashHeight,
+                heights.nStakeHeight,
                 nForkScore);
         }
 
-        /* Update context: refresh timestamp and increment keepalive counter */
+        /* Apply canonical health-state update: nTimestamp, nKeepaliveCount,
+         * nKeepaliveSent, nLastKeepaliveTime, nStakeHeight — all updated together
+         * so no liveness counter diverges from the others. */
         nNow = runtime::unifiedtimestamp();
-        MiningContext newContext = context
-            .WithTimestamp(nNow)
-            .WithKeepaliveCount(context.nKeepaliveCount + 1)
-            .WithStakeHeight(nStakeHeight);
+        MiningContext newContext = ApplyKeepaliveHealth(
+            context, nNow, heights.nStakeHeight, /*fUpdateStake=*/true);
 
         return ProcessResult::Success(newContext, response);
     }
@@ -2189,6 +2145,59 @@ namespace LLP
         response.LENGTH = static_cast<uint32_t>(vEncryptedSuccess.size());
 
         return ProcessResult::Success(newContext, response);
+    }
+
+
+    /* Gather consistent chain height snapshot from a single atomic tStateBest load.
+     * CRITICAL: Uses stateBest.GetHash() instead of ChainState::hashBestChain.load()
+     * to prevent the race where heights come from block N but hash from block N+1. */
+    LivenessAck::ChainHeightSnapshot StatelessMiner::GatherCurrentChainHeights()
+    {
+        LivenessAck::ChainHeightSnapshot snap;
+
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        snap.nUnifiedHeight = stateBest.nHeight;
+
+        TAO::Ledger::BlockState stateChannel = stateBest;
+        if(TAO::Ledger::GetLastState(stateChannel, 1))
+            snap.nPrimeHeight = stateChannel.nChannelHeight;
+
+        stateChannel = stateBest;
+        if(TAO::Ledger::GetLastState(stateChannel, 2))
+            snap.nHashHeight = stateChannel.nChannelHeight;
+
+        stateChannel = stateBest;
+        if(TAO::Ledger::GetLastState(stateChannel, 0))
+            snap.nStakeHeight = stateChannel.nChannelHeight;
+
+        /* Extract hash from the SAME atomic snapshot to guarantee consistency */
+        uint1024_t hashBestChain = stateBest.GetHash();
+        snap.nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
+
+        return snap;
+    }
+
+
+    /* Apply the canonical health-state update to a MiningContext after processing
+     * any ACK-family liveness packet (SESSION_KEEPALIVE v1/v2 or KEEPALIVE_V2).
+     * All three context fields that reflect "liveness seen" are updated together
+     * to prevent divergence between keepalive counters and the last-seen timestamp. */
+    MiningContext StatelessMiner::ApplyKeepaliveHealth(
+        const MiningContext& ctx,
+        uint64_t nNow,
+        uint32_t nStakeHeight,
+        bool fUpdateStake)
+    {
+        MiningContext updated = ctx
+            .WithTimestamp(nNow)
+            .WithKeepaliveCount(ctx.nKeepaliveCount + 1)
+            .WithKeepaliveSent(ctx.nKeepaliveSent + 1)
+            .WithLastKeepaliveTime(nNow);
+
+        if(fUpdateStake)
+            updated = updated.WithStakeHeight(nStakeHeight);
+
+        return updated;
     }
 
 } // namespace LLP

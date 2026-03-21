@@ -25,6 +25,7 @@ ________________________________________________________________________________
 #include <LLP/include/push_notification.h>
 #include <LLP/include/keepalive_v2.h>
 #include <LLP/include/session_status.h>
+#include <LLP/include/liveness_ack.h>
 #include <LLP/types/miner.h>
 #include <LLP/templates/events.h>
 #include <LLP/templates/ddos.h>
@@ -499,7 +500,7 @@ namespace LLP
             if(PACKET.HEADER == SESSION_KEEPALIVE)
             {
                 debug::log(2, FUNCTION, "════════════════════════════════════");
-                debug::log(2, FUNCTION, "SESSION_KEEPALIVE received");
+                debug::log(2, FUNCTION, "SESSION_KEEPALIVE received [liveness:SESSION_KEEPALIVE/legacy]");
 
                 /* Parse keepalive payload: detect v1 (len==4) or v2 (len==8) */
                 uint32_t nKeepaliveSession = 0;
@@ -561,10 +562,38 @@ namespace LLP
                 const uint32_t nExpirySeconds =
                     static_cast<uint32_t>(NodeCache::GetSessionLivenessTimeout(sessionContext.strAddress));
 
-                sessionContext = sessionContext
-                    .WithTimestamp(nNow)
-                    .WithSessionTimeout(nExpirySeconds)
-                    .WithKeepaliveCount(sessionContext.nKeepaliveCount + 1);
+                /* Session expiry check: if the session clock has already run out,
+                 * log it clearly.  An authenticated miner still sending keepalives
+                 * is treated as evidence of liveness and the session is extended
+                 * rather than terminated — the WithTimestamp(nNow) update below
+                 * resets the expiry deadline automatically.  Only a fully
+                 * unauthenticated keepalive warrants a hard disconnect. */
+                if(sessionContext.IsSessionExpired(nNow))
+                {
+                    if(sessionContext.fAuthenticated && sessionContext.nSessionId != 0)
+                    {
+                        uint64_t nIdleSec = nNow - sessionContext.nTimestamp;
+                        debug::log(0, FUNCTION, "SESSION_KEEPALIVE (legacy): session nominally expired "
+                                   "but miner is authenticated — extending session for sessionId=",
+                                   sessionContext.nSessionId,
+                                   " (idle=", nIdleSec, "s, timeout=", sessionContext.nSessionTimeout, "s)");
+                        /* Fall through; WithTimestamp below will clear expiry */
+                    }
+                    else
+                    {
+                        debug::log(0, FUNCTION, "SESSION_KEEPALIVE (legacy) rejected — session expired "
+                                   "for sessionId=", sessionContext.nSessionId,
+                                   " last_activity=", sessionContext.nTimestamp);
+                        Disconnect();
+                        return true;
+                    }
+                }
+
+                /* Apply canonical health-state update: nTimestamp, nKeepaliveCount,
+                 * nKeepaliveSent, nLastKeepaliveTime — all updated together so no
+                 * liveness counter diverges from the others. */
+                sessionContext = StatelessMiner::ApplyKeepaliveHealth(
+                    sessionContext.WithSessionTimeout(nExpirySeconds), nNow);
 
                 /* Persist v2 negotiation and prevblock suffix in the session context */
                 if(fIsV2 || fKeepaliveV2)
@@ -584,55 +613,42 @@ namespace LLP
 
                 constexpr uint64_t SECONDS_PER_DAY = 86400;
                 debug::log(2, FUNCTION, "Session refreshed:");
-                debug::log(2, FUNCTION, "  Keepalives: ", sessionContext.nKeepaliveCount);
+                debug::log(2, FUNCTION, "  Keepalives rx: ", sessionContext.nKeepaliveCount);
+                debug::log(2, FUNCTION, "  Keepalives tx: ", sessionContext.nKeepaliveSent);
                 debug::log(2, FUNCTION, "  New expiry: ", (nNow + nExpirySeconds), " (",
                            (nExpirySeconds / SECONDS_PER_DAY), "d)");
 
-                /* Build response: unified 32-byte if negotiated, else v1 (4 bytes) */
+                /* Build response: unified 32-byte if negotiated, else v1 (4 bytes).
+                 * Use canonical chain height gatherer — single atomic snapshot so
+                 * heights and hash_tip_lo32 are always consistent (no separate
+                 * ChainState::hashBestChain.load() race). */
                 if(fKeepaliveV2 || sessionContext.fKeepaliveV2)
                 {
-                    /* Gather current chain state */
-                    TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-                    uint32_t nUnifiedHeight = stateBest.nHeight;
+                    LivenessAck::ChainHeightSnapshot heights =
+                        StatelessMiner::GatherCurrentChainHeights();
 
-                    TAO::Ledger::BlockState stateChannel = stateBest;
-                    uint32_t nPrimeHeight = 0;
-                    if(TAO::Ledger::GetLastState(stateChannel, 1))
-                        nPrimeHeight = stateChannel.nChannelHeight;
-
-                    stateChannel = stateBest;
-                    uint32_t nHashHeight = 0;
-                    if(TAO::Ledger::GetLastState(stateChannel, 2))
-                        nHashHeight = stateChannel.nChannelHeight;
-
-                    stateChannel = stateBest;
-                    uint32_t nStakeHeight = 0;
-                    if(TAO::Ledger::GetLastState(stateChannel, 0))
-                        nStakeHeight = stateChannel.nChannelHeight;
-
-                    uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
-                    uint32_t nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
-
-                    uint32_t nForkScore = (nMinerPrevHashLo32 != 0 && nMinerPrevHashLo32 != nHashTipLo32) ? 1u : 0u;
+                    uint32_t nForkScore = (nMinerPrevHashLo32 != 0 &&
+                                           nMinerPrevHashLo32 != heights.nHashTipLo32) ? 1u : 0u;
 
                     std::vector<uint8_t> vV2 = KeepaliveV2::BuildUnifiedResponse(
                         nKeepaliveSession,
-                        nMinerPrevHashLo32,   // echo miner's fork canary (0 if v1 miner)
-                        nUnifiedHeight,
-                        nHashTipLo32,
-                        nPrimeHeight,
-                        nHashHeight,
-                        nStakeHeight,
-                        nForkScore);          // computed canary (0 if v1 miner, 0 if hashes match)
+                        nMinerPrevHashLo32,         // echo miner's fork canary (0 if v1 miner)
+                        heights.nUnifiedHeight,
+                        heights.nHashTipLo32,
+                        heights.nPrimeHeight,
+                        heights.nHashHeight,
+                        heights.nStakeHeight,
+                        nForkScore);
 
                     debug::log(2, FUNCTION, "Sent SESSION_KEEPALIVE unified reply (32 bytes):",
-                               " unified=", nUnifiedHeight,
-                               " prime=", nPrimeHeight,
-                               " hash=", nHashHeight,
-                               " stake=", nStakeHeight,
-                               " hash_tip_lo32=0x", std::hex, nHashTipLo32,
+                               " unified=", heights.nUnifiedHeight,
+                               " prime=", heights.nPrimeHeight,
+                               " hash=", heights.nHashHeight,
+                               " stake=", heights.nStakeHeight,
+                               " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
                                " miner_prevhash_lo32=0x", nMinerPrevHashLo32,
-                               " fork_score=", std::dec, nForkScore);
+                               " fork_score=", std::dec, nForkScore,
+                               " [liveness:SESSION_KEEPALIVE/v2-ack]");
 
                     respond(SESSION_KEEPALIVE, vV2);
 
@@ -641,10 +657,10 @@ namespace LLP
                     {
                         ColinMiningAgent::Get().on_keepalive_ack(
                             hashGenesis.SubString(8),
-                            nUnifiedHeight,
-                            nPrimeHeight,
-                            nHashHeight,
-                            nStakeHeight,
+                            heights.nUnifiedHeight,
+                            heights.nPrimeHeight,
+                            heights.nHashHeight,
+                            heights.nStakeHeight,
                             nForkScore);
                     }
                 }
@@ -658,7 +674,7 @@ namespace LLP
                     vResponse[3] = static_cast<uint8_t>((nExpirySeconds >> 24) & 0xFF);
 
                     respond(SESSION_KEEPALIVE, vResponse);
-                    debug::log(2, FUNCTION, "Sent SESSION_KEEPALIVE v1 response");
+                    debug::log(2, FUNCTION, "Sent SESSION_KEEPALIVE v1 response [liveness:SESSION_KEEPALIVE/v1-ack]");
                 }
 
                 debug::log(2, FUNCTION, "════════════════════════════════════");

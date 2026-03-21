@@ -19,6 +19,7 @@ ________________________________________________________________________________
 #include <LLP/packets/packet.h>
 #include <LLP/include/canonical_chain_state.h>
 #include <LLP/include/push_notification.h>
+#include <LLP/include/liveness_ack.h>
 #include <LLC/types/uint1024.h>
 #include <TAO/Ledger/types/block.h>
 #include <LLC/include/flkey.h>
@@ -1230,6 +1231,53 @@ namespace LLP
         static ProcessResult ProcessSetReward(
             const MiningContext& context,
             const StatelessPacket& packet
+        );
+
+
+        /** GatherCurrentChainHeights
+         *
+         *  Gather a consistent ChainHeightSnapshot from a single atomic load of
+         *  tStateBest.  Using a single snapshot prevents the race where unified
+         *  height, channel heights, and hashBestChain could come from different
+         *  blocks if loaded separately.
+         *
+         *  This is the canonical chain-state accessor for all keepalive ACK
+         *  response builders.  All three ACK paths (miner.cpp inline,
+         *  ProcessSessionKeepalive, ProcessKeepaliveV2) must use this function
+         *  instead of duplicating the tStateBest / GetLastState / GetHash sequence.
+         *
+         *  @return ChainHeightSnapshot with all four channel heights and hash_tip_lo32
+         *
+         **/
+        static LivenessAck::ChainHeightSnapshot GatherCurrentChainHeights();
+
+
+        /** ApplyKeepaliveHealth
+         *
+         *  Apply the canonical set of health-state updates to a MiningContext
+         *  after successfully processing any ACK-family liveness packet
+         *  (SESSION_KEEPALIVE v1/v2 or KEEPALIVE_V2).
+         *
+         *  Updates applied:
+         *    - nTimestamp        ← nNow  (session liveness heartbeat)
+         *    - nKeepaliveCount   ← count + 1  (packets received)
+         *    - nKeepaliveSent    ← sent + 1   (responses emitted)
+         *    - nLastKeepaliveTime← nNow  (last confirmed round-trip)
+         *    - nStakeHeight      ← nStakeHeight (when fUpdateStake=true)
+         *
+         *  @param[in] ctx           Current MiningContext
+         *  @param[in] nNow          Current timestamp
+         *  @param[in] nStakeHeight  Stake channel height (used when fUpdateStake true)
+         *  @param[in] fUpdateStake  Whether to persist the stake height in the context
+         *
+         *  @return Updated MiningContext with all liveness fields refreshed
+         *
+         **/
+        static MiningContext ApplyKeepaliveHealth(
+            const MiningContext& ctx,
+            uint64_t nNow,
+            uint32_t nStakeHeight = 0,
+            bool fUpdateStake = false
         );
 
     private:
