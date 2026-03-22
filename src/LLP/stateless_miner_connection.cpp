@@ -2362,34 +2362,33 @@ namespace LLP
                 /* Send immediate notification with current state.
                  * Force-bypass the push throttle — miner explicitly re-subscribed and needs
                  * fresh work immediately regardless of when the previous push was sent.
-                 * Also reset the AutoCoolDown so the recovery GET_BLOCK is served immediately. */
-                {
-                    LOCK(MUTEX);
-                    // Reset violation state on clean re-subscription — same invariant as
-                    // STATELESS_MINER_READY: fThrottleMode MUST NOT persist across reconnects.
-                    m_rateLimit.ResetViolationState();
-                    m_force_next_push = true;
-                    // Reassign (not Reset()) — we want Ready() to return true immediately
-                    // so the recovery GET_BLOCK is served without waiting 2 s.
-                    // Reset() would START a new 2-second cooldown; reassignment
-                    // restores the "never triggered" state where Ready() returns true.
-                    m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                }
+                 * Also reset the AutoCoolDown so the recovery GET_BLOCK is served immediately.
+                 * NOTE: MUTEX is already held from the outer LOCK(MUTEX) at the top of this
+                 * handler chain — do NOT attempt a nested LOCK(MUTEX) here (deadlock). */
+                m_rateLimit.ResetViolationState();
+                m_force_next_push = true;
+                // Reassign (not Reset()) — we want Ready() to return true immediately
+                // so the recovery GET_BLOCK is served without waiting 2 s.
+                m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
+
+                /* SendChannelNotification/SendStatelessTemplate internally acquire MUTEX.
+                 * Release the outer lock before calling them to prevent deadlock.
+                 * Pattern: unlock → call → re-lock → update protected state → unlock → call → re-lock */
+                lk.unlock();
                 SendChannelNotification();
 
-                /* Re-arm the bypass flag: SendChannelNotification() consumed m_force_next_push
+                /* Re-acquire MUTEX to access m_force_next_push (MUTEX-protected field).
+                 * Re-arm the bypass flag: SendChannelNotification() consumed m_force_next_push
                  * and updated m_last_template_push_time.  Without re-arming, SendStatelessTemplate()
                  * would see elapsed ~0 ms and be throttled, leaving the miner without a full
                  * template and keeping its recovery epoch alive. */
-                {
-                    LOCK(MUTEX);
-                    m_force_next_push = true;
-                }
-
+                lk.lock();
+                m_force_next_push = true;
                 /* Update last template channel height and persist session BEFORE sending
                  * the template (write-ahead pattern): even if the connection drops after
                  * SaveSession but before the template arrives, the recovered session already
-                 * carries the correct channel height, preventing stale-height throttling. */
+                 * carries the correct channel height, preventing stale-height throttling.
+                 * Still holding outer MUTEX here — safe to access context. */
                 {
                     TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
                     TAO::Ledger::BlockState stateChannel = stateBest;
@@ -2411,14 +2410,16 @@ namespace LLP
                     }
                 }
 
+                /* Update manager with COMPLETE context including encryption state.
+                 * Do this before unlock so context snapshot is coherent. */
+                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
+
                 /* Auto-send template so miner can resume mining immediately.
-                 * This is critical for MINER_READY recovery from degraded mode -
-                 * miners need both the push notification AND the actual template. */
+                 * SendStatelessTemplate internally acquires MUTEX — release outer lock first. */
+                lk.unlock();
                 SendStatelessTemplate();
                 debug::log(0, FUNCTION, "✓ Recovery template delivered via MINER_READY push — miner should resume mining");
-
-                /* Update manager with COMPLETE context including encryption state */
-                StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
+                lk.lock();
                 
                 debug::log(2, "📥 === MINER_READY: SUCCESS ===");
                 return true;
@@ -2487,26 +2488,35 @@ namespace LLP
                  * m_force_next_push before SendStatelessTemplate(), elapsed = ~0 ms
                  * and the template push is throttled (TEMPLATE_PUSH_MIN_INTERVAL_MS).
                  * Always: set → SendChannelNotification → re-set → SendStatelessTemplate.
-                 * See: MINER_READY handler for the canonical pattern. */
+                 * See: MINER_READY handler for the canonical pattern.
+                 *
+                 * IMPORTANT: SendChannelNotification() and SendStatelessTemplate() both
+                 * internally acquire MUTEX. Since we are already holding MUTEX (from the
+                 * outer LOCK at the top of this handler chain), nested re-locking would
+                 * DEADLOCK. Release the outer lock before calling these functions and
+                 * re-acquire after. Do NOT use LOCK(MUTEX) inside this block. */
                 if((req.status_flags & SessionStatus::MINER_DEGRADED) &&
                     context.fAuthenticated && (context.nChannel == 1 || context.nChannel == 2))
                 {
                     debug::log(0, FUNCTION, "⚠️ Miner reports DEGRADED — forcing recovery template push via SESSION_STATUS");
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;
-                        /* Reset cooldown so any pending GET_BLOCK from the miner is served
-                         * immediately rather than being held for GET_BLOCK_COOLDOWN_SECONDS.
-                         * Uses reassignment (not Reset()) to restore "never triggered" state
-                         * where Ready() returns true immediately. */
-                        m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                    }
+                    /* m_force_next_push is MUTEX-protected; set while still holding outer lock. */
+                    m_force_next_push = true;
+                    m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
+
+                    /* Two-step unlock/call/re-lock pattern (same as 8-bit MINER_READY handler):
+                     *   Step 1: release MUTEX → call SendChannelNotification (acquires MUTEX internally)
+                     *   Step 2: re-acquire MUTEX → re-arm m_force_next_push
+                     *   Step 3: release MUTEX → call SendStatelessTemplate (acquires MUTEX internally)
+                     *   Step 4: re-acquire MUTEX for normal handler exit */
+                    lk.unlock();
                     SendChannelNotification();
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
-                    }
+
+                    /* Re-acquire to re-arm bypass flag (MUTEX-protected), then release for template. */
+                    lk.lock();
+                    m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
+                    lk.unlock();
                     SendStatelessTemplate();
+                    lk.lock();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed — miner should exit DEGRADED");
                 }
 
@@ -2802,6 +2812,26 @@ namespace LLP
                                    LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_EXPIRED,
                                                           LivenessAck::AckLogDirection::NOTIFY));
                     }
+                }
+                else if(PACKET.HEADER == OpcodeUtility::Stateless::SESSION_KEEPALIVE)
+                {
+                    /* SESSION_KEEPALIVE processing failed (e.g. not authenticated, session not
+                     * started, or session expired).  Send SESSION_EXPIRED so the miner does not
+                     * time out waiting for an ACK, which would stall its control-plane recovery. */
+                    if(context.fAuthenticated && context.nSessionId != 0)
+                    {
+                        /* Session liveness issue — notify miner so it can re-authenticate. */
+                        errorResponse = BuildSessionExpiredResponse(context.nSessionId);
+                    }
+                    else
+                    {
+                        errorResponse = BuildSessionExpiredResponse(0u);
+                    }
+                    respond(errorResponse);
+                    debug::log(1, FUNCTION, "Sent SESSION_EXPIRED response after SESSION_KEEPALIVE error: ",
+                               result.strError, " ",
+                               LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_EXPIRED,
+                                                      LivenessAck::AckLogDirection::NOTIFY));
                 }
                 
                 /* For other packet types, connection will be closed gracefully */
