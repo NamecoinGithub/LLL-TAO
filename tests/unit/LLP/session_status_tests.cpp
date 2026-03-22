@@ -160,7 +160,7 @@ TEST_CASE("BuildLaneHealthFlags combines canonical node lane booleans", "[llp][s
     SECTION("SIM Link lane can set all four lane-health bits")
     {
         const uint32_t flags = SessionStatus::BuildLaneHealthFlags(true, true, true, true);
-        REQUIRE(flags == 0x0Fu);
+        REQUIRE(flags == 0x0FU);
     }
 }
 
