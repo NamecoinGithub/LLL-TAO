@@ -56,29 +56,44 @@ namespace LLP
         std::vector<uint8_t>    DATA;
 
 
+        /** Set when the 4-byte wire-length field has been consumed from the socket.
+         *  Until this flag is true, Header() returns false so that a LENGTH=0 packet
+         *  (e.g. GET_HEIGHT) is not considered complete before the framing bytes have
+         *  been drained.  This prevents framing corruption when the TCP stack delivers
+         *  the 2-byte opcode and the 4-byte length in separate reads.
+         *
+         *  NOTE: Outbound packets built directly (not via ReadPacket) have fLengthRead=false.
+         *  That is intentional — Header()/Complete() are only meaningful for inbound (receive)
+         *  processing.  Outbound serialization always uses GetBytes() directly. **/
+        bool                    fLengthRead;
+
+
         /** Default Constructor **/
         StatelessPacket()
-        : HEADER (0xFFFF)
-        , LENGTH (0)
-        , DATA   ( )
+        : HEADER     (0xFFFF)
+        , LENGTH     (0)
+        , DATA       ( )
+        , fLengthRead(false)
         {
         }
 
 
         /** Copy Constructor **/
         StatelessPacket(const StatelessPacket& packet)
-        : HEADER (packet.HEADER)
-        , LENGTH (packet.LENGTH)
-        , DATA   (packet.DATA)
+        : HEADER     (packet.HEADER)
+        , LENGTH     (packet.LENGTH)
+        , DATA       (packet.DATA)
+        , fLengthRead(packet.fLengthRead)
         {
         }
 
 
         /** Move Constructor **/
         StatelessPacket(StatelessPacket&& packet) noexcept
-        : HEADER (std::move(packet.HEADER))
-        , LENGTH (std::move(packet.LENGTH))
-        , DATA   (std::move(packet.DATA))
+        : HEADER     (std::move(packet.HEADER))
+        , LENGTH     (std::move(packet.LENGTH))
+        , DATA       (std::move(packet.DATA))
+        , fLengthRead(std::move(packet.fLengthRead))
         {
         }
 
@@ -86,9 +101,10 @@ namespace LLP
         /** Copy Assignment Operator **/
         StatelessPacket& operator=(const StatelessPacket& packet)
         {
-            HEADER = packet.HEADER;
-            LENGTH = packet.LENGTH;
-            DATA   = packet.DATA;
+            HEADER      = packet.HEADER;
+            LENGTH      = packet.LENGTH;
+            DATA        = packet.DATA;
+            fLengthRead = packet.fLengthRead;
 
             return *this;
         }
@@ -97,9 +113,10 @@ namespace LLP
         /** Move Assignment Operator **/
         StatelessPacket& operator=(StatelessPacket&& packet) noexcept
         {
-            HEADER = std::move(packet.HEADER);
-            LENGTH = std::move(packet.LENGTH);
-            DATA   = std::move(packet.DATA);
+            HEADER      = std::move(packet.HEADER);
+            LENGTH      = std::move(packet.LENGTH);
+            DATA        = std::move(packet.DATA);
+            fLengthRead = std::move(packet.fLengthRead);
 
             return *this;
         }
@@ -127,9 +144,10 @@ namespace LLP
          **/
         void SetNull()
         {
-            HEADER   = 0xFFFF;
-            LENGTH   = 0;
+            HEADER      = 0xFFFF;
+            LENGTH      = 0;
             DATA.clear();
+            fLengthRead = false;
         }
 
 
@@ -172,11 +190,23 @@ namespace LLP
         /** Header
          *
          *  Determines if header and length are fully read.
+         *  For stateless packets, both the 2-byte opcode AND the 4-byte wire-length
+         *  field must have been consumed from the socket before this returns true.
+         *  This prevents premature Complete() for header-only packets (LENGTH=0, e.g.
+         *  GET_HEIGHT) when the TCP stack delivers the opcode and length bytes in
+         *  separate reads.
          *
          **/
         bool Header() const
         {
             if(IsNull())
+                return false;
+
+            /* Require that the 4-byte wire-length field has been explicitly read via
+             * SetLength().  Without this guard, a LENGTH=0 packet would appear complete
+             * after only 2 bytes, leaving the remaining 4 framing bytes in the socket
+             * buffer where they corrupt the next packet read. */
+            if(!fLengthRead)
                 return false;
 
             /* For stateless packets, header is complete when LENGTH is set */
@@ -200,14 +230,17 @@ namespace LLP
 
         /** SetLength
          *
-         *  Sets the size of the packet from the byte vector (big-endian).
+         *  Sets the size of the packet from the byte vector (big-endian) and marks
+         *  the wire-length field as having been read.  Called by ReadPacket() after
+         *  consuming the 4-byte length field from the socket.
          *
          *  @param[in] BYTES The vector of bytes to set length from.
          *
          **/
         void SetLength(const std::vector<uint8_t> &BYTES)
         {
-            LENGTH = (BYTES[0] << 24) + (BYTES[1] << 16) + (BYTES[2] << 8) + (BYTES[3]);
+            LENGTH      = (BYTES[0] << 24) + (BYTES[1] << 16) + (BYTES[2] << 8) + (BYTES[3]);
+            fLengthRead = true;
         }
 
 
