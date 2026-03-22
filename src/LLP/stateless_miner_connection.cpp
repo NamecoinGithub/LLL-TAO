@@ -1839,12 +1839,20 @@ namespace LLP
                     return true;
                 }
 
-                /* Get current blockchain height */
-                uint32_t nCurrentHeight = TAO::Ledger::ChainState::nBestHeight.load();
+                const auto heightResult =
+                    StatelessMinerManager::Get().GetSessionHeightSnapshot(context.nSessionId);
+                const uint32_t nCurrentHeight = heightResult.snapshot.nUnifiedHeight;
 
                 debug::log(2, FUNCTION, "GET_HEIGHT request from ", GetAddress().ToStringIP(),
                            " sessionId=", context.nSessionId,
-                           " - responding with height ", nCurrentHeight + 1);
+                           " - responding with height ", nCurrentHeight + 1,
+                           " [cache=",
+                           (heightResult.fSessionCacheHit ? "session" :
+                               (heightResult.fGlobalCacheHit ? "global" : "miss")),
+                           " freshness_ms=", heightResult.nFreshnessMs,
+                           " latency_ms=", heightResult.nLatencyMs,
+                           " rate_limited=", (heightResult.fRateLimitBudgetExceeded ? "YES" : "NO"),
+                           "]");
 
                 /* Create the response packet with height (next block to mine, 4-byte little-endian) */
                 StatelessPacket response(BLOCK_HEIGHT);

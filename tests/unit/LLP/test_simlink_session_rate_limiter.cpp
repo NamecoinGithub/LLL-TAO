@@ -252,6 +252,57 @@ TEST_CASE("SIM-LINK: Combined key format", "[simlink][rate_limit]")
 }
 
 
+TEST_CASE("SIM-LINK: GET_HEIGHT session snapshot service", "[simlink][get_height]")
+{
+    SECTION("Repeated requests for same session hit the session cache")
+    {
+        const uint32_t nSessionId = 0x13572468;
+
+        const auto first = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
+        const auto second = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
+
+        REQUIRE_FALSE(first.fSessionCacheHit);
+        REQUIRE(second.fSessionCacheHit);
+        REQUIRE(second.snapshot.nUnifiedHeight == first.snapshot.nUnifiedHeight);
+        REQUIRE(second.snapshot.nPrimeHeight == first.snapshot.nPrimeHeight);
+        REQUIRE(second.snapshot.nHashHeight == first.snapshot.nHashHeight);
+        REQUIRE(second.snapshot.nStakeHeight == first.snapshot.nStakeHeight);
+    }
+
+    SECTION("Fresh global snapshot is reused across sessions")
+    {
+        const uint32_t nSessionA = 0x24681357;
+        const uint32_t nSessionB = 0x24681358;
+
+        const auto first = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionA);
+        const auto second = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionB);
+
+        REQUIRE_FALSE(first.fGlobalCacheHit);
+        REQUIRE(second.fGlobalCacheHit);
+        REQUIRE(second.snapshot.nUnifiedHeight == first.snapshot.nUnifiedHeight);
+        REQUIRE(second.snapshot.nHashTipLo32 == first.snapshot.nHashTipLo32);
+    }
+
+    SECTION("Over-budget session still receives cached snapshot with rate-limit metadata")
+    {
+        const uint32_t nSessionId = 0xABCDEF42;
+        StatelessMinerManager::GetHeightResult result;
+
+        for(std::size_t i = 0; i < StatelessMinerManager::GET_HEIGHT_ROLLING_LIMIT_PER_MINUTE; ++i)
+        {
+            result = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
+            REQUIRE_FALSE(result.fRateLimitBudgetExceeded);
+        }
+
+        const auto overBudget = StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
+        REQUIRE(overBudget.fRateLimitBudgetExceeded);
+        REQUIRE((overBudget.fSessionCacheHit || overBudget.fGlobalCacheHit));
+        REQUIRE(overBudget.nRetryAfterMs > 0u);
+        REQUIRE(overBudget.snapshot.nUnifiedHeight == result.snapshot.nUnifiedHeight);
+    }
+}
+
+
 TEST_CASE("SIM-LINK: CleanupSessionScopedMaps removes orphaned entries", "[simlink][cleanup]")
 {
     SECTION("CleanupSessionScopedMaps removes rate limiter for session not in mapMiners")

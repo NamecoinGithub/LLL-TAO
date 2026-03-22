@@ -1172,14 +1172,19 @@ namespace LLP
                     return debug::error(FUNCTION, "Authentication required for stateless miner commands");
                 }
 
-                {
-                    /* Check the best height before responding. */
-                    LOCK(MUTEX);
-                    check_best_height();
-                }
+                const auto heightResult =
+                    StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
+                nBestHeight = heightResult.snapshot.nUnifiedHeight;
 
                 debug::log(0, FUNCTION, "GET_HEIGHT request from ", GetAddress().ToStringIP(), 
-                           " - responding with height ", nBestHeight + 1);
+                           " - responding with height ", nBestHeight + 1,
+                           " [cache=",
+                           (heightResult.fSessionCacheHit ? "session" :
+                               (heightResult.fGlobalCacheHit ? "global" : "miss")),
+                           " freshness_ms=", heightResult.nFreshnessMs,
+                           " latency_ms=", heightResult.nLatencyMs,
+                           " rate_limited=", (heightResult.fRateLimitBudgetExceeded ? "YES" : "NO"),
+                           "]");
 
                 /* Create the response packet and write. */
                 respond(BLOCK_HEIGHT, convert::uint2bytes(nBestHeight + 1));
