@@ -29,6 +29,54 @@ ________________________________________________________________________________
 
 namespace LLP
 {
+    namespace
+    {
+        using HeightCacheEntry = StatelessMinerManager::GetHeightCacheEntry;
+        using HeightSnapshot = StatelessMinerManager::GetHeightSnapshot;
+
+        inline bool IsHeightCacheFresh(const HeightCacheEntry& entry,
+                                       const std::chrono::steady_clock::time_point& now)
+        {
+            return entry.fInitialized &&
+                   (now - entry.tCaptured) <= StatelessMinerManager::GET_HEIGHT_CACHE_TTL;
+        }
+
+        inline uint32_t HeightCacheFreshnessMs(const HeightCacheEntry& entry,
+                                               const std::chrono::steady_clock::time_point& now)
+        {
+            if(!entry.fInitialized || now < entry.tCaptured)
+                return 0;
+
+            return static_cast<uint32_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.tCaptured).count());
+        }
+
+        inline HeightSnapshot GatherCanonicalGetHeightSnapshot()
+        {
+            HeightSnapshot snap;
+
+            const TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+            snap.nUnifiedHeight = stateBest.nHeight;
+
+            TAO::Ledger::BlockState stateChannel = stateBest;
+            if(TAO::Ledger::GetLastState(stateChannel, 1))
+                snap.nPrimeHeight = stateChannel.nChannelHeight;
+
+            stateChannel = stateBest;
+            if(TAO::Ledger::GetLastState(stateChannel, 2))
+                snap.nHashHeight = stateChannel.nChannelHeight;
+
+            stateChannel = stateBest;
+            if(TAO::Ledger::GetLastState(stateChannel, 0))
+                snap.nStakeHeight = stateChannel.nChannelHeight;
+
+            const uint1024_t hashBestChain = stateBest.GetHash();
+            snap.nHashTipLo32 = static_cast<uint32_t>(hashBestChain.Get64(0) & 0xFFFFFFFF);
+
+            return snap;
+        }
+    }
+
     /* Grace period for keepalive check in smart timeout logic.
      * Sessions with a keepalive exchange within this window are not considered idle.
      *
@@ -408,8 +456,10 @@ namespace LLP
     /* Remove session-scoped rate limiters and block maps for dead sessions */
     uint32_t StatelessMinerManager::CleanupSessionScopedMaps()
     {
-        uint32_t nLimitersRemoved = 0;
-        uint32_t nBlocksRemoved   = 0;
+        uint32_t nLimitersRemoved      = 0;
+        uint32_t nHeightLimitersRemoved = 0;
+        uint32_t nBlocksRemoved        = 0;
+        uint32_t nHeightCachesRemoved  = 0;
 
         /* Pass A — rate limiter cleanup (m_sessionLimiterMutex held alone) */
         {
@@ -422,6 +472,18 @@ namespace LLP
                 {
                     it = m_mapSessionLimiters.erase(it);
                     ++nLimitersRemoved;
+                }
+                else
+                    ++it;
+            }
+
+            for(auto it = m_mapSessionHeightLimiters.begin(); it != m_mapSessionHeightLimiters.end(); )
+            {
+                auto optAddr = mapSessionToAddress.Get(it->first);
+                if(!optAddr.has_value())
+                {
+                    it = m_mapSessionHeightLimiters.erase(it);
+                    ++nHeightLimitersRemoved;
                 }
                 else
                     ++it;
@@ -444,13 +506,31 @@ namespace LLP
             }
         }
 
-        if(nLimitersRemoved > 0 || nBlocksRemoved > 0)
+        /* Pass C — session height cache cleanup (m_sessionHeightCacheMutex held alone) */
         {
-            debug::log(2, FUNCTION, "SIM-LINK cleanup: removed ", nLimitersRemoved,
-                " session limiters, ", nBlocksRemoved, " session block maps");
+            std::lock_guard<std::mutex> lk(m_sessionHeightCacheMutex);
+            for(auto it = m_mapSessionHeightCache.begin(); it != m_mapSessionHeightCache.end(); )
+            {
+                auto optAddr = mapSessionToAddress.Get(it->first);
+                if(!optAddr.has_value())
+                {
+                    it = m_mapSessionHeightCache.erase(it);
+                    ++nHeightCachesRemoved;
+                }
+                else
+                    ++it;
+            }
         }
 
-        return nLimitersRemoved + nBlocksRemoved;
+        if(nLimitersRemoved > 0 || nHeightLimitersRemoved > 0 || nBlocksRemoved > 0 || nHeightCachesRemoved > 0)
+        {
+            debug::log(2, FUNCTION, "SIM-LINK cleanup: removed ", nLimitersRemoved,
+                " session GET_BLOCK limiters, ", nHeightLimitersRemoved,
+                " session GET_HEIGHT limiters, ", nBlocksRemoved,
+                " session block maps, ", nHeightCachesRemoved, " session height caches");
+        }
+
+        return nLimitersRemoved + nHeightLimitersRemoved + nBlocksRemoved + nHeightCachesRemoved;
     }
 
     /* Get miner status as JSON */
@@ -888,6 +968,151 @@ namespace LLP
         }
 
         return it->second;
+    }
+
+    StatelessMinerManager::GetHeightResult StatelessMinerManager::GetSessionHeightSnapshot(uint32_t nSessionId)
+    {
+        const auto tStart = std::chrono::steady_clock::now();
+        GetHeightResult result;
+
+        uint32_t nRetryAfterMs = 0;
+        std::size_t nCurrentInWindow = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_sessionLimiterMutex);
+
+            auto it = m_mapSessionHeightLimiters.find(nSessionId);
+            if(it == m_mapSessionHeightLimiters.end())
+            {
+                auto spLimiter = std::make_shared<GetBlockRollingLimiter>(
+                    GET_HEIGHT_ROLLING_LIMIT_PER_MINUTE,
+                    GET_HEIGHT_ROLLING_WINDOW);
+
+                it = m_mapSessionHeightLimiters.emplace(nSessionId, std::move(spLimiter)).first;
+                debug::log(2, FUNCTION, "SIM-LINK: created GET_HEIGHT limiter for session=", nSessionId);
+            }
+
+            const std::string strSessionKey = "session=" + std::to_string(nSessionId) + "|height";
+            if(!it->second->Allow(strSessionKey, tStart, nRetryAfterMs, nCurrentInWindow))
+            {
+                result.fRateLimitBudgetExceeded = true;
+                result.nRetryAfterMs = nRetryAfterMs;
+            }
+        }
+        result.nRequestsInWindow = nCurrentInWindow;
+
+        HeightCacheEntry sessionEntry;
+        bool fHaveSessionEntry = false;
+        HeightCacheEntry globalEntry;
+        bool fHaveGlobalEntry = false;
+        {
+            std::lock_guard<std::mutex> lock(m_sessionHeightCacheMutex);
+
+            auto itSession = m_mapSessionHeightCache.find(nSessionId);
+            if(itSession != m_mapSessionHeightCache.end() && itSession->second.fInitialized)
+            {
+                sessionEntry = itSession->second;
+                fHaveSessionEntry = true;
+            }
+
+            if(m_globalHeightCache.fInitialized)
+            {
+                globalEntry = m_globalHeightCache;
+                fHaveGlobalEntry = true;
+            }
+        }
+
+        if(fHaveSessionEntry && IsHeightCacheFresh(sessionEntry, tStart))
+        {
+            result.snapshot = sessionEntry.snapshot;
+            result.nFreshnessMs = HeightCacheFreshnessMs(sessionEntry, tStart);
+            result.fSessionCacheHit = true;
+        }
+        else if(fHaveGlobalEntry && IsHeightCacheFresh(globalEntry, tStart))
+        {
+            result.snapshot = globalEntry.snapshot;
+            result.nFreshnessMs = HeightCacheFreshnessMs(globalEntry, tStart);
+            result.fGlobalCacheHit = true;
+
+            std::lock_guard<std::mutex> lock(m_sessionHeightCacheMutex);
+            m_mapSessionHeightCache[nSessionId] = globalEntry;
+        }
+        else if(result.fRateLimitBudgetExceeded)
+        {
+            if(fHaveGlobalEntry &&
+               (!fHaveSessionEntry || globalEntry.tCaptured >= sessionEntry.tCaptured))
+            {
+                result.snapshot = globalEntry.snapshot;
+                result.nFreshnessMs = HeightCacheFreshnessMs(globalEntry, tStart);
+                result.fGlobalCacheHit = fHaveGlobalEntry;
+            }
+            else if(fHaveSessionEntry)
+            {
+                result.snapshot = sessionEntry.snapshot;
+                result.nFreshnessMs = HeightCacheFreshnessMs(sessionEntry, tStart);
+                result.fSessionCacheHit = true;
+            }
+            else
+            {
+                const HeightCacheEntry refreshed{
+                    GatherCanonicalGetHeightSnapshot(),
+                    tStart,
+                    true
+                };
+
+                result.snapshot = refreshed.snapshot;
+                result.nFreshnessMs = 0;
+
+                std::lock_guard<std::mutex> lock(m_sessionHeightCacheMutex);
+                m_globalHeightCache = refreshed;
+                m_mapSessionHeightCache[nSessionId] = refreshed;
+            }
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(m_sessionHeightCacheMutex);
+            if(IsHeightCacheFresh(m_globalHeightCache, tStart))
+            {
+                result.snapshot = m_globalHeightCache.snapshot;
+                result.nFreshnessMs = HeightCacheFreshnessMs(m_globalHeightCache, tStart);
+                result.fGlobalCacheHit = true;
+                m_mapSessionHeightCache[nSessionId] = m_globalHeightCache;
+            }
+            else
+            {
+                const HeightCacheEntry refreshed{
+                    GatherCanonicalGetHeightSnapshot(),
+                    std::chrono::steady_clock::now(),
+                    true
+                };
+
+                m_globalHeightCache = refreshed;
+                m_mapSessionHeightCache[nSessionId] = refreshed;
+
+                result.snapshot = refreshed.snapshot;
+                result.nFreshnessMs = 0;
+            }
+        }
+
+        const uint64_t nRequests = ++nGetHeightRequests;
+        if(result.fSessionCacheHit || result.fGlobalCacheHit)
+            ++nGetHeightCacheHits;
+        if(result.fRateLimitBudgetExceeded)
+            ++nGetHeightRateLimited;
+
+        result.nLatencyMs = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tStart).count());
+
+        debug::log(2, FUNCTION,
+            "metric get_height_requests_total=", nRequests,
+            " session=", nSessionId,
+            " cache=", (result.fSessionCacheHit ? "session" : (result.fGlobalCacheHit ? "global" : "miss")),
+            " requests_in_window=", result.nRequestsInWindow, "/", GET_HEIGHT_ROLLING_LIMIT_PER_MINUTE,
+            " rate_limited=", (result.fRateLimitBudgetExceeded ? 1 : 0),
+            " freshness_ms=", result.nFreshnessMs,
+            " latency_ms=", result.nLatencyMs);
+
+        return result;
     }
 
 

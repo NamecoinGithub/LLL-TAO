@@ -25,6 +25,7 @@ ________________________________________________________________________________
 #include <vector>
 #include <optional>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -84,6 +85,54 @@ namespace LLP
     class StatelessMinerManager
     {
     public:
+        /** GET_HEIGHT per-session request budget (shared across both mining lanes).
+         *
+         *  Miner-side polling is expected to occur every 30 seconds, so a 4/min
+         *  budget allows one legacy-lane poll + one stateless-lane poll every
+         *  30 seconds for the same authenticated session while still throttling
+         *  bursty abuse.
+         */
+        static constexpr std::size_t GET_HEIGHT_ROLLING_LIMIT_PER_MINUTE = 4;
+        static constexpr std::chrono::seconds GET_HEIGHT_ROLLING_WINDOW = std::chrono::seconds(60);
+
+        /** Canonical GET_HEIGHT snapshot cache TTL.
+         *
+         *  Keep this short so miners get a fresh view promptly after tip advance,
+         *  while still collapsing duplicate requests across connections.
+         */
+        static constexpr std::chrono::milliseconds GET_HEIGHT_CACHE_TTL = std::chrono::milliseconds(1000);
+
+        /** Canonical full-height snapshot served by GET_HEIGHT. */
+        struct GetHeightSnapshot
+        {
+            uint32_t nUnifiedHeight{0};
+            uint32_t nPrimeHeight{0};
+            uint32_t nHashHeight{0};
+            uint32_t nStakeHeight{0};
+            uint32_t nHashTipLo32{0};
+        };
+
+        /** Result of serving a GET_HEIGHT request through the shared manager. */
+        struct GetHeightResult
+        {
+            GetHeightSnapshot snapshot{};
+            uint32_t nFreshnessMs{0};
+            uint32_t nLatencyMs{0};
+            uint32_t nRetryAfterMs{0};
+            std::size_t nRequestsInWindow{0};
+            bool fSessionCacheHit{false};
+            bool fGlobalCacheHit{false};
+            bool fRateLimitBudgetExceeded{false};
+        };
+
+        /** Cached GET_HEIGHT snapshot entry. */
+        struct GetHeightCacheEntry
+        {
+            GetHeightSnapshot snapshot{};
+            std::chrono::steady_clock::time_point tCaptured{};
+            bool fInitialized{false};
+        };
+
         /** Get
          *
          *  Get the global manager instance.
@@ -551,6 +600,24 @@ namespace LLP
          **/
         std::shared_ptr<GetBlockRollingLimiter> GetSessionRateLimiter(uint32_t nSessionId);
 
+        /** GetSessionHeightSnapshot
+         *
+         *  Serve GET_HEIGHT from a session-aware cache/limiter pipeline.
+         *
+         *  - Uses one canonical full-height snapshot built from a single chain-state read
+         *  - Rate-limits refresh pressure per authenticated session
+         *  - Reuses a short global cache to avoid duplicate chain-state reads across lanes
+         *    and across sessions
+         *  - Maintains a short per-session cache so an over-budget session still receives
+         *    the last canonical snapshot rather than triggering more chain-state reads
+         *
+         *  @param[in] nSessionId Session identifier
+         *
+         *  @return Snapshot, cache-hit metadata, latency, and freshness information
+         *
+         **/
+        GetHeightResult GetSessionHeightSnapshot(uint32_t nSessionId);
+
         /** StoreSessionBlock
          *
          *  Store a block template in the session-scoped cross-lane block map.
@@ -658,6 +725,10 @@ namespace LLP
          *  Using shared_ptr so callers can hold a reference past the lock window. **/
         std::unordered_map<uint32_t, std::shared_ptr<GetBlockRollingLimiter>> m_mapSessionLimiters;
 
+        /** Session-scoped GET_HEIGHT limiters keyed by session ID.
+         *  Each limiter enforces a 4/60s GET_HEIGHT budget shared across both lanes. **/
+        std::unordered_map<uint32_t, std::shared_ptr<GetBlockRollingLimiter>> m_mapSessionHeightLimiters;
+
         /** Mutex protecting session block template map **/
         mutable std::mutex m_sessionBlockMutex;
 
@@ -665,6 +736,20 @@ namespace LLP
          *  Outer key: session ID.  Inner key: hashMerkleRoot.
          *  shared_ptr ownership allows both lane threads to safely access the template. **/
         std::unordered_map<uint32_t, std::map<uint512_t, std::shared_ptr<TAO::Ledger::Block>>> m_mapSessionBlocks;
+
+        /** Mutex protecting GET_HEIGHT cache state. */
+        mutable std::mutex m_sessionHeightCacheMutex;
+
+        /** Global cached GET_HEIGHT snapshot shared across all sessions. */
+        GetHeightCacheEntry m_globalHeightCache;
+
+        /** Per-session cached GET_HEIGHT snapshots for over-budget fallback. */
+        std::unordered_map<uint32_t, GetHeightCacheEntry> m_mapSessionHeightCache;
+
+        /** Shared GET_HEIGHT instrumentation counters. */
+        mutable std::atomic<uint64_t> nGetHeightRequests{0};
+        mutable std::atomic<uint64_t> nGetHeightCacheHits{0};
+        mutable std::atomic<uint64_t> nGetHeightRateLimited{0};
     };
 
 } // namespace LLP
