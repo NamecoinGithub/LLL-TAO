@@ -332,6 +332,7 @@ ifdef UNIT_TESTS
 		   build/Tests_LLP_liveness_ack_tests.o \
 		   build/Tests_LLP_rate_limiting_tests.o \
 		   build/Tests_LLP_test_get_block_response_contract.o \
+		   build/Tests_LLP_block_height_payload.o \
 		   build/Tests_LLP_session_recovery.o \
 		   build/Tests_LLP_session_status_tests.o \
 		   build/Tests_LLP_stateless_miner.o \

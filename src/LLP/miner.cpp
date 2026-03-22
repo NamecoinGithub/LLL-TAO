@@ -1175,19 +1175,25 @@ namespace LLP
                 const auto heightResult =
                     StatelessMinerManager::Get().GetSessionHeightSnapshot(nSessionId);
                 nBestHeight = heightResult.snapshot.nUnifiedHeight;
+                const auto vPayload =
+                    StatelessMinerManager::BuildBlockHeightPayload(heightResult.snapshot);
 
-                debug::log(0, FUNCTION, "GET_HEIGHT request from ", GetAddress().ToStringIP(), 
-                           " - responding with height ", nBestHeight + 1,
-                           " [cache=",
+                debug::log(0, FUNCTION, "GET_HEIGHT request from ", GetAddress().ToStringIP(),
+                           " - responding with BLOCK_HEIGHT payload=", vPayload.size(), "B",
+                           " [unified=", heightResult.snapshot.nUnifiedHeight,
+                           " prime=", heightResult.snapshot.nPrimeHeight,
+                           " hash=", heightResult.snapshot.nHashHeight,
+                           " stake=", heightResult.snapshot.nStakeHeight,
+                           "] [cache=",
                            (heightResult.fSessionCacheHit ? "session" :
-                               (heightResult.fGlobalCacheHit ? "global" : "miss")),
+                                (heightResult.fGlobalCacheHit ? "global" : "miss")),
                            " freshness_ms=", heightResult.nFreshnessMs,
                            " latency_ms=", heightResult.nLatencyMs,
                            " rate_limited=", (heightResult.fRateLimitBudgetExceeded ? "YES" : "NO"),
                            "]");
 
                 /* Create the response packet and write. */
-                respond(BLOCK_HEIGHT, convert::uint2bytes(nBestHeight + 1));
+                respond(BLOCK_HEIGHT, vPayload);
 
                 return true;
             }

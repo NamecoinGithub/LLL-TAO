@@ -1117,7 +1117,6 @@ namespace LLP
         return result;
     }
 
-
     /* Store a block template in the session-scoped cross-lane block map */
     void StatelessMinerManager::StoreSessionBlock(uint32_t nSessionId,
                                                    const uint512_t& hashMerkleRoot,

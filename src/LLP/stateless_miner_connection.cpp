@@ -1841,29 +1841,34 @@ namespace LLP
 
                 const auto heightResult =
                     StatelessMinerManager::Get().GetSessionHeightSnapshot(context.nSessionId);
-                const uint32_t nCurrentHeight = heightResult.snapshot.nUnifiedHeight;
+                const auto vPayload =
+                    StatelessMinerManager::BuildBlockHeightPayload(heightResult.snapshot);
 
                 debug::log(2, FUNCTION, "GET_HEIGHT request from ", GetAddress().ToStringIP(),
                            " sessionId=", context.nSessionId,
-                           " - responding with height ", nCurrentHeight + 1,
-                           " [cache=",
+                           " - responding with BLOCK_HEIGHT payload=", vPayload.size(), "B",
+                           " [unified=", heightResult.snapshot.nUnifiedHeight,
+                           " prime=", heightResult.snapshot.nPrimeHeight,
+                           " hash=", heightResult.snapshot.nHashHeight,
+                           " stake=", heightResult.snapshot.nStakeHeight,
+                           "] [cache=",
                            (heightResult.fSessionCacheHit ? "session" :
-                               (heightResult.fGlobalCacheHit ? "global" : "miss")),
+                                (heightResult.fGlobalCacheHit ? "global" : "miss")),
                            " freshness_ms=", heightResult.nFreshnessMs,
                            " latency_ms=", heightResult.nLatencyMs,
                            " rate_limited=", (heightResult.fRateLimitBudgetExceeded ? "YES" : "NO"),
                            "]");
 
-                /* Create the response packet with height (next block to mine, 4-byte little-endian) */
+                /* Create the response packet with the canonical 16-byte height snapshot. */
                 StatelessPacket response(BLOCK_HEIGHT);
-                response.DATA = convert::uint2bytes(nCurrentHeight + 1);
+                response.DATA = vPayload;
                 response.LENGTH = static_cast<uint32_t>(response.DATA.size());
                 
                 respond(response);
 
                 /* Update context timestamp */
                 context = context.WithTimestamp(runtime::unifiedtimestamp())
-                                 .WithHeight(nCurrentHeight);
+                                 .WithHeight(heightResult.snapshot.nUnifiedHeight);
 
                 /* Update manager with new context */
                 StatelessMinerManager::Get().UpdateMiner(context.strAddress, context, 1);
