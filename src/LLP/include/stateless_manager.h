@@ -17,6 +17,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/get_block_policy.h>
+#include <Util/include/convert.h>
 #include <Util/templates/concurrent_hashmap.h>
 
 #include <LLC/types/uint1024.h>
@@ -618,6 +619,63 @@ namespace LLP
          *
          **/
         GetHeightResult GetSessionHeightSnapshot(uint32_t nSessionId);
+
+        /** BuildBlockHeightPayload
+         *
+         *  Serialize a canonical GET_HEIGHT snapshot into the BLOCK_HEIGHT payload.
+         *
+         *  Wire format (16 bytes, big-endian uint32 fields):
+         *    [0-3]   unified_height
+         *    [4-7]   prime_height
+         *    [8-11]  hash_height
+         *    [12-15] stake_height
+         *
+         *  @param[in] snapshot Canonical height snapshot to serialize
+         *
+         *  @return 16-byte BLOCK_HEIGHT payload
+         *
+         **/
+        static std::vector<uint8_t> BuildBlockHeightPayload(const GetHeightSnapshot& snapshot)
+        {
+            std::vector<uint8_t> vPayload;
+            vPayload.reserve(16);
+
+            const auto append = [&vPayload](uint32_t nHeight)
+            {
+                const auto vBytes = convert::uint2bytes(nHeight);
+                vPayload.insert(vPayload.end(), vBytes.begin(), vBytes.end());
+            };
+
+            append(snapshot.nUnifiedHeight);
+            append(snapshot.nPrimeHeight);
+            append(snapshot.nHashHeight);
+            append(snapshot.nStakeHeight);
+
+            return vPayload;
+        }
+
+        /** ParseBlockHeightPayload
+         *
+         *  Decode the fixed-width BLOCK_HEIGHT payload back into a height snapshot.
+         *
+         *  @param[in] vPayload BLOCK_HEIGHT payload bytes
+         *  @param[out] snapshot Decoded snapshot on success
+         *
+         *  @return true if vPayload is exactly 16 bytes and was decoded successfully
+         *
+         **/
+        static bool ParseBlockHeightPayload(const std::vector<uint8_t>& vPayload, GetHeightSnapshot& snapshot)
+        {
+            if(vPayload.size() != 16)
+                return false;
+
+            snapshot = GetHeightSnapshot{};
+            snapshot.nUnifiedHeight = convert::bytes2uint(vPayload, 0);
+            snapshot.nPrimeHeight   = convert::bytes2uint(vPayload, 4);
+            snapshot.nHashHeight    = convert::bytes2uint(vPayload, 8);
+            snapshot.nStakeHeight   = convert::bytes2uint(vPayload, 12);
+            return true;
+        }
 
         /** StoreSessionBlock
          *
