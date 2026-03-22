@@ -16,6 +16,36 @@ TEST_CASE("SESSION_STATUS opcode constants are mirror-mapped", "[llp][session_st
     REQUIRE(OpcodeUtility::Stateless::Mirror(220) == 0xD0DC);
 }
 
+TEST_CASE("Stateless port normalizes legacy-in-16-bit compatibility opcodes", "[llp][session_status][compat]")
+{
+    SECTION("GET_HEIGHT is remapped to the canonical stateless opcode")
+    {
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(0x0082u) ==
+                OpcodeUtility::Stateless::GET_HEIGHT);
+    }
+
+    SECTION("SESSION_STATUS is remapped to the canonical stateless opcode")
+    {
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(0x00DBu) ==
+                OpcodeUtility::Stateless::SESSION_STATUS);
+    }
+
+    SECTION("Historical MINER_READY variants still normalize correctly")
+    {
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(0x00D8u) ==
+                OpcodeUtility::Stateless::MINER_READY);
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(0xD090u) ==
+                OpcodeUtility::Stateless::MINER_READY);
+    }
+
+    SECTION("Already canonical and unknown opcodes are left unchanged")
+    {
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(OpcodeUtility::Stateless::GET_HEIGHT) ==
+                OpcodeUtility::Stateless::GET_HEIGHT);
+        REQUIRE(OpcodeUtility::NormalizeStatelessPortOpcode(0x0042u) == 0x0042u);
+    }
+}
+
 TEST_CASE("SessionStatusRequest serializes and parses correctly", "[llp][session_status]")
 {
     SessionStatus::SessionStatusRequest req;

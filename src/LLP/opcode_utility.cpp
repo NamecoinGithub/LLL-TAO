@@ -523,6 +523,31 @@ namespace OpcodeUtility
     }
 
 
+    uint16_t NormalizeStatelessPortOpcode(uint16_t nOpcode)
+    {
+        if(Stateless::IsStateless(nOpcode) || IsUnmirroredStatelessOpcode(nOpcode))
+            return nOpcode;
+
+        /* Historical alternate MINER_READY variant emitted by some miners. */
+        if(nOpcode == 0xD090u)
+            return Stateless::MINER_READY;
+
+        /* Compatibility: allow whitelisted legacy request opcodes to arrive in a
+         * 16-bit frame with a leading zero byte (for example 0x0082 -> 0xD082). */
+        if((nOpcode & 0xFF00u) == 0x0000u)
+        {
+            const uint8_t nLegacyOpcode = static_cast<uint8_t>(nOpcode & 0x00FFu);
+            if(nLegacyOpcode == Opcodes::MINER_READY ||
+               IsLegacyOpcodeAllowedOnStatelessPort(nLegacyOpcode))
+            {
+                return Stateless::Mirror(nLegacyOpcode);
+            }
+        }
+
+        return nOpcode;
+    }
+
+
     bool ValidatePacketLength(const StatelessPacket& packet, std::string* strReason)
     {
         /* Check against maximum packet length */

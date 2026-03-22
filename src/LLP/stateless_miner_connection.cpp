@@ -671,21 +671,14 @@ namespace LLP
                        uint32_t(PACKET.HEADER), std::dec,
                        " length=", PACKET.LENGTH);
 
-            /* ============================================================================
-             * MINER_READY COMPATIBILITY REMAPPING
-             * ============================================================================
-             * Some miners send non-standard opcodes for MINER_READY:
-             *   0x00D8 - 8-bit MINER_READY (216) in 16-bit frame with leading zero
-             *   0xD090 - Alternative MINER_READY variant
-             * Remap these to the canonical STATELESS_MINER_READY (0xD0D8) before
-             * stateless range validation. */
-            if(PACKET.HEADER == 0x00D8 || PACKET.HEADER == 0xD090)
+            const uint16_t nOriginalHeader = PACKET.HEADER;
+            PACKET.HEADER = OpcodeUtility::NormalizeStatelessPortOpcode(PACKET.HEADER);
+            if(PACKET.HEADER != nOriginalHeader)
             {
                 debug::log(1, FUNCTION, "Compatibility: Remapping 0x", std::hex,
-                           uint32_t(PACKET.HEADER), std::dec,
-                           " → 0xD0D8 (STATELESS_MINER_READY) from ",
+                           uint32_t(nOriginalHeader), " → 0x", uint32_t(PACKET.HEADER), std::dec,
+                           " (", OpcodeUtility::GetOpcodeName16(PACKET.HEADER), ") from ",
                            GetAddress().ToStringIP());
-                PACKET.HEADER = StatelessOpcodes::STATELESS_MINER_READY;
             }
 
             /* Strict stateless lane enforcement (port 9323):
