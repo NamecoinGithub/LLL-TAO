@@ -510,6 +510,26 @@ namespace OpcodeUtility
     uint32_t GetExpectedPayloadSize16(uint16_t nOpcode);
 
 
+    /** NormalizeStatelessPortOpcode
+     *
+     *  Normalizes compatibility opcodes received on the stateless mining port.
+     *  Modern stateless packets should already use mirrored 16-bit opcodes
+     *  (0xD0xx), but some miners still send a legacy 8-bit opcode in a 16-bit
+     *  frame with a leading zero byte (for example 0x0082 for GET_HEIGHT).
+     *
+     *  The stateless port only normalizes the same legacy request whitelist that
+     *  IsLegacyOpcodeAllowedOnStatelessPort() already documents as compatible,
+     *  plus the historical 0xD090 MINER_READY variant.
+     *
+     *  @param[in] nOpcode The raw opcode read from the 16-bit stateless frame
+     *
+     *  @return Canonical stateless opcode when a compatibility mapping exists,
+     *          otherwise the original opcode unchanged
+     *
+     **/
+    uint16_t NormalizeStatelessPortOpcode(uint16_t nOpcode);
+
+
     /** ValidatePacketLength
      *
      *  Validates that a packet's length is within acceptable bounds.
