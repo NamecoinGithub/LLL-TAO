@@ -158,6 +158,65 @@ namespace SessionStatus
         }
     };
 
+    /** BuildLaneHealthFlags convenience wrapper */
+    inline uint32_t BuildLaneHealthFlags(bool fPrimaryAlive,
+                                         bool fSecondaryAlive,
+                                         bool fAuthenticated,
+                                         bool fSimLinkActive = false) noexcept
+    {
+        uint32_t nLaneHealth = 0;
+
+        if(fPrimaryAlive)
+            nLaneHealth |= LANE_PRIMARY_ALIVE;
+
+        if(fSecondaryAlive)
+            nLaneHealth |= LANE_SECONDARY_ALIVE;
+
+        if(fSimLinkActive)
+            nLaneHealth |= LANE_SIM_LINK_ACTIVE;
+
+        if(fAuthenticated)
+            nLaneHealth |= LANE_AUTHENTICATED;
+
+        return nLaneHealth;
+    }
+
+    /** BuildNodeAck convenience wrapper from canonical lane-health booleans */
+    inline SessionStatusAck BuildNodeAck(uint32_t session_id,
+                                         bool fPrimaryAlive,
+                                         bool fSecondaryAlive,
+                                         bool fAuthenticated,
+                                         uint32_t uptime_secs,
+                                         uint32_t echo_flags,
+                                         bool fSimLinkActive = false)
+    {
+        return SessionStatusAck::Build(session_id,
+                                       BuildLaneHealthFlags(fPrimaryAlive,
+                                                            fSecondaryAlive,
+                                                            fAuthenticated,
+                                                            fSimLinkActive),
+                                       uptime_secs,
+                                       echo_flags);
+    }
+
+    /** BuildNodeAckPayload convenience wrapper from canonical lane-health booleans */
+    inline std::vector<uint8_t> BuildNodeAckPayload(uint32_t session_id,
+                                                    bool fPrimaryAlive,
+                                                    bool fSecondaryAlive,
+                                                    bool fAuthenticated,
+                                                    uint32_t uptime_secs,
+                                                    uint32_t echo_flags,
+                                                    bool fSimLinkActive = false)
+    {
+        return BuildNodeAck(session_id,
+                            fPrimaryAlive,
+                            fSecondaryAlive,
+                            fAuthenticated,
+                            uptime_secs,
+                            echo_flags,
+                            fSimLinkActive).Serialize();
+    }
+
     /** BuildAckPayload convenience wrapper */
     inline std::vector<uint8_t> BuildAckPayload(uint32_t session_id,
                                                  uint32_t lane_health,

@@ -199,6 +199,32 @@ TEST_CASE("LivenessAck::AckFamilyName", "[liveness_ack][llp]")
 }
 
 
+TEST_CASE("LivenessAck::AckLogTag", "[liveness_ack][llp]")
+{
+    SECTION("SESSION_STATUS uses one req/ack logging convention across lanes")
+    {
+        REQUIRE(std::string(AckLogTag(AckPacketFamily::SESSION_STATUS, AckLogDirection::REQUEST))
+                == "[liveness:SESSION_STATUS/req]");
+        REQUIRE(std::string(AckLogTag(AckPacketFamily::SESSION_STATUS_ACK, AckLogDirection::ACK))
+                == "[liveness:SESSION_STATUS/ack]");
+    }
+
+    SECTION("KEEPALIVE_V2 request/ack share a canonical family log tag")
+    {
+        REQUIRE(std::string(AckLogTag(AckPacketFamily::KEEPALIVE_V2, AckLogDirection::REQUEST))
+                == "[liveness:KEEPALIVE_V2/req]");
+        REQUIRE(std::string(AckLogTag(AckPacketFamily::KEEPALIVE_V2_ACK, AckLogDirection::ACK))
+                == "[liveness:KEEPALIVE_V2/ack]");
+    }
+
+    SECTION("SESSION_EXPIRED uses notify tag")
+    {
+        REQUIRE(std::string(AckLogTag(AckPacketFamily::SESSION_EXPIRED, AckLogDirection::NOTIFY))
+                == "[liveness:SESSION_EXPIRED/notify]");
+    }
+}
+
+
 TEST_CASE("StatelessMiner::ApplyKeepaliveHealth", "[liveness_ack][llp]")
 {
     SECTION("All four liveness fields updated in one call (no stake update)")
