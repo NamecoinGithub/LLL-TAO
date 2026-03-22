@@ -26,6 +26,7 @@ ________________________________________________________________________________
 #include <LLP/include/push_notification.h>
 #include <LLP/include/mining_constants.h>
 #include <LLP/include/session_status.h>
+#include <LLP/include/liveness_ack.h>
 #include <LLP/include/get_block_handler.h>
 #include <LLP/templates/events.h>
 
@@ -87,16 +88,12 @@ namespace LLP
          * session_id (4 bytes little-endian) + prevblock suffix / canary (4 bytes big-endian). */
         static constexpr uint32_t KEEPALIVE_V2_FALLBACK_SIZE = 8;
 
-        inline StatelessPacket BuildSessionExpiredResponse(const uint32_t nSessionId, const uint8_t nReason = 0x01)
+        inline StatelessPacket BuildSessionExpiredResponse(
+            const uint32_t nSessionId,
+            const uint8_t nReason = LivenessAck::EXPIRED_REASON_INACTIVITY)
         {
             StatelessPacket response(OpcodeUtility::Stateless::SESSION_EXPIRED);
-            response.DATA = {
-                static_cast<uint8_t>(nSessionId & 0xFF),
-                static_cast<uint8_t>((nSessionId >> 8) & 0xFF),
-                static_cast<uint8_t>((nSessionId >> 16) & 0xFF),
-                static_cast<uint8_t>((nSessionId >> 24) & 0xFF),
-                nReason
-            };
+            response.DATA = LivenessAck::BuildSessionExpiredPayload(nSessionId, nReason);
             response.LENGTH = static_cast<uint32_t>(response.DATA.size());
             return response;
         }
@@ -2424,14 +2421,16 @@ namespace LLP
             /* SESSION_STATUS (0xD0DB) — miner queries session/lane health on stateless port */
             if(PACKET.HEADER == OpcodeUtility::Stateless::SESSION_STATUS)
             {
-                debug::log(2, FUNCTION, "SESSION_STATUS received from ", GetAddress().ToStringIP());
+                debug::log(2, FUNCTION, "SESSION_STATUS received from ", GetAddress().ToStringIP(), " ",
+                           LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_STATUS,
+                                                  LivenessAck::AckLogDirection::REQUEST));
 
                 SessionStatus::SessionStatusRequest req;
                 if(!req.Parse(PACKET.DATA))
                 {
                     debug::error(FUNCTION, "SESSION_STATUS: malformed payload (size=", PACKET.DATA.size(), ")");
                     StatelessPacket errResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
-                    auto vAck = SessionStatus::BuildAckPayload(0u, 0u, 0u, 0u);
+                    auto vAck = SessionStatus::BuildNodeAckPayload(0u, false, false, false, 0u, 0u);
                     errResponse.DATA = vAck;
                     errResponse.LENGTH = static_cast<uint32_t>(vAck.size());
                     respond(errResponse);
@@ -2443,7 +2442,12 @@ namespace LLP
                 {
                     debug::error(FUNCTION, "SESSION_STATUS: session_id mismatch (got=0x", std::hex,
                                  req.session_id, " expected=0x", context.nSessionId, std::dec, ")");
-                    auto vAck = SessionStatus::BuildAckPayload(context.nSessionId, 0u, 0u, req.status_flags);
+                    auto vAck = SessionStatus::BuildNodeAckPayload(context.nSessionId,
+                                                                   false,
+                                                                   false,
+                                                                   false,
+                                                                   0u,
+                                                                   req.status_flags);
                     StatelessPacket mismatchResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                     mismatchResponse.DATA = vAck;
                     mismatchResponse.LENGTH = static_cast<uint32_t>(vAck.size());
@@ -2451,19 +2455,25 @@ namespace LLP
                     return true;
                 }
 
-                /* Build lane health flags — stateless lane: we are ON it + authenticated */
-                uint32_t nLaneHealth = 0;
-                nLaneHealth |= SessionStatus::LANE_PRIMARY_ALIVE;  // stateless lane alive
-                nLaneHealth |= SessionStatus::LANE_AUTHENTICATED;  // session verified
-
+                /* SESSION_STATUS is a read-only lane-health query; only keepalive
+                 * packet families update session cadence and liveness counters. */
+                const uint32_t nLaneHealth =
+                    SessionStatus::BuildLaneHealthFlags(true, false, true);
                 const uint32_t nUptime = static_cast<uint32_t>(context.GetSessionDuration(runtime::unifiedtimestamp()));
-                auto vAck = SessionStatus::BuildAckPayload(req.session_id, nLaneHealth, nUptime, req.status_flags);
+                auto vAck = SessionStatus::BuildNodeAckPayload(req.session_id,
+                                                               true,
+                                                               false,
+                                                               true,
+                                                               nUptime,
+                                                               req.status_flags);
                 StatelessPacket ackResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                 ackResponse.DATA = vAck;
                 ackResponse.LENGTH = static_cast<uint32_t>(vAck.size());
                 respond(ackResponse);
 
-                debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent: lane_health=0x", std::hex, nLaneHealth, std::dec);
+                debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent: lane_health=0x", std::hex, nLaneHealth, std::dec,
+                           " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_STATUS,
+                                                       LivenessAck::AckLogDirection::ACK));
 
                 /* TWO-STEP RE-ARM INVARIANT (PR #375):
                  * SendChannelNotification() consumes m_force_next_push (sets it false)
@@ -2782,7 +2792,9 @@ namespace LLP
                         errorResponse = BuildSessionExpiredResponse(context.nSessionId);
                         respond(errorResponse);
                         debug::log(2, FUNCTION,
-                                   "Sent SESSION_EXPIRED fallback response after KEEPALIVE_V2 error");
+                                   "Sent SESSION_EXPIRED fallback response after KEEPALIVE_V2 error ",
+                                   LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_EXPIRED,
+                                                          LivenessAck::AckLogDirection::NOTIFY));
                     }
                 }
                 
@@ -3968,15 +3980,7 @@ namespace LLP
         }
         else if(eReason == GetBlockPolicyReason::SESSION_INVALID)
         {
-            response.HEADER = OpcodeUtility::Stateless::SESSION_EXPIRED;
-            response.DATA = std::vector<uint8_t>{
-                static_cast<uint8_t>((context.nSessionId >> 24) & 0xFF),
-                static_cast<uint8_t>((context.nSessionId >> 16) & 0xFF),
-                static_cast<uint8_t>((context.nSessionId >> 8) & 0xFF),
-                static_cast<uint8_t>(context.nSessionId & 0xFF),
-                static_cast<uint8_t>(eReason)
-            };
-            response.LENGTH = static_cast<uint32_t>(response.DATA.size());
+            response = BuildSessionExpiredResponse(context.nSessionId);
         }
 
         respond(response);

@@ -648,7 +648,8 @@ namespace LLP
                                " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
                                " miner_prevhash_lo32=0x", nMinerPrevHashLo32,
                                " fork_score=", std::dec, nForkScore,
-                               " [liveness:SESSION_KEEPALIVE/v2-ack]");
+                               " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_KEEPALIVE,
+                                                           LivenessAck::AckLogDirection::ACK));
 
                     respond(SESSION_KEEPALIVE, vV2);
 
@@ -674,7 +675,9 @@ namespace LLP
                     vResponse[3] = static_cast<uint8_t>((nExpirySeconds >> 24) & 0xFF);
 
                     respond(SESSION_KEEPALIVE, vResponse);
-                    debug::log(2, FUNCTION, "Sent SESSION_KEEPALIVE v1 response [liveness:SESSION_KEEPALIVE/v1-ack]");
+                    debug::log(2, FUNCTION, "Sent SESSION_KEEPALIVE v1 response ",
+                               LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_KEEPALIVE,
+                                                      LivenessAck::AckLogDirection::ACK));
                 }
 
                 debug::log(2, FUNCTION, "════════════════════════════════════");
@@ -685,7 +688,9 @@ namespace LLP
             /* Handle SESSION_STATUS (219 / 0xDB) — miner queries lane health on legacy port */
             if(PACKET.HEADER == OpcodeUtility::Opcodes::SESSION_STATUS)
             {
-                debug::log(2, FUNCTION, "SESSION_STATUS received from ", GetAddress().ToStringIP());
+                debug::log(2, FUNCTION, "SESSION_STATUS received from ", GetAddress().ToStringIP(), " ",
+                           LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_STATUS,
+                                                  LivenessAck::AckLogDirection::REQUEST));
 
                 SessionStatus::SessionStatusRequest req;
                 if(!req.Parse(PACKET.DATA))
@@ -700,21 +705,32 @@ namespace LLP
                 {
                     debug::error(FUNCTION, "SESSION_STATUS: unknown session_id=0x", std::hex, req.session_id, std::dec);
                     /* Respond with zero flags — miner knows session is invalid */
-                    auto vAck = SessionStatus::BuildAckPayload(req.session_id, 0u, 0u, req.status_flags);
+                    auto vAck = SessionStatus::BuildNodeAckPayload(req.session_id,
+                                                                   false,
+                                                                   false,
+                                                                   false,
+                                                                   0u,
+                                                                   req.status_flags);
                     respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
                     return true;
                 }
 
-                /* Build lane health flags */
-                uint32_t nLaneHealth = 0;
-                nLaneHealth |= SessionStatus::LANE_SECONDARY_ALIVE;   // legacy lane: we are ON it
-                nLaneHealth |= SessionStatus::LANE_AUTHENTICATED;     // session validated above
-
+                /* SESSION_STATUS is a read-only lane-health query; it must not
+                 * update keepalive cadence or any session-liveness counters. */
+                const uint32_t nLaneHealth =
+                    SessionStatus::BuildLaneHealthFlags(false, true, true);
                 const uint32_t nUptime = static_cast<uint32_t>(optContext->GetSessionDuration(runtime::unifiedtimestamp()));
-                auto vAck = SessionStatus::BuildAckPayload(req.session_id, nLaneHealth, nUptime, req.status_flags);
+                auto vAck = SessionStatus::BuildNodeAckPayload(req.session_id,
+                                                               false,
+                                                               true,
+                                                               true,
+                                                               nUptime,
+                                                               req.status_flags);
                 respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
 
-                debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent: lane_health=0x", std::hex, nLaneHealth, std::dec);
+                debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent: lane_health=0x", std::hex, nLaneHealth, std::dec,
+                           " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_STATUS,
+                                                       LivenessAck::AckLogDirection::ACK));
 
                 /* TWO-STEP RE-ARM INVARIANT (PR #375):
                  * SendChannelNotification() consumes m_force_next_push (sets it false)

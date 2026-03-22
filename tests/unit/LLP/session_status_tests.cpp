@@ -143,6 +143,45 @@ TEST_CASE("Miner status flags combine correctly", "[llp][session_status]")
     REQUIRE(flags == 0x0F);
 }
 
+TEST_CASE("BuildLaneHealthFlags combines canonical node lane booleans", "[llp][session_status]")
+{
+    SECTION("Stateless authenticated lane sets primary + authenticated bits")
+    {
+        const uint32_t flags = SessionStatus::BuildLaneHealthFlags(true, false, true);
+        REQUIRE(flags == (SessionStatus::LANE_PRIMARY_ALIVE | SessionStatus::LANE_AUTHENTICATED));
+    }
+
+    SECTION("Legacy authenticated lane sets secondary + authenticated bits")
+    {
+        const uint32_t flags = SessionStatus::BuildLaneHealthFlags(false, true, true);
+        REQUIRE(flags == (SessionStatus::LANE_SECONDARY_ALIVE | SessionStatus::LANE_AUTHENTICATED));
+    }
+
+    SECTION("SIM Link lane can set all four lane-health bits")
+    {
+        const uint32_t flags = SessionStatus::BuildLaneHealthFlags(true, true, true, true);
+        REQUIRE(flags == 0x0FU);
+    }
+}
+
+TEST_CASE("BuildNodeAckPayload uses canonical lane-health builder", "[llp][session_status]")
+{
+    auto v = SessionStatus::BuildNodeAckPayload(0xCAFEBABEu,
+                                                true,
+                                                false,
+                                                true,
+                                                77u,
+                                                SessionStatus::MINER_WORKERS_ACTIVE);
+    REQUIRE(v.size() == SessionStatus::ACK_PAYLOAD_SIZE);
+
+    SessionStatus::SessionStatusAck ack;
+    REQUIRE(ack.Parse(v));
+    REQUIRE(ack.session_id == 0xCAFEBABEu);
+    REQUIRE(ack.lane_health_flags == (SessionStatus::LANE_PRIMARY_ALIVE | SessionStatus::LANE_AUTHENTICATED));
+    REQUIRE(ack.uptime_seconds == 77u);
+    REQUIRE(ack.status_echo_flags == SessionStatus::MINER_WORKERS_ACTIVE);
+}
+
 TEST_CASE("SESSION_STATUS with MINER_DEGRADED is detected in request flags", "[llp][session_status][degraded]")
 {
     SECTION("MINER_DEGRADED bit is isolated correctly")

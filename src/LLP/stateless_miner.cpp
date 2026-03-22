@@ -1664,7 +1664,9 @@ namespace LLP
                 expiredResponse.LENGTH = static_cast<uint32_t>(expiredResponse.DATA.size());
 
                 debug::log(0, FUNCTION, "Sending SESSION_EXPIRED notification to miner (sessionId=",
-                           context.nSessionId, ", reason=INACTIVITY)");
+                           context.nSessionId, ", reason=INACTIVITY) ",
+                           LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_EXPIRED,
+                                                  LivenessAck::AckLogDirection::NOTIFY));
 
                 /* Return success with SESSION_EXPIRED response to allow graceful handling.
                  * The connection stays open to allow re-authentication on same TCP connection. */
@@ -1698,7 +1700,8 @@ namespace LLP
                        " keepalive_tx=", newContext.nKeepaliveSent,
                        " prevblock_suffix=", suffixHex,
                        " session_duration=", newContext.GetSessionDuration(nNow), "s",
-                       " [liveness:SESSION_KEEPALIVE/v2-req]");
+                       " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_KEEPALIVE,
+                                                   LivenessAck::AckLogDirection::REQUEST));
         }
         else
         {
@@ -1706,7 +1709,8 @@ namespace LLP
                        " keepalive_rx=", newContext.nKeepaliveCount,
                        " keepalive_tx=", newContext.nKeepaliveSent,
                        " session_duration=", newContext.GetSessionDuration(nNow), "s",
-                       " [liveness:SESSION_KEEPALIVE/v1-req]");
+                       " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_KEEPALIVE,
+                                                   LivenessAck::AckLogDirection::REQUEST));
         }
 
         /* Build keepalive response.
@@ -1757,7 +1761,8 @@ namespace LLP
                        " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
                        " miner_prevhash_lo32=0x", nMinerPrevHashLo32,
                        " fork_score=", std::dec, nForkScore,
-                       " [liveness:SESSION_KEEPALIVE/v2-ack]");
+                       " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_KEEPALIVE,
+                                                   LivenessAck::AckLogDirection::ACK));
 
             /* Notify Colin agent with keepalive telemetry — consistent with
              * ProcessKeepaliveV2 so both ACK families update health observability. */
@@ -1833,7 +1838,9 @@ namespace LLP
                 expiredResponse.LENGTH = static_cast<uint32_t>(expiredResponse.DATA.size());
 
                 debug::log(0, FUNCTION, "Sending SESSION_EXPIRED notification to miner (sessionId=",
-                           context.nSessionId, ", reason=INACTIVITY)");
+                           context.nSessionId, ", reason=INACTIVITY) ",
+                           LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::SESSION_EXPIRED,
+                                                  LivenessAck::AckLogDirection::NOTIFY));
 
                 return ProcessResult::Success(context, expiredResponse);
             }
@@ -1874,7 +1881,8 @@ namespace LLP
                    " stake=", heights.nStakeHeight,
                    " hash_tip_lo32=0x", std::hex, heights.nHashTipLo32,
                    " fork_score=", std::dec, nForkScore,
-                   " [liveness:KEEPALIVE_V2]");
+                   " ", LivenessAck::AckLogTag(LivenessAck::AckPacketFamily::KEEPALIVE_V2_ACK,
+                                               LivenessAck::AckLogDirection::ACK));
 
         StatelessPacket response(StatelessOpcodes::KEEPALIVE_V2_ACK);
         response.DATA   = vAck;

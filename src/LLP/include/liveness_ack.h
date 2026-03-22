@@ -158,6 +158,74 @@ namespace LivenessAck
 
 
     //=========================================================================
+    // AckLogDirection / AckLogTag — canonical liveness logging tags
+    //=========================================================================
+
+    enum class AckLogDirection : uint8_t
+    {
+        REQUEST,   ///< inbound miner -> node liveness/control packet
+        ACK,       ///< outbound node -> miner response
+        NOTIFY     ///< outbound node -> miner notification
+    };
+
+
+    inline const char* AckLogTag(AckPacketFamily family, AckLogDirection direction) noexcept
+    {
+        switch(family)
+        {
+            case AckPacketFamily::SESSION_KEEPALIVE:
+                switch(direction)
+                {
+                    case AckLogDirection::REQUEST: return "[liveness:SESSION_KEEPALIVE/req]";
+                    case AckLogDirection::ACK:     return "[liveness:SESSION_KEEPALIVE/ack]";
+                    case AckLogDirection::NOTIFY:  return "[liveness:SESSION_KEEPALIVE/notify]";
+                }
+                break;
+
+            case AckPacketFamily::KEEPALIVE_V2:
+            case AckPacketFamily::KEEPALIVE_V2_ACK:
+                switch(direction)
+                {
+                    case AckLogDirection::REQUEST: return "[liveness:KEEPALIVE_V2/req]";
+                    case AckLogDirection::ACK:     return "[liveness:KEEPALIVE_V2/ack]";
+                    case AckLogDirection::NOTIFY:  return "[liveness:KEEPALIVE_V2/notify]";
+                }
+                break;
+
+            case AckPacketFamily::SESSION_STATUS:
+            case AckPacketFamily::SESSION_STATUS_ACK:
+                switch(direction)
+                {
+                    case AckLogDirection::REQUEST: return "[liveness:SESSION_STATUS/req]";
+                    case AckLogDirection::ACK:     return "[liveness:SESSION_STATUS/ack]";
+                    case AckLogDirection::NOTIFY:  return "[liveness:SESSION_STATUS/notify]";
+                }
+                break;
+
+            case AckPacketFamily::SESSION_EXPIRED:
+                switch(direction)
+                {
+                    case AckLogDirection::REQUEST: return "[liveness:SESSION_EXPIRED/req]";
+                    case AckLogDirection::ACK:     return "[liveness:SESSION_EXPIRED/ack]";
+                    case AckLogDirection::NOTIFY:  return "[liveness:SESSION_EXPIRED/notify]";
+                }
+                break;
+
+            default:
+                switch(direction)
+                {
+                    case AckLogDirection::REQUEST: return "[liveness:UNKNOWN/req]";
+                    case AckLogDirection::ACK:     return "[liveness:UNKNOWN/ack]";
+                    case AckLogDirection::NOTIFY:  return "[liveness:UNKNOWN/notify]";
+                }
+                break;
+        }
+
+        return "[liveness:UNKNOWN/ack]";
+    }
+
+
+    //=========================================================================
     // ChainHeightSnapshot — atomic chain state for keepalive ACK payloads
     //=========================================================================
 
