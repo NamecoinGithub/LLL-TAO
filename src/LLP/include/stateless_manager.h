@@ -85,12 +85,13 @@ namespace LLP
     class StatelessMinerManager
     {
     public:
-        /** GET_HEIGHT per-session request budget (shared across both mining lanes).
+        /** GET_HEIGHT per-session rolling-window request budget (shared across both mining lanes).
          *
          *  Miner-side polling is expected to occur every 30 seconds, so a 4/min
          *  budget allows one legacy-lane poll + one stateless-lane poll every
          *  30 seconds for the same authenticated session while still throttling
-         *  bursty abuse.
+         *  bursty abuse.  Enforcement uses a rolling 60-second window, not a
+         *  wall-clock calendar minute boundary.
          */
         static constexpr std::size_t GET_HEIGHT_ROLLING_LIMIT_PER_MINUTE = 4;
         static constexpr std::chrono::seconds GET_HEIGHT_ROLLING_WINDOW = std::chrono::seconds(60);

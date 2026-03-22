@@ -1038,12 +1038,14 @@ namespace LLP
         }
         else if(result.fRateLimitBudgetExceeded)
         {
+            /* Over-budget sessions must not trigger fresh chain-state reads; serve
+             * whichever cached snapshot is newer so freshness degrades gracefully. */
             if(fHaveGlobalEntry &&
-               (!fHaveSessionEntry || globalEntry.tCaptured >= sessionEntry.tCaptured))
+               (!fHaveSessionEntry || globalEntry.tCaptured > sessionEntry.tCaptured))
             {
                 result.snapshot = globalEntry.snapshot;
                 result.nFreshnessMs = HeightCacheFreshnessMs(globalEntry, tStart);
-                result.fGlobalCacheHit = fHaveGlobalEntry;
+                result.fGlobalCacheHit = true;
             }
             else if(fHaveSessionEntry)
             {
@@ -1081,7 +1083,7 @@ namespace LLP
             {
                 const HeightCacheEntry refreshed{
                     GatherCanonicalGetHeightSnapshot(),
-                    std::chrono::steady_clock::now(),
+                    tStart,
                     true
                 };
 
