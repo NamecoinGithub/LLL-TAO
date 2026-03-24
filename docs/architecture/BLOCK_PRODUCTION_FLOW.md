@@ -724,52 +724,55 @@ These are the hard invariants enforced by `TritiumBlock::Accept()` that every bl
 
 ### Problem
 
-The previous Prime block submission path contained a broken cross-validation:
+The previous Prime block submission path contained an architectural mismatch with
+upstream Nexusoft/LLL-TAO:
 
 ```cpp
-// BROKEN: GetOffsets(GetPrime()) returns EMPTY when GetPrime() is not itself prime.
-TAO::Ledger::GetOffsets(pBlock->GetPrime(), vDerivedOffsets);
-if(vDerivedOffsets != pBlock->vOffsets) return false;  // false rejection!
+// BROKEN: Applied miner-submitted vOffsets directly.
+// GetPrimeDifficulty(fVerify=true) calls PrimeCheck(hashPrime) first
+// and returns 0.0 for any composite GetPrime() value, ignoring the
+// offsets entirely.  The miner's sieve does not guarantee that
+// GetPrime() = ProofHash() + nNonce is itself prime.
+*pBlock = BuildSolvedPrimeCandidateFromTemplate(*pBlock, nNonce, vOffsets);
+if(pBlock->vOffsets.empty())
+    GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);  // only as fallback
 ```
 
-This caused false rejections for valid Prime submissions because `GetOffsets()` returns
-an empty vector whenever `PrimeCheck(hashPrime)` fails, and there are valid scenarios
-where the miner's submitted `nNonce` gives a composite `GetPrime()` value while the
-Cunningham chain itself starts at a nearby prime.
+This caused `VerifyWork()` → `GetPrimeDifficulty(hashPrime, vOffsets, true)` → 
+`PrimeCheck(hashPrime)` to fail with difficulty 0.0 whenever `GetPrime()` was
+composite, persistently rejecting valid Cunningham chain submissions with
+"prime-cluster below minimum work(0)".
 
-Additionally, the stateless path (`StatelessMinerConnection::sign_block`) did not call
-`GenerateSignature()` after applying the miner's `nNonce` and `vOffsets`. Since
-`TritiumBlock::SignatureHash()` covers `nNonce` and `vOffsets`, the template's prior
-wallet signature became invalid, causing `Check()` → `VerifySignature()` to fail with
-"bad block signature" on every stateless Prime submission.
+### Root Cause
+
+Upstream Nexusoft/LLL-TAO `sign_block()` sets `pBlock->nNonce = nNonce` then
+calls `GetOffsets(GetPrime(), vOffsets)` **on the node side** to derive vOffsets.
+The miner only submits the solved nonce; the node computes its own vOffsets from
+a base that `PrimeCheck()` will accept.
 
 ### Solution
 
-Three new ledger utility functions were introduced in `src/TAO/Ledger/`:
-
-#### `BuildSolvedPrimeCandidateFromTemplate(tmpl, nNonce, vOffsets)`
-
-Builds a canonical solved Prime candidate from the immutable stored template:
+**`BuildSolvedPrimeCandidateFromTemplate(tmpl, nNonce)`** now takes only `nNonce`
+(no `vOffsets` parameter) and always clears `vOffsets`:
 - Copies all consensus-critical fields (nVersion, hashPrevBlock, hashMerkleRoot,
   nChannel, nHeight, nBits, nTime, producer, ssSystem, vtx) from the original template.
 - Applies the miner-submitted nNonce.
-- For Prime: sets vOffsets from miner submission; for Hash: clears vOffsets.
+- Clears `vOffsets` unconditionally — the caller derives them via `GetOffsets()`.
 - **Does NOT call `UpdateTime()`** for Prime: `ProofHash = SK1024(nVersion..nBits)`
   excludes nTime, so the miner's solved proof is independent of nTime. Preserving
   the template's nTime avoids mutating anchor fields after template issuance.
 - Clears `vchBlockSig` since `SignatureHash()` covers `nNonce`/`vOffsets`.
 
-#### `VerifySubmittedPrimeOffsets(solvedBlock, vOffsets)`
+After calling `BuildSolvedPrimeCandidateFromTemplate`, `sign_block()` calls:
+```cpp
+TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
+```
+to derive vOffsets on the node side from a base the node can verify as prime.
+If `GetOffsets()` returns empty, `GetPrime()` is composite and `VerifyWork()` will
+correctly reject the block as below minimum work.
 
-Validates miner-submitted `vOffsets` structurally without the broken equivalence check:
-- Requires `vOffsets.size() >= 5` (at least 1 chain-offset byte + 4 fractional bytes).
-- Requires all chain-offset bytes (all except last 4) to be `≤ 12` (max Cunningham gap).
-- Does **NOT** call `GetOffsets(GetPrime())` — that check is removed entirely.
-- The authoritative proof-of-work gate remains `VerifyWork()` inside `TritiumBlock::Check()`.
-
-**Remaining limitation**: this function does not cryptographically prove the offsets
-describe a valid Cunningham chain starting at `GetPrime()`. Full chain verification is
-deferred to `VerifyWork()`.
+**`VerifySubmittedPrimeOffsets`** has been removed — it is no longer needed since
+the node derives its own vOffsets rather than validating miner-submitted ones.
 
 #### `FinalizeWalletSignatureForSolvedBlock(block)`
 
@@ -811,9 +814,9 @@ Node: sign_block(nNonce, hashMerkle, vOffsets)
   For Prime channel (BuildSolvedPrimeCandidateFromTemplate):
     - Copy all consensus-critical template fields unchanged
     - Apply nNonce (do NOT call UpdateTime — nTime preserved from template)
-    - Apply vOffsets from miner payload
+    - Clear vOffsets (node derives them)
     - Clear vchBlockSig
-    - VerifySubmittedPrimeOffsets() — structural check (no broken equivalence)
+    - GetOffsets(GetPrime(), vOffsets) — node derives vOffsets from GetPrime()
     - FinalizeWalletSignatureForSolvedBlock() — re-sign with new nNonce/vOffsets
         ↓
 Node: hashPrevBlock vs hashBestChain stale gate → reject if stale
@@ -859,7 +862,7 @@ proof-anchor immutability) is encapsulated in the solved-candidate builder:
 |------|-------------------|-----------------|
 | Solved candidate builder | `BuildSolvedPrimeCandidateFromTemplate` | `BuildSolvedHashCandidateFromTemplate` |
 | nTime | preserved from template | preserved from template |
-| vOffsets | applied from miner payload | always cleared |
+| vOffsets | cleared → node calls GetOffsets(GetPrime()) | always cleared |
 | vchBlockSig | cleared → must re-sign | cleared → must re-sign |
 | Wallet signing | `FinalizeWalletSignatureForSolvedBlock` | `FinalizeWalletSignatureForSolvedBlock` |
 | Proof-of-work validation | `VerifyWork()` (Prime bits) | `VerifyWork()` (Hash target) |
@@ -867,14 +870,19 @@ proof-anchor immutability) is encapsulated in the solved-candidate builder:
 ### PR Completion Summary
 
 - **PR #392** completed Prime / channel 1: introduced `BuildSolvedPrimeCandidateFromTemplate`,
-  `VerifySubmittedPrimeOffsets`, `FinalizeWalletSignatureForSolvedBlock`, and fixed the
-  missing wallet re-signing bug in the stateless lane.
+  `FinalizeWalletSignatureForSolvedBlock`, and fixed the missing wallet re-signing bug
+  in the stateless lane.
 
-- **This PR** completes Hash / channel 2: introduces `BuildSolvedHashCandidateFromTemplate`
+- **This PR** aligns Prime channel vOffsets derivation with upstream Nexusoft/LLL-TAO:
+  the node now computes vOffsets itself via `GetOffsets(GetPrime(), vOffsets)` instead
+  of applying miner-submitted vOffsets, eliminating the persistent "prime-cluster below
+  minimum work(0)" rejection.
+
+- **This PR** also completes Hash / channel 2: introduces `BuildSolvedHashCandidateFromTemplate`
   and refactors both `miner.cpp` and `stateless_miner_connection.cpp` sign_block paths to
   use the shared helpers, achieving symmetric solved-candidate construction across all
   mining channels.
 
 ---
 
-*Document updated: 2026-03-14. Sources: `stateless_block_utility.cpp`, `miner.cpp`, `stateless_miner_connection.cpp`, `prime.cpp`*
+*Document updated: 2026-03-24. Sources: `stateless_block_utility.cpp`, `miner.cpp`, `stateless_miner_connection.cpp`, `prime.cpp`*

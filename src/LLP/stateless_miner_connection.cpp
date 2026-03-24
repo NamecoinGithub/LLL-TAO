@@ -1646,19 +1646,8 @@ namespace LLP
                     if(pTritium->nChannel == TAO::Ledger::CHANNEL::PRIME)
                     {
                         *pTritium = TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(
-                            *pTritium, nonce, vPrimeOffsets);
-
-                        if(!pTritium->vOffsets.empty() &&
-                           !TAO::Ledger::VerifySubmittedPrimeOffsets(*pTritium, pTritium->vOffsets))
-                        {
-                            debug::error(FUNCTION, "Cross-lane: Prime vOffsets structural validation failed");
-                            StatelessPacket response(STATELESS_BLOCK_REJECTED);
-                            respond(response);
-                            return true;
-                        }
-
-                        if(pTritium->vOffsets.empty())
-                            TAO::Ledger::GetOffsets(pTritium->GetPrime(), pTritium->vOffsets);
+                            *pTritium, nonce);
+                        TAO::Ledger::GetOffsets(pTritium->GetPrime(), pTritium->vOffsets);
                     }
                     else if(pTritium->nChannel == TAO::Ledger::CHANNEL::HASH)
                     {
@@ -1824,14 +1813,10 @@ namespace LLP
                 
                 debug::log(0, ANSI_COLOR_BRIGHT_CYAN, "📥 === SUBMIT_BLOCK: SUCCESS ===", ANSI_COLOR_RESET);
                 
-                /* Get block for detailed logging (reuse iterator from earlier) */
-                if(it != mapBlocks.end() && it->second.pBlock)
-                {
-                    TAO::Ledger::Block *pBlock = it->second.pBlock.get();
-                    debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   🎉 Block ", pBlock->nHeight, " accepted by Nexus network", ANSI_COLOR_RESET);
-                    debug::log(0, "   Miner: ", GetAddress().ToStringIP());
-                    debug::log(0, "   Channel: ", pBlock->nChannel, " (", MiningContext::ChannelName(pBlock->nChannel), ")");
-                }
+                /* Log acceptance details using pTritium (already resolved above). */
+                debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   🎉 Block ", pTritium->nHeight, " accepted by Nexus network", ANSI_COLOR_RESET);
+                debug::log(0, "   Miner: ", GetAddress().ToStringIP());
+                debug::log(0, "   Channel: ", pTritium->nChannel, " (", MiningContext::ChannelName(pTritium->nChannel), ")");
                 
                 StatelessPacket response(STATELESS_BLOCK_ACCEPTED);
                 respond(response);
@@ -3326,9 +3311,11 @@ namespace LLP
              *
              * For Prime (channel 1): use BuildSolvedPrimeCandidateFromTemplate which:
              *   - copies all consensus-critical fields from the original template
-             *   - applies the miner's nNonce and vOffsets
+             *   - applies the miner's nNonce and clears vOffsets
              *   - preserves nTime (ProofHash for Prime excludes nTime)
              *   - clears vchBlockSig so FinalizeWalletSignatureForSolvedBlock can re-sign
+             * Then GetOffsets(GetPrime(), vOffsets) derives vOffsets on the node side,
+             * matching upstream Nexusoft/LLL-TAO sign_block() behaviour.
              *
              * For Hash (channel 2): use BuildSolvedHashCandidateFromTemplate which:
              *   - copies all consensus-critical fields from the original template
@@ -3342,31 +3329,18 @@ namespace LLP
              * AcceptMinedBlock() operate on the fully-prepared signed block. */
             if(pBlock->nChannel == TAO::Ledger::CHANNEL::PRIME)
             {
-                *pBlock = TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(*pBlock, nNonce, vOffsets);
+                *pBlock = TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(*pBlock, nNonce);
 
-                /* Structural validation of miner-submitted Prime offsets.
-                 * The prior GetOffsets(GetPrime()) equivalence check has been removed:
-                 * it returned empty vOffsets whenever GetPrime() was not itself prime,
-                 * producing false rejections for valid Prime submissions.
-                 * VerifySubmittedPrimeOffsets() does lightweight structural checks;
-                 * the authoritative PoW gate remains VerifyWork() inside Check().
-                 *
-                 * The empty check guards the legacy-fallback path below: when the miner
-                 * does not submit vOffsets (compact wrapper), we fall through to GetOffsets()
-                 * rather than rejecting. Only non-empty submissions are validated here. */
-                if(!pBlock->vOffsets.empty() &&
-                   !TAO::Ledger::VerifySubmittedPrimeOffsets(*pBlock, pBlock->vOffsets))
-                {
-                    debug::error(FUNCTION, "Prime vOffsets structural validation failed — BLOCK_REJECTED");
-                    return false;
-                }
+                /* Derive Prime offsets on the node side from GetPrime() = ProofHash() + nNonce,
+                 * exactly as upstream Nexusoft/LLL-TAO sign_block() does.  Miner-submitted
+                 * vOffsets are not used: GetPrimeDifficulty(fVerify=true) calls PrimeCheck()
+                 * on the base first and returns 0.0 for any composite base, so the offsets
+                 * must be derived from a base that the node confirms is prime.
+                 * If GetOffsets() returns empty, GetPrime() is not prime and VerifyWork()
+                 * will correctly reject the block as below minimum work. */
+                TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
 
-                /* Legacy fallback: derive offsets locally when the miner did not submit
-                 * them (compact wrapper path).  Backwards-compatible with older miners. */
-                if(pBlock->vOffsets.empty())
-                    TAO::Ledger::GetOffsets(pBlock->GetPrime(), pBlock->vOffsets);
-
-                debug::log(2, FUNCTION, "Prime channel: solved candidate built (nTime preserved, vOffsets applied)");
+                debug::log(2, FUNCTION, "Prime channel: node-derived vOffsets.size()=", pBlock->vOffsets.size());
             }
             else if(pBlock->nChannel == TAO::Ledger::CHANNEL::HASH)
             {
@@ -3395,9 +3369,8 @@ namespace LLP
                 debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "🔬 === PRIME CHANNEL DIAGNOSTIC (Training Wheels Mode) ===", ANSI_COLOR_RESET);
 
                 /* hashPrime for diagnostic display.
-                 * NOTE: vOffsets and verification were already handled by
-                 * BuildSolvedPrimeCandidateFromTemplate + VerifySubmittedPrimeOffsets
-                 * above.  This block is diagnostic-only. */
+                 * NOTE: vOffsets were derived above by GetOffsets(GetPrime(), vOffsets).
+                 * This block is diagnostic-only. */
                 uint1024_t hashPrime = pBlock->GetPrime();
 
                 debug::log(0, "📊 PRIME BASE CALCULATION:");
