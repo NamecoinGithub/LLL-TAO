@@ -246,27 +246,32 @@ namespace TAO
          *  - For Prime: ProofHash = SK1024(nVersion..nBits), which does NOT include
          *    nTime.  The miner's solved proof is independent of nTime, so there is
          *    no reason to mutate this anchor field after template issuance.
-         *  - For Hash:  The same rationale applies; ProofHash = SK1024(nVersion..nNonce)
-         *    also excludes nTime.
          *  Callers that need a refreshed timestamp must call UpdateTime() separately
          *  after receiving the returned candidate.
+         *
+         *  vOffsets is always cleared on the returned candidate.  The caller (i.e.
+         *  sign_block()) MUST derive vOffsets itself by calling
+         *  GetOffsets(GetPrime(), vOffsets) after this function returns, exactly as
+         *  upstream Nexusoft/LLL-TAO sign_block() does.  Miner-submitted vOffsets
+         *  are not authoritative: GetPrimeDifficulty(fVerify=true) calls
+         *  PrimeCheck(hashPrime) first and returns 0.0 for any composite base,
+         *  ignoring the offsets entirely.
          *
          *  The returned block's vchBlockSig is cleared because SignatureHash()
          *  covers nNonce and vOffsets; any prior signature is invalidated by
          *  applying the miner's nonce.  Call FinalizeWalletSignatureForSolvedBlock()
          *  to re-sign before submitting to ValidateMinedBlock() / AcceptMinedBlock().
          *
-         *  @param[in] tmpl     The original wallet-signed template block
-         *  @param[in] nNonce   The miner-submitted solved nonce
-         *  @param[in] vOffsets The miner-submitted Prime offsets (ignored for Hash)
+         *  @param[in] tmpl   The original wallet-signed template block
+         *  @param[in] nNonce The miner-submitted solved nonce
          *
-         *  @return A copy of the template with nNonce and vOffsets applied
+         *  @return A copy of the template with nNonce applied, vOffsets cleared,
+         *          and vchBlockSig cleared
          *
          **/
         TritiumBlock BuildSolvedPrimeCandidateFromTemplate(
             const TritiumBlock& tmpl,
-            uint64_t nNonce,
-            const std::vector<uint8_t>& vOffsets);
+            uint64_t nNonce);
 
 
         /** BuildSolvedHashCandidateFromTemplate
@@ -309,43 +314,6 @@ namespace TAO
         TritiumBlock BuildSolvedHashCandidateFromTemplate(
             const TritiumBlock& tmpl,
             uint64_t nNonce);
-
-
-        /** VerifySubmittedPrimeOffsets
-         *
-         *  Structurally validate miner-submitted Prime vOffsets without relying on
-         *  the broken GetOffsets(GetPrime()) equivalence check.
-         *
-         *  The prior approach of calling GetOffsets(GetPrime()) and comparing the
-         *  result against the miner-submitted offsets is broken: GetOffsets() returns
-         *  an empty vector whenever GetPrime() is not itself prime, which causes
-         *  false rejections for any valid Cunningham chain submission where the node
-         *  cannot independently re-derive the same starting prime.
-         *
-         *  This function performs lightweight structural validation only:
-         *  - vOffsets must be non-empty.
-         *  - vOffsets must have at least 5 bytes (≥1 chain-offset byte + 4 fractional).
-         *  - Each chain-offset byte (all except the last 4) must be ≤ 12 (maximum
-         *    valid gap in a Cunningham chain).
-         *
-         *  The authoritative proof-of-work check is performed by VerifyWork() (called
-         *  from TritiumBlock::Check()) which evaluates GetPrimeBits(GetPrime(),
-         *  vOffsets, true) against the target nBits.  That check remains the
-         *  canonical gate; this function is a cheaper pre-screen.
-         *
-         *  Remaining limitation: this function does not cryptographically prove that
-         *  the supplied offsets describe a valid Cunningham chain starting at GetPrime().
-         *  Full chain verification is deferred to VerifyWork().
-         *
-         *  @param[in] solvedBlock The candidate block with nNonce already applied
-         *  @param[in] vOffsets    The miner-submitted Prime offsets to validate
-         *
-         *  @return true if the offsets pass structural validation
-         *
-         **/
-        bool VerifySubmittedPrimeOffsets(
-            const TritiumBlock& solvedBlock,
-            const std::vector<uint8_t>& vOffsets);
 
 
         /** FinalizeWalletSignatureForSolvedBlock

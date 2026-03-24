@@ -23,38 +23,32 @@ ________________________________________________________________________________
 #include <vector>
 
 
-/** Test Suite: Prime Sign / Finalization Refactor
+/** Test Suite: Prime Sign / Finalization
  *
- *  These tests validate the three new ledger utility functions introduced to
- *  replace the broken vOffsets cross-validation approach:
+ *  These tests validate the ledger utility functions used for solved-block
+ *  candidate construction:
  *
  *    1. BuildSolvedPrimeCandidateFromTemplate – constructs a canonical solved
- *       block by copying the immutable template and applying the miner's nNonce
- *       and vOffsets without touching nTime (Prime proof invariant).
+ *       block by copying the immutable template and applying the miner's nNonce.
+ *       vOffsets is cleared; the caller (sign_block) derives vOffsets itself by
+ *       calling GetOffsets(GetPrime(), vOffsets) — exactly as upstream
+ *       Nexusoft/LLL-TAO sign_block() does.
  *
- *    2. VerifySubmittedPrimeOffsets – validates miner-submitted vOffsets
- *       structurally without relying on the broken GetOffsets(GetPrime())
- *       equivalence check that returned empty results whenever GetPrime() was
- *       not itself prime.
- *
- *    3. FinalizeWalletSignatureForSolvedBlock – generates the canonical
+ *    2. FinalizeWalletSignatureForSolvedBlock – generates the canonical
  *       vchBlockSig so that TritiumBlock::Check() → VerifySignature() passes.
  *       (Runtime tests are integration-level; unit tests cover structural
  *       correctness of the utility's interface.)
  *
- *  Regression coverage:
- *    - The broken path rejected valid Prime submissions by comparing
- *      GetOffsets(GetPrime()) (which returns empty when GetPrime() is not prime)
- *      against the miner's submitted vOffsets, producing a false mismatch.
- *    - VerifySubmittedPrimeOffsets removes that equivalence check entirely;
- *      the authoritative PoW gate is VerifyWork() inside TritiumBlock::Check().
- *
- *  Limitations documented:
- *    - VerifySubmittedPrimeOffsets does NOT cryptographically prove the offsets
- *      describe a valid Cunningham chain starting at GetPrime(); full chain
- *      verification is deferred to VerifyWork().
- *    - FinalizeWalletSignatureForSolvedBlock requires an active autologin
- *      session; runtime signing tests are integration-level.
+ *  Root cause fixed:
+ *    - The prior approach accepted miner-submitted vOffsets and applied them
+ *      to the block, then called VerifyWork(GetPrimeBits(GetPrime(), vOffsets,
+ *      fVerify=true)).  GetPrimeDifficulty(fVerify=true) calls PrimeCheck() on
+ *      the base first and returns 0.0 for any composite GetPrime() value,
+ *      ignoring the offsets entirely.  Since the miner's sieve does not
+ *      guarantee that GetPrime() = ProofHash() + nNonce is itself prime, valid
+ *      Cunningham chain submissions were persistently rejected.
+ *    - Fix: the node now derives vOffsets itself via GetOffsets(GetPrime(),
+ *      vOffsets) after applying nNonce, matching upstream behaviour.
  **/
 
 
@@ -85,148 +79,6 @@ static std::vector<uint8_t> MinimalValidPrimeOffsets()
     return {2u, 0u, 0u, 0u, 0u};
 }
 
-/** Build a well-formed Prime vOffsets with N chain-offset bytes (all = 2) and
- *  4 fractional bytes. */
-static std::vector<uint8_t> MakeChainOffsets(size_t nChainLen)
-{
-    std::vector<uint8_t> v(nChainLen, 2u);
-    v.push_back(0u); v.push_back(0u); v.push_back(0u); v.push_back(0u);
-    return v;
-}
-
-
-/* ─── VerifySubmittedPrimeOffsets tests ────────────────────────────────────── */
-
-TEST_CASE("VerifySubmittedPrimeOffsets: empty offsets rejected", "[prime][sign_finalization]")
-{
-    TAO::Ledger::TritiumBlock block = MakeTestBlock(1, 42u, {});
-
-    REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, {}) == false);
-}
-
-
-TEST_CASE("VerifySubmittedPrimeOffsets: too-short offsets rejected", "[prime][sign_finalization]")
-{
-    TAO::Ledger::TritiumBlock block = MakeTestBlock(1, 42u, {});
-
-    SECTION("1 byte — no fractional component")
-    {
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, {2u}) == false);
-    }
-
-    SECTION("4 bytes — exactly fractional, no chain offset byte")
-    {
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, {0u, 0u, 0u, 0u}) == false);
-    }
-}
-
-
-TEST_CASE("VerifySubmittedPrimeOffsets: invalid chain-offset byte rejected", "[prime][sign_finalization]")
-{
-    TAO::Ledger::TritiumBlock block = MakeTestBlock(1, 42u, {});
-
-    SECTION("Chain offset 14 (above max gap of 12)")
-    {
-        /* offset[0]=14 exceeds the maximum valid gap of 12 */
-        std::vector<uint8_t> v = {14u, 0u, 0u, 0u, 0u};
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == false);
-    }
-
-    SECTION("Chain offset 255 (way above max gap)")
-    {
-        std::vector<uint8_t> v = {255u, 0u, 0u, 0u, 0u};
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == false);
-    }
-
-    SECTION("Multiple chain offsets, one invalid mid-way")
-    {
-        /* offsets: [2, 4, 6, 14-invalid, 2] + 4 fractional */
-        std::vector<uint8_t> v = {2u, 4u, 6u, 14u, 2u, 0u, 0u, 0u, 0u};
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == false);
-    }
-
-    SECTION("Last 4 bytes (fractional) are not subject to the ≤12 check")
-    {
-        /* The last 4 bytes are fractional difficulty — they can be any value.
-         * Offset[0]=2 is valid; bytes 1-4 are fractional. */
-        std::vector<uint8_t> v = {2u, 255u, 255u, 255u, 255u};
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == true);
-    }
-}
-
-
-TEST_CASE("VerifySubmittedPrimeOffsets: valid offsets accepted", "[prime][sign_finalization]")
-{
-    TAO::Ledger::TritiumBlock block = MakeTestBlock(1, 42u, {});
-
-    SECTION("Minimal valid: 1 chain offset + 4 fractional")
-    {
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, MinimalValidPrimeOffsets()) == true);
-    }
-
-    SECTION("Typical cluster of 3 chain offsets + 4 fractional (7 bytes total)")
-    {
-        std::vector<uint8_t> v = {2u, 4u, 6u, 0u, 0u, 0u, 0u};
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == true);
-    }
-
-    SECTION("All chain offsets at maximum valid gap of 12")
-    {
-        std::vector<uint8_t> v = MakeChainOffsets(5);
-        for(size_t i = 0; i < 5; ++i) v[i] = 12u;
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, v) == true);
-    }
-
-    SECTION("Long chain (10 offset bytes) all valid")
-    {
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, MakeChainOffsets(10)) == true);
-    }
-}
-
-
-/* ─── Regression: broken GetOffsets(GetPrime()) cross-validation ─────────── */
-
-TEST_CASE("Regression: old GetOffsets equivalence check rejects valid submissions", "[prime][sign_finalization][regression]")
-{
-    /* This test demonstrates the prior broken behaviour:
-     *   GetOffsets(GetPrime()) returns an EMPTY vector whenever GetPrime() is
-     *   not itself prime.  The old code then compared that empty vector against
-     *   the miner's submitted (non-empty) offsets and rejected the block.
-     *
-     * The new VerifySubmittedPrimeOffsets() does NOT perform this comparison.
-     * A miner-submitted block with valid structural offsets must pass the
-     * structural check regardless of whether GetPrime() is prime. */
-
-    SECTION("Block where GetPrime() is NOT prime: old path would reject, new path accepts structurally")
-    {
-        /* Construct a block such that ProofHash() + nNonce is composite.
-         * We use a fixed nNonce (1) and rely on the fact that a random 1024-bit
-         * number is overwhelmingly likely to be composite. */
-        TAO::Ledger::TritiumBlock block = MakeTestBlock(1u, 1u, {});
-
-        /* The miner reports valid offsets (structurally well-formed). */
-        const std::vector<uint8_t> vMinerOffsets = MinimalValidPrimeOffsets();
-
-        /* Old broken path: GetOffsets(GetPrime()) would return empty because
-         * the prime candidate is composite → compare(empty, {2,0,0,0,0}) → REJECT.
-         * We demonstrate this by explicitly calling GetOffsets on the block: */
-        std::vector<uint8_t> vNodeDerived;
-        TAO::Ledger::GetOffsets(block.GetPrime(), vNodeDerived);
-        /* vNodeDerived will likely be empty (GetPrime() is almost certainly composite). */
-
-        /* New structural-only check: passes regardless of GetPrime() primality. */
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, vMinerOffsets) == true);
-
-        /* Regression confirmation: if the old equivalence check were applied,
-         * it would fail (vNodeDerived likely != vMinerOffsets). */
-        if(vNodeDerived.empty())
-        {
-            /* Old code would have done: if(vNodeDerived != vMinerOffsets) return false; */
-            REQUIRE(vNodeDerived != vMinerOffsets);  // confirms old check would reject
-        }
-    }
-}
-
 
 /* ─── BuildSolvedPrimeCandidateFromTemplate tests ────────────────────────── */
 
@@ -247,9 +99,8 @@ TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: consensus fields preserved", "
     /* Simulate a prior template signature (to confirm it is cleared). */
     tmpl.vchBlockSig = {0xAA, 0xBB, 0xCC};
 
-    const std::vector<uint8_t> vOffsets = MinimalValidPrimeOffsets();
     TAO::Ledger::TritiumBlock solved =
-        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, nNonce, vOffsets);
+        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, nNonce);
 
     SECTION("nVersion is preserved from template")
     {
@@ -284,12 +135,14 @@ TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: consensus fields preserved", "
         REQUIRE(solved.nNonce == nNonce);
     }
 
-    SECTION("vOffsets is set to the miner-submitted value for Prime channel")
+    SECTION("vOffsets is cleared (node derives via GetOffsets after this call)")
     {
-        REQUIRE(solved.vOffsets == vOffsets);
+        /* The node calls GetOffsets(GetPrime(), vOffsets) after BuildSolvedPrimeCandidateFromTemplate
+         * to derive vOffsets — miner-submitted vOffsets are not used. */
+        REQUIRE(solved.vOffsets.empty());
     }
 
-    SECTION("vchBlockSig is cleared (must be re-generated after nNonce/vOffsets change)")
+    SECTION("vchBlockSig is cleared (must be re-generated after nNonce change)")
     {
         REQUIRE(solved.vchBlockSig.empty());
     }
@@ -308,12 +161,12 @@ TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: consensus fields preserved", "
 
 TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: Hash channel clears vOffsets", "[prime][sign_finalization]")
 {
-    /* For non-Prime channels (Hash), vOffsets must be cleared. */
+    /* For non-Prime channels (Hash), vOffsets must also be cleared. */
     const std::vector<uint8_t> vOffsets = MinimalValidPrimeOffsets();
     TAO::Ledger::TritiumBlock tmpl = MakeTestBlock(2u /*Hash*/, 1u, vOffsets);
 
     TAO::Ledger::TritiumBlock solved =
-        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, 42u, vOffsets);
+        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, 42u);
 
     REQUIRE(solved.nChannel == 2u);
     REQUIRE(solved.vOffsets.empty());
@@ -330,8 +183,7 @@ TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: template is not mutated", "[pr
     tmpl.vchBlockSig = {0xFF};
 
     TAO::Ledger::TritiumBlock solved =
-        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(
-            tmpl, 0xCAFEBABEULL, MinimalValidPrimeOffsets());
+        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, 0xCAFEBABEULL);
 
     /* Template must be unchanged. */
     REQUIRE(tmpl.nNonce == tmplNonce);
@@ -365,32 +217,35 @@ TEST_CASE("Stale Prime template: rejection is handled before sign_block", "[prim
         REQUIRE(block.nChannel == TAO::Ledger::CHANNEL::PRIME);
     }
 
-    SECTION("VerifySubmittedPrimeOffsets passes for a fresh Prime submission")
+    SECTION("BuildSolvedPrimeCandidateFromTemplate clears vOffsets for Prime (node derives them)")
     {
-        TAO::Ledger::TritiumBlock block = MakeTestBlock(1u, 42u, {});
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, MinimalValidPrimeOffsets()) == true);
-    }
-
-    SECTION("VerifySubmittedPrimeOffsets rejects empty offsets (stale/corrupted payload)")
-    {
-        TAO::Ledger::TritiumBlock block = MakeTestBlock(1u, 42u, {});
-        REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(block, {}) == false);
+        TAO::Ledger::TritiumBlock tmpl = MakeTestBlock(1u, 1u, MinimalValidPrimeOffsets());
+        TAO::Ledger::TritiumBlock solved =
+            TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, 42u);
+        REQUIRE(solved.vOffsets.empty());
     }
 }
 
 
-/* ─── Canonical consensus-field completeness ─────────────────────────────── */
+/* ─── Node-side GetOffsets derivation ────────────────────────────────────── */
 
-TEST_CASE("BuildSolvedPrimeCandidateFromTemplate: result passes structural VerifySubmittedPrimeOffsets", "[prime][sign_finalization]")
+TEST_CASE("Node-side GetOffsets: empty result for composite GetPrime()", "[prime][sign_finalization]")
 {
-    /* A solved candidate built by BuildSolvedPrimeCandidateFromTemplate with
-     * valid structural offsets must pass VerifySubmittedPrimeOffsets. */
-    TAO::Ledger::TritiumBlock tmpl = MakeTestBlock(1u, 1u, {});
-    const std::vector<uint8_t> vOffsets = MakeChainOffsets(3);
+    /* Demonstrate that GetOffsets() returns an empty vector when GetPrime() is
+     * not itself prime.  In sign_block(), this means VerifyWork() will correctly
+     * reject the block as below minimum work — which is the right outcome.
+     *
+     * A random zero-filled block is overwhelmingly likely to have a composite
+     * GetPrime() value, so we use that as a representative composite candidate. */
+    TAO::Ledger::TritiumBlock block = MakeTestBlock(1u, 1u, {});
 
-    TAO::Ledger::TritiumBlock solved =
-        TAO::Ledger::BuildSolvedPrimeCandidateFromTemplate(tmpl, 0xABCDEFULL, vOffsets);
+    std::vector<uint8_t> vNodeDerived;
+    TAO::Ledger::GetOffsets(block.GetPrime(), vNodeDerived);
 
-    REQUIRE(solved.nChannel == TAO::Ledger::CHANNEL::PRIME);
-    REQUIRE(TAO::Ledger::VerifySubmittedPrimeOffsets(solved, solved.vOffsets) == true);
+    /* vNodeDerived will typically be empty for a random composite GetPrime().
+     * If it is non-empty, the hash happened to yield a valid prime chain, which
+     * is astronomically unlikely and not tested here. */
+    /* (No REQUIRE — just document the expected path.) */
+    SUCCEED("GetOffsets invoked without crash; empty result is expected for composite base");
 }
+

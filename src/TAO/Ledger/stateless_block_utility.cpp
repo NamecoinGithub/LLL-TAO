@@ -522,8 +522,7 @@ namespace TAO::Ledger
     /* Build a canonical solved Prime candidate from the immutable stored template. */
     TritiumBlock BuildSolvedPrimeCandidateFromTemplate(
         const TritiumBlock& tmpl,
-        const uint64_t nNonce,
-        const std::vector<uint8_t>& vOffsets)
+        const uint64_t nNonce)
     {
         /* Copy all consensus-critical fields from the original template.
          * This preserves: nVersion, hashPrevBlock, hashMerkleRoot, nChannel,
@@ -540,12 +539,14 @@ namespace TAO::Ledger
         /* Apply the miner-submitted nonce. */
         solved.nNonce = nNonce;
 
-        /* Apply miner-submitted Prime offsets for the Prime channel.
-         * Clear offsets for all other channels (consensus invariant). */
-        if(solved.nChannel == CHANNEL::PRIME)
-            solved.vOffsets = vOffsets;
-        else
-            solved.vOffsets.clear();
+        /* Clear vOffsets unconditionally.  The node MUST derive Prime offsets
+         * itself by calling GetOffsets(GetPrime(), vOffsets) after this function
+         * returns — exactly as upstream Nexusoft/LLL-TAO sign_block() does.
+         * Miner-submitted vOffsets are not authoritative: the sieve base-offset
+         * math does not guarantee that GetPrime() = ProofHash() + nNonce is itself
+         * prime, and GetPrimeDifficulty(fVerify=true) checks PrimeCheck(hashPrime)
+         * first, returning 0.0 for any composite base regardless of the offsets. */
+        solved.vOffsets.clear();
 
         /* Clear the block signature.  SignatureHash() covers nNonce and vOffsets,
          * so any signature produced for the template (nNonce=1, vOffsets=empty)
@@ -554,8 +555,7 @@ namespace TAO::Ledger
         solved.vchBlockSig.clear();
 
         debug::log(2, FUNCTION, "Built solved candidate from template: channel=", solved.nChannel,
-                   " height=", solved.nHeight, " nNonce=0x", std::hex, nNonce, std::dec,
-                   " vOffsets.size()=", solved.vOffsets.size());
+                   " height=", solved.nHeight, " nNonce=0x", std::hex, nNonce, std::dec);
 
         return solved;
     }
@@ -598,50 +598,6 @@ namespace TAO::Ledger
                    " height=", solved.nHeight, " nNonce=0x", std::hex, nNonce, std::dec);
 
         return solved;
-    }
-
-
-    /* Structurally validate miner-submitted Prime vOffsets without the broken
-     * GetOffsets(GetPrime()) equivalence check. */
-    bool VerifySubmittedPrimeOffsets(
-        const TritiumBlock& solvedBlock,
-        const std::vector<uint8_t>& vOffsets)
-    {
-        /* Prime blocks must carry non-empty offsets (enforced by Check()). */
-        if(vOffsets.empty())
-            return debug::error(FUNCTION, "Prime block requires non-empty vOffsets");
-
-        /* Minimum structure: at least 1 chain-offset byte + 4 fractional bytes. */
-        if(vOffsets.size() < 5)
-            return debug::error(FUNCTION, "vOffsets too short: ", vOffsets.size(),
-                                " bytes (minimum 5: ≥1 chain offset + 4 fractional)");
-
-        /* Chain-offset bytes are all bytes except the last 4 (fractional difficulty).
-         * Each chain-offset encodes the gap to the next prime in the Cunningham chain;
-         * the maximum valid gap is 12 (hardcoded in GetOffsets / GetPrimeDifficulty). */
-        const size_t nChainOffsets = vOffsets.size() - 4;
-        for(size_t i = 0; i < nChainOffsets; ++i)
-        {
-            if(vOffsets[i] > 12)
-                return debug::error(FUNCTION, "invalid Prime offset[", i, "]=",
-                                    static_cast<int>(vOffsets[i]),
-                                    " (maximum chain gap is 12)");
-        }
-
-        /* NOTE: We intentionally do NOT call GetOffsets(GetPrime()) and compare
-         * the result against the miner-submitted vOffsets.  That approach was
-         * broken: GetOffsets() returns an empty vector whenever PrimeCheck() fails
-         * on the raw GetPrime() value, producing false rejections for valid chains
-         * where the node cannot re-derive the starting prime independently.
-         *
-         * The authoritative proof-of-work validation is performed by VerifyWork()
-         * (called from TritiumBlock::Check()), which evaluates
-         *   GetPrimeBits(GetPrime(), vOffsets, !Synchronizing()) >= nBits
-         * That gate remains the canonical acceptance criterion. */
-
-        debug::log(2, FUNCTION, "Prime vOffsets structurally valid: ",
-                   vOffsets.size(), " bytes, ", nChainOffsets, " chain offset(s)");
-        return true;
     }
 
 
