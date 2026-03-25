@@ -1232,6 +1232,19 @@ namespace LLP
             const StatelessPacket& packet
         );
 
+        /** ValidateRewardAddress
+         *
+         *  Validates that a reward address is a valid Tritium GenesisHash.
+         *  Enforces the type-byte requirement from TAO::Operation::Coinbase::Verify()
+         *  and checks on-chain existence so invalid hashes are caught at bind time.
+         *
+         *  @param[in] hashReward The reward address to validate
+         *
+         *  @return True if valid GenesisHash with correct type byte and on-chain presence
+         *
+         **/
+        static bool ValidateRewardAddress(const uint256_t& hashReward);
+
     private:
         /** BuildAuthMessage
          *
@@ -1277,17 +1290,6 @@ namespace LLP
             const std::vector<uint8_t>& vPlaintext,
             const std::vector<uint8_t>& vKey
         );
-
-        /** ValidateRewardAddress
-         *
-         *  Validates that a reward address is non-zero and properly formatted.
-         *
-         *  @param[in] hashReward The reward address to validate
-         *
-         *  @return True if valid format
-         *
-         **/
-        static bool ValidateRewardAddress(const uint256_t& hashReward);
     };
 
 } // namespace LLP

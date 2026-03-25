@@ -15,13 +15,14 @@ ________________________________________________________________________________
 
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/genesis_constants.h>
 #include <Util/include/runtime.h>
 
 using namespace LLP;
 
 /* Test constants */
 namespace {
-    /* Sample test genesis hash for reward routing tests */
+    /* Sample test genesis hash for reward routing tests — leading byte 0xa1 (mainnet UserType) */
     const char* TEST_GENESIS_HEX = "a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122";
     
     /* Sample test reward address (different from genesis) */
@@ -318,5 +319,78 @@ TEST_CASE("ProcessSetReward completes successfully and updates context", "[rewar
         /* Cleanup */
         manager.RemoveMiner(ctxBound.strAddress);
         manager.RemoveMiner(ctxNotBound.strAddress);
+    }
+}
+
+
+TEST_CASE("ValidateRewardAddress type-byte enforcement", "[reward_routing]")
+{
+    SECTION("Zero hash is rejected")
+    {
+        /* Zero hash must always fail */
+        uint256_t hashZero = uint256_t(0);
+        REQUIRE(StatelessMiner::ValidateRewardAddress(hashZero) == false);
+    }
+
+    SECTION("Hash with wrong type byte is rejected (register/account address type)")
+    {
+        /* Leading byte 0xd1 is a register address type — not a valid GenesisHash.
+         * Coinbase::Verify() would reject such a hash on-chain. */
+        uint256_t hashRegister;
+        hashRegister.SetHex("d174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122");
+
+        /* IsValidGenesisType must return false for this type byte */
+        REQUIRE(LLP::GenesisConstants::IsValidGenesisType(hashRegister) == false);
+
+        /* ValidateRewardAddress must reject it before any on-chain lookup */
+        REQUIRE(StatelessMiner::ValidateRewardAddress(hashRegister) == false);
+    }
+
+    SECTION("Hash with invalid type byte 0xFF is rejected")
+    {
+        uint256_t hashBadType;
+        hashBadType.SetHex("ff74011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122");
+
+        REQUIRE(LLP::GenesisConstants::IsValidGenesisType(hashBadType) == false);
+        REQUIRE(StatelessMiner::ValidateRewardAddress(hashBadType) == false);
+    }
+
+    SECTION("Hash with correct type byte but not on-chain is rejected")
+    {
+        /* A hash with the correct leading type byte for the current network mode
+         * that does not exist on-chain should fail the ExistsOnChain() check.
+         * (In unit-test mode there is no live LLD::Ledger, so HasFirst returns false.) */
+        uint256_t hashValidType;
+        hashValidType.SetHex(TEST_GENESIS_HEX);  // leading byte 0xa1 — valid mainnet type
+
+        /* IsValidGenesisType must accept the type byte */
+        REQUIRE(LLP::GenesisConstants::IsValidGenesisType(hashValidType) == true);
+
+        /* ExistsOnChain will return false in the unit-test environment (no live ledger).
+         * ValidateRewardAddress must therefore return false due to on-chain check. */
+        REQUIRE(LLP::GenesisConstants::ExistsOnChain(hashValidType) == false);
+        REQUIRE(StatelessMiner::ValidateRewardAddress(hashValidType) == false);
+    }
+
+    SECTION("GetPayoutAddress fallback to genesis still requires a properly-typed hash")
+    {
+        /* Build a context where the reward is not explicitly bound — GetPayoutAddress
+         * falls back to hashGenesis.  Verify the genesis has the correct type byte. */
+        uint256_t testGenesis;
+        testGenesis.SetHex(TEST_GENESIS_HEX);
+
+        MiningContext ctx = MiningContext()
+            .WithGenesis(testGenesis)
+            .WithAuth(true);
+
+        /* No explicit reward binding */
+        REQUIRE(ctx.fRewardBound == false);
+
+        /* GetPayoutAddress returns genesis */
+        uint256_t payout = ctx.GetPayoutAddress();
+        REQUIRE(payout == testGenesis);
+
+        /* The returned payout must have a valid GenesisHash type byte */
+        REQUIRE(LLP::GenesisConstants::IsValidGenesisType(payout) == true);
     }
 }

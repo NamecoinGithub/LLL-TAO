@@ -347,12 +347,22 @@ Total Size: 60 bytes (encrypted payload)
    std::copy(vPlaintext.begin(), vPlaintext.begin() + 32, hashReward.begin());
    ```
 
-4. **Validate Reward Address Format**
+4. **Validate Reward Address — must be a valid Tritium GenesisHash**
    ```cpp
-   if(hashReward == 0) {
-       return SendResponse(MINER_REWARD_RESULT, {0x00}); // Invalid address
+   // Step 4: Validate that the reward hash is a valid Tritium GenesisHash.
+   // Upstream Nexus consensus (TAO::Operation::Coinbase::Verify) hard-enforces
+   // that the coinbase hashGenesis field has a leading type byte equal to
+   // GENESIS::UserType().  Register/account addresses are rejected on-chain.
+   if(!LLP::GenesisConstants::IsValidGenesisType(hashReward) ||
+      !LLP::GenesisConstants::ExistsOnChain(hashReward))
+   {
+       return SendResponse(MINER_REWARD_RESULT, {0x00}); // Invalid genesis
    }
    ```
+   > **Note:** Register/account addresses are **not** valid reward targets — only a
+   > Tritium GenesisHash (sigchain owner hash) is accepted by Nexus consensus.
+   > A zero hash, a hash with the wrong type byte, or a hash that has no transactions
+   > on-chain will all be rejected here with `{0x00}` before any block is built.
 
 5. **Bind Reward Address to Session**
    ```cpp
@@ -362,7 +372,7 @@ Total Size: 60 bytes (encrypted payload)
 
 6. **Send MINER_REWARD_RESULT (0xD004)**
 
-**Note:** The node does **NOT** verify that the reward address exists on the blockchain at this stage. Existence validation happens during block acceptance in consensus rules. This allows miners to set new addresses that will be created later.
+**Note:** The reward address **must** be a valid Tritium GenesisHash — the sigchain owner hash with a leading type byte of `0xa1` (mainnet) or `0xb1` (testnet). Register/account addresses, random hashes, and Falcon keyIDs are rejected at bind time. Upstream Nexus consensus (`Coinbase::Verify`) enforces the same rule; catching it here prevents blocks being submitted with an address that would produce no reward.
 
 **Performance:**
 - ChaCha20-Poly1305 decryption: <0.5ms

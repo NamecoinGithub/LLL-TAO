@@ -36,6 +36,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/retarget.h>
+#include <TAO/Ledger/include/enum.h>
 
 #include <Util/include/debug.h>
 #include <Util/include/runtime.h>
@@ -1982,7 +1983,35 @@ namespace LLP
             return false;
         }
 
-        /* Basic validation passed - more complex validation happens during block acceptance */
+        /* Upstream Nexus consensus (TAO::Operation::Coinbase::Verify) hard-enforces that
+         * the coinbase hashGenesis field must have a leading type byte equal to
+         * GENESIS::UserType() (mainnet: 0xa1, testnet: 0xb1).  Any other type byte
+         * (e.g. register/account address 0xd1-0xed, random hash, Falcon keyID) causes
+         * Coinbase::Verify() to return false, which rejects the block or silently
+         * produces no reward credit.  Catch this at bind-time so the miner is told
+         * immediately rather than discovering it after a block is submitted. */
+        if(!LLP::GenesisConstants::IsValidGenesisType(hashReward))
+        {
+            debug::error(FUNCTION, "Reward address is not a valid Tritium GenesisHash"
+                         " (type byte 0x", std::hex,
+                         static_cast<uint32_t>(hashReward.GetType()), std::dec,
+                         " != expected 0x", std::hex,
+                         static_cast<uint32_t>(TAO::Ledger::GENESIS::UserType()), std::dec, ")");
+            debug::error(FUNCTION, "Reward address MUST be a Tritium GenesisHash (sigchain owner).");
+            debug::error(FUNCTION, "Find yours on https://explorer.nexus.io (Owner field) or in the Nexus Interface.");
+            return false;
+        }
+
+        /* Verify the genesis exists on-chain so a typo is caught before the first block is built.
+         * A genesis that has never submitted a transaction will not be recognised by the network. */
+        if(!LLP::GenesisConstants::ExistsOnChain(hashReward))
+        {
+            debug::error(FUNCTION, "Reward GenesisHash not found on chain: ", hashReward.GetHex());
+            debug::error(FUNCTION, "Make sure your sigchain has at least one transaction on the Nexus network.");
+            return false;
+        }
+
+        debug::log(1, FUNCTION, "Reward GenesisHash validated: ", hashReward.GetHex());
         return true;
     }
 
@@ -2099,7 +2128,7 @@ namespace LLP
 
         debug::log(0, FUNCTION, "REWARD BINDING DIAGNOSTIC");
         debug::log(0, FUNCTION, "- miner reward string: NOT AVAILABLE (packet carries encrypted 32-byte hash only)");
-        debug::log(0, FUNCTION, "- decoded reward register/account hash: ", hashReward.GetHex());
+        debug::log(0, FUNCTION, "- decoded reward GenesisHash: ", hashReward.GetHex());
         debug::log(0, FUNCTION, "- bound reward hash from current session: ", FullHexOrUnset(context.hashRewardAddress));
         debug::log(0, FUNCTION, "- bound reward source: ", context.RewardBindingSource());
         debug::log(0, FUNCTION, "- session genesis used for ChaCha20 KDF: ", context.GenesisHex());
@@ -2127,10 +2156,12 @@ namespace LLP
                            " differs from live session genesis=", context.GenesisHex());
         }
 
-        /* Validate the reward address */
+        /* Validate the reward address — must be a valid Tritium GenesisHash */
         if(!ValidateRewardAddress(hashReward))
         {
-            debug::error(FUNCTION, "Invalid reward address");
+            debug::error(FUNCTION, "Invalid reward address rejected from ", context.strAddress,
+                         " — must be a Tritium GenesisHash (sigchain owner hash)");
+            debug::error(FUNCTION, "See https://explorer.nexus.io (search username → Owner field)");
             
             std::vector<uint8_t> vErrorMsg = {0x00};
             std::vector<uint8_t> vEncryptedError = EncryptRewardResult(vErrorMsg, vChaChaKey);

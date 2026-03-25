@@ -16,6 +16,25 @@ daemon=1
 #mining=1
 #stake=1
 
+#------------------------------------------------------------------------------
+# MINING REWARD ADDRESS (REQUIRED for stateless mining)
+#------------------------------------------------------------------------------
+# The reward address MUST be your Tritium GenesisHash — the sigchain owner hash.
+# It is NOT an account/register address.
+#
+# How to find your GenesisHash:
+#   1. Nexus Interface → Profile → copy the "Owner" hash
+#   2. https://explorer.nexus.io → search your username → copy the "Owner" field
+#
+# Format: 32-byte hex, leading byte 0xa1 (mainnet) or 0xb1 (testnet)
+# Example (mainnet):
+#   reward_genesis=a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122
+#
+# WARNING: Using an account/register address or any other non-GenesisHash will
+# cause block submissions to be rejected by the Nexus network or produce no
+# reward credit, even if the block itself is valid.
+#------------------------------------------------------------------------------
+
 #==============================================================================
 # FALCON POST-QUANTUM SIGNATURE CONFIGURATION
 #==============================================================================

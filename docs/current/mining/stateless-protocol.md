@@ -305,6 +305,18 @@ void StatelessMinerConnection::OnDisconnect()
 
 ## Template Generation
 
+### Reward Address Requirement (MINER_SET_REWARD)
+
+Before any block template can be generated, the miner **must** bind a valid reward address via `MINER_SET_REWARD`.
+
+**The reward address MUST be a valid Tritium GenesisHash (sigchain owner hash).**
+- It is a 32-byte hash with leading type byte `0xa1` (mainnet) or `0xb1` (testnet).
+- Visible as **Owner** on https://explorer.nexus.io after searching your username, or in the **Nexus Interface → Profile**.
+- Example (mainnet): `a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122`
+- A register/account address, a random hash, or a Falcon keyID will be **rejected** — upstream Nexus consensus (`Coinbase::Verify`) enforces `hashGenesis.GetType() == GENESIS::UserType()` and blocks with any other type byte are rejected or produce no reward credit.
+
+For a detailed setup guide see [docs/current/mining/reward-address-setup.md](reward-address-setup.md).
+
 ### Block Template Creation
 
 Templates are generated using the node's wallet keys to pre-sign blocks:

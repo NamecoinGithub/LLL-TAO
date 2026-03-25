@@ -453,6 +453,59 @@ minerallowkey=fedcba9876543210...
 
 ---
 
+## Reward Address Setup
+
+### What Is a GenesisHash?
+
+The **reward address** sent via `MINER_SET_REWARD` must be a **Tritium GenesisHash** — the sigchain owner hash that identifies a user account on the Nexus blockchain.
+
+It is **not** an account register address, a token address, or any other type of address.
+
+A GenesisHash is a 32-byte hash with:
+- Leading type byte **`0xa1`** on mainnet
+- Leading type byte **`0xb1`** on testnet
+
+### Why GenesisHash Only?
+
+Upstream Nexus consensus enforces this at the protocol level in `TAO::Operation::Coinbase::Verify()`:
+
+```cpp
+if(hashGenesis.GetType() != TAO::Ledger::GENESIS::UserType())
+    return debug::error(FUNCTION, "invalid genesis for coinbase");
+```
+
+If any other address type is submitted as the reward address, the coinbase verification fails and the miner receives **no NXS reward** — even if the proof-of-work is valid.
+
+### How to Find Your GenesisHash
+
+1. **Nexus Interface:** Open the Nexus wallet → go to **Profile** → copy the **Owner** field
+2. **Nexus Explorer:** Go to https://explorer.nexus.io → search your username → copy the **"Owner"** field
+
+**Example (mainnet):** `a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122`
+
+### Common Mistakes
+
+| What You Sent | What Happens |
+|---------------|-------------|
+| Account register address (0xd1–0xed type byte) | Rejected at `MINER_SET_REWARD` with `{0x00}` error |
+| Random 32-byte hash with wrong type byte | Rejected at `MINER_SET_REWARD` with `{0x00}` error |
+| Valid GenesisHash not on-chain | Rejected at `MINER_SET_REWARD` with `{0x00}` error |
+| Zero hash | Rejected at `MINER_SET_REWARD` with `{0x00}` error |
+| ✅ Valid GenesisHash on mainnet/testnet | Accepted, rewards credited to sigchain |
+
+### Troubleshooting: "Block accepted but no reward"
+
+If a block appears to be accepted but no NXS is credited:
+
+1. Check node logs for `invalid genesis for coinbase` — this means the reward address had the wrong type byte
+2. Verify your reward address starts with `a1` (mainnet) or `b1` (testnet)
+3. Ensure your sigchain has at least one transaction (ExistsOnChain check)
+4. Resend `MINER_SET_REWARD` with the correct GenesisHash
+
+For a complete guide see [reward-address-setup.md](reward-address-setup.md).
+
+---
+
 ## Configuration Reference
 
 ### Core Settings

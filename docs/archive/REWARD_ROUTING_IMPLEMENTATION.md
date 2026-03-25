@@ -93,12 +93,15 @@ vChaChaKey = SK256(vInput)
 
 ### 3. Reward Address Validation
 
-**Checks** (ValidateRewardAddress):
+**Checks** (`ValidateRewardAddress`):
 1. ✓ Address is not zero
-2. ✓ Address exists on blockchain (via LLD::Register)
-3. ✓ Object parses successfully
-4. ✓ Type is ACCOUNT (not TRUST, TOKEN, etc.)
-5. ✓ Token is 0 (NXS native currency)
+2. ✓ Type byte equals `GENESIS::UserType()` — `0xa1` mainnet / `0xb1` testnet (`IsValidGenesisType`)
+3. ✓ GenesisHash exists on-chain (`ExistsOnChain` — `LLD::Ledger->HasFirst`)
+
+> **Why GenesisHash only?**  
+> Upstream Nexus consensus (`TAO::Operation::Coinbase::Verify`) hard-enforces:  
+> `if(hashGenesis.GetType() != TAO::Ledger::GENESIS::UserType()) return error(...)`  
+> Register/account addresses have a different leading type byte and are **rejected** by consensus — blocks submitted with such an address either fail validation or produce no reward credit.  The `MINER_SET_REWARD` handler now catches this at bind time with a clear error message before any block is built.
 
 ### 4. Block Creation Integration
 
@@ -142,8 +145,8 @@ MINING
 1. **Post-Quantum Authentication**: Falcon-512 signatures required before any operations
 2. **Encrypted Communication**: All reward data protected by ChaCha20-Poly1305
 3. **Session Isolation**: Unique keys per session via nonce
-4. **Address Validation**: On-chain verification prevents invalid destinations
-5. **Flexible Routing**: Any valid NXS account can receive rewards
+4. **GenesisHash Validation**: Type-byte check + on-chain existence enforced at bind time
+5. **Consensus Compatible**: Only GenesisHash (sigchain owner) accepted — matches upstream `Coinbase::Verify` requirement
 
 ### ⚠️ Considerations
 
