@@ -347,8 +347,7 @@ namespace TAO::Ledger
         debug::log(2, FUNCTION, "Centralized acceptance for block ", block.hashMerkleRoot.SubString(),
                    " channel=", block.nChannel, " unified_height=", block.nHeight);
 
-        /* Unlock sigchain to process mined block.
-         * strPIN is retained after unlock so it can be used for producer refresh below. */
+        /* Unlock sigchain to process mined block. */
         SecureString strPIN;
         try
         {
@@ -360,26 +359,6 @@ namespace TAO::Ledger
             return result;
         }
 
-        /* Producer staleness check: detect whether the sigchain has advanced since the
-         * block template was created.  If another block on a different channel was
-         * accepted between template issuance and this call, its producer may share the
-         * same sigchain genesis — bumping the on-disk nSequence so that the baked-in
-         * hashPrevTx no longer points to nSequence-1.  Transaction::Connect() will then
-         * fail with "prev transaction incorrect sequence", losing a valid solved block.
-         *
-         * We repair this by refreshing the sigchain-dependent fields of the producer
-         * (nSequence, hashPrevTx, nKeyType, nNextType, hashRecovery, hashNext,
-         * nTimestamp, and the producer transaction's nVersion) while keeping every
-         * consensus-critical block header field (block.nVersion, hashPrevBlock,
-         * nChannel, nHeight, nBits, nNonce) and every COINBASE contract unchanged.
-         *
-         * NOTE: block.producer.nVersion is the TRANSACTION protocol version — it is
-         * entirely separate from block.nVersion (the BLOCK header version that appears
-         * in ProofHash()).  Only the block header fields are PoW-critical.
-         *
-         * ProofHash() for Prime covers block.nVersion→nBits only (not hashMerkleRoot),
-         * and for Hash covers block.nVersion→nNonce only, so mutating the producer
-         * and rebuilding the merkle root does NOT invalidate the miner's proof-of-work. */
         if(block.nChannel == 1 || block.nChannel == 2)
         {
             uint512_t hashCurrentLast = 0;
@@ -387,67 +366,26 @@ namespace TAO::Ledger
 
             if(fGotLast && hashCurrentLast != block.producer.hashPrevTx)
             {
-                const uint32_t nOldSeq = block.producer.nSequence;
-                debug::log(0, FUNCTION, "Producer stale: sigchain advanced since template creation",
+                /* Sigchain advanced between ValidateMinedBlock() and AcceptMinedBlock().
+                 * Attempting to repair the producer transaction is unsafe: the patched
+                 * nSequence / hashPrevTx races against Transaction::Connect() and
+                 * consistently produces "prev transaction incorrect sequence" failures
+                 * that silently discard a solved block after STATELESS_BLOCK_ACCEPTED
+                 * has already been sent to the miner.
+                 *
+                 * Since the miner has already been told to move on, the cleanest
+                 * behavior is a hard reject here.  The next GET_BLOCK will issue a
+                 * fresh template with an up-to-date producer. */
+                debug::log(0, FUNCTION, "ACCEPT rejected: producer sigchain stale at accept time"
                            " genesis=", block.producer.hashGenesis.SubString(),
                            " template.hashPrevTx=", block.producer.hashPrevTx.SubString(),
-                           " current.hashLast=", hashCurrentLast.SubString());
-
-                /* Retrieve credentials for re-signing. */
-                const auto& pCredentials =
-                    TAO::API::Authentication::Credentials(uint256_t(TAO::API::Authentication::SESSION::DEFAULT));
-
-                if(!pCredentials)
-                {
-                    result.reason = "producer refresh: null credentials";
-                    return result;
-                }
-
-                /* Create a fresh transaction to obtain up-to-date sigchain fields. */
-                TAO::Ledger::Transaction txFresh;
-                if(!CreateTransaction(pCredentials, strPIN, txFresh))
-                {
-                    result.reason = "producer refresh: CreateTransaction failed";
-                    return result;
-                }
-
-                /* Transfer fresh sigchain metadata onto the existing producer while
-                 * preserving the COINBASE contracts (vContracts unchanged). */
-                block.producer.nSequence   = txFresh.nSequence;
-                block.producer.hashPrevTx  = txFresh.hashPrevTx;
-                block.producer.nKeyType    = txFresh.nKeyType;
-                block.producer.nNextType   = txFresh.nNextType;
-                block.producer.hashRecovery= txFresh.hashRecovery;
-                block.producer.hashNext    = txFresh.hashNext;
-                block.producer.nTimestamp  = txFresh.nTimestamp;
-                block.producer.nVersion    = txFresh.nVersion;
-
-                /* Re-sign the producer transaction with the fresh sequence key. */
-                block.producer.Sign(pCredentials->Generate(block.producer.nSequence, strPIN));
-
-                /* Rebuild the merkle root from vtx list plus the refreshed producer. */
-                std::vector<uint512_t> vHashes;
-                for(const auto& tx : block.vtx)
-                    vHashes.push_back(tx.second);
-                vHashes.push_back(block.producer.GetHash(true));
-                block.hashMerkleRoot = block.BuildMerkleTree(vHashes);
-
-                /* Re-sign the block: vchBlockSig covers SignatureHash() which includes
-                 * hashMerkleRoot, so it must be regenerated after the merkle update. */
-                block.vchBlockSig.clear();
-                if(!FinalizeWalletSignatureForSolvedBlock(block))
-                {
-                    result.reason = "producer refresh: block re-sign failed";
-                    return result;
-                }
-
-                debug::log(0, FUNCTION, "Producer refresh SUCCESS: nSequence ", nOldSeq,
-                           "→", block.producer.nSequence,
-                           " merkle=", block.hashMerkleRoot.SubString());
+                           " current.hashLast=", hashCurrentLast.SubString(),
+                           " — issuing hard reject (miner already notified, next GET_BLOCK will refresh)");
+                result.reason = "producer sigchain stale at accept time: request a new block template";
+                strPIN.clear();
+                return result;
             }
 
-            /* Explicitly clear the sensitive PIN from memory now that producer refresh
-             * is complete to minimize the window where the PIN data persists on the stack. */
             strPIN.clear();
         }
 
