@@ -475,7 +475,7 @@ namespace TAO::Ledger
             TAO::Ledger::Transaction txMempool;
             if(mempool.Get(tBlockCached.producer.hashGenesis, txMempool))
             {
-                if(tBlockCached.producer.hashPrevTx != txMempool.GetHash())
+                if(txMempool.GetHash() != tBlockCached.producer.hashPrevTx)
                 {
                     fNeedsNewBlock = true;
                     debug::log(0, FUNCTION, "Block cache invalidated: mempool has tx for producer genesis"
