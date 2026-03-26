@@ -324,9 +324,17 @@ CreateBlockForStatelessMining(nChannel, nExtraNonce, hashRewardAddress)
           [create.cpp:377]
           │
           ├─ CACHE CHECK (local node wallet cache — tBlockCache[nChannel])
-          │   if(hashBestChain == tBlockCached.hashPrevBlock
-          │      && hashGenesis == cached.producer.hashGenesis
-          │      && !timeout):
+          │   Five invalidation conditions (fNeedsNewBlock = true if any fires):
+          │   1. PRIMARY:     hashBestChain != cached.hashPrevBlock
+          │   2. SECONDARY:   hashGenesis   != cached.producer.hashGenesis
+          │   3. TERTIARY:    unifiedtimestamp() >= cached.producer.nTimestamp + nExpiration
+          │   4. QUATERNARY:  ReadLast(genesis) != cached.producer.hashPrevTx
+          │                   (sigchain advanced on disk without chain advancing)
+          │   5. QUINARY:     mempool.Get(genesis) exists &&
+          │                   cached.producer.hashPrevTx != mempoolTx.GetHash()
+          │                   (mempool tx will be picked up by AddTransactions())
+          │
+          │   If none fired (fNeedsNewBlock == false):
           │        rBlockRet = tBlockCached  ← REUSE
           │        AddTransactions(rBlockRet)
           │        UpdateProducerTimestamp()

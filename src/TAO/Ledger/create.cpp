@@ -434,6 +434,58 @@ namespace TAO::Ledger
             debug::log(0, FUNCTION, "Block cache timed out after ", nExpiration, " seconds (safety net), regenerating...");
         }
 
+        /* Quaternary check: Has the producer's sigchain advanced since the cached template?
+         * This catches the case where the on-disk last for the producer's genesis has
+         * moved (e.g., a different channel's block committed a producer for the same
+         * sigchain) but hashBestChain has NOT changed — meaning checks 1-3 all pass
+         * and the cache would serve a stale producer that RefreshProducerIfStale() would
+         * have to fix reactively.
+         *
+         * By detecting this here, we force a full template rebuild with a fresh
+         * CreateProducer() call, avoiding wasted mining effort on a template whose
+         * producer is already known-stale.
+         *
+         * This is defense-in-depth: RefreshProducerIfStale() at SUBMIT_BLOCK time
+         * remains the authoritative fix for any TOCTOU races between this check
+         * and the actual submission. */
+        if(!fNeedsNewBlock && tBlockCached.producer.hashGenesis != 0)
+        {
+            uint512_t hashDiskLast = 0;
+            if(LLD::Ledger->ReadLast(tBlockCached.producer.hashGenesis, hashDiskLast))
+            {
+                if(hashDiskLast != tBlockCached.producer.hashPrevTx)
+                {
+                    fNeedsNewBlock = true;
+                    debug::log(0, FUNCTION, "Block cache invalidated: producer sigchain advanced"
+                               " (disk last=", hashDiskLast.SubString(),
+                               " != cached producer.hashPrevTx=", tBlockCached.producer.hashPrevTx.SubString(),
+                               "), regenerating...");
+                }
+            }
+        }
+
+        /* Quinary check: Does the mempool contain a transaction for the producer's genesis?
+         * If so, AddTransactions() will pick it up into block.vtx, and the producer must
+         * follow it — but the cached producer was built before this mempool tx arrived.
+         * Force a rebuild so CreateProducer() sees the mempool tx and sequences correctly.
+         *
+         * Note: This is a lightweight check — mempool.Get() is O(1) hash lookup. */
+        if(!fNeedsNewBlock && tBlockCached.producer.hashGenesis != 0)
+        {
+            TAO::Ledger::Transaction txMempool;
+            if(mempool.Get(tBlockCached.producer.hashGenesis, txMempool))
+            {
+                if(tBlockCached.producer.hashPrevTx != txMempool.GetHash())
+                {
+                    fNeedsNewBlock = true;
+                    debug::log(0, FUNCTION, "Block cache invalidated: mempool has tx for producer genesis"
+                               " (mempool tx hash=", txMempool.GetHash().SubString(),
+                               " != cached producer.hashPrevTx=", tBlockCached.producer.hashPrevTx.SubString(),
+                               "), regenerating...");
+                }
+            }
+        }
+
         /* Reuse cached block if no invalidation condition triggered. */
         if(!fNeedsNewBlock)
         {

@@ -564,7 +564,7 @@ TAO::Ledger::Process(block, nStatus);
 ### Block Cache Invalidation (Channels 1, 2, 3)
 
 ```cpp
-// CreateBlock() — three invalidation conditions:
+// CreateBlock() — five invalidation conditions:
 bool fNeedsNewBlock = false;
 
 // PRIMARY: chain advanced
@@ -578,6 +578,26 @@ if(hashGenesis != tBlockCached.producer.hashGenesis)
 // TERTIARY: safety timeout (default 90 seconds)
 if(unifiedtimestamp() >= tBlockCached.producer.nTimestamp + nExpiration)
     fNeedsNewBlock = true;
+
+// QUATERNARY: producer sigchain advanced on disk (different channel's block
+// committed same-genesis producer without advancing hashBestChain check)
+if(!fNeedsNewBlock && tBlockCached.producer.hashGenesis != 0)
+{
+    uint512_t hashDiskLast = 0;
+    if(LLD::Ledger->ReadLast(tBlockCached.producer.hashGenesis, hashDiskLast))
+        if(hashDiskLast != tBlockCached.producer.hashPrevTx)
+            fNeedsNewBlock = true;
+}
+
+// QUINARY: mempool has a tx for the producer's genesis — AddTransactions() will
+// pick it up into vtx, so the producer must be sequenced after it
+if(!fNeedsNewBlock && tBlockCached.producer.hashGenesis != 0)
+{
+    TAO::Ledger::Transaction txMempool;
+    if(mempool.Get(tBlockCached.producer.hashGenesis, txMempool))
+        if(tBlockCached.producer.hashPrevTx != txMempool.GetHash())
+            fNeedsNewBlock = true;
+}
 ```
 
 ---
