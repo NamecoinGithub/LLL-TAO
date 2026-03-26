@@ -63,6 +63,35 @@ namespace TAO
         bool HardenCheckpoint(const BlockState& state);
 
 
+        /** RepairCheckpointIfStale
+         *
+         *  Repair the in-memory checkpoint state if it has become stale relative
+         *  to the best chain state.  Uses an in-memory fast path (no disk I/O)
+         *  before falling back to a bounded disk read.
+         *
+         *  @returns true if a repair was performed, false if no staleness detected
+         *           or if the repair itself failed.
+         *
+         **/
+        bool RepairCheckpointIfStale();
+
+
+        /** IsDescendantOrPredatesCheckpoint
+         *
+         *  Check that a block either descends from the current checkpoint OR
+         *  predates it due to a HardenCheckpoint() race during SetBest().
+         *  Falls back to walking the checkpoint block's ancestor chain to find
+         *  a common ancestor checkpoint with the incoming block.
+         *
+         *  @param[in] state The state object to check from.
+         *
+         *  @returns true if the block is a valid descendant or shares an
+         *           ancestor checkpoint with the current checkpoint.
+         *
+         **/
+        bool IsDescendantOrPredatesCheckpoint(const BlockState& state);
+
+
         /** Checkpoint Height.
          *
          *  The height of the last hardcoded checkpoint.

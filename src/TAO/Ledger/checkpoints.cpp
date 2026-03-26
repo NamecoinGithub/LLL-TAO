@@ -157,5 +157,95 @@ namespace TAO
 
             return true;
         }
+
+
+        /* Repair in-memory checkpoint state if it is stale relative to the best chain state. */
+        bool RepairCheckpointIfStale()
+        {
+            /* In-memory fast path — compare best chain state's checkpoint against the
+             * global in-memory checkpoint without any disk I/O. */
+            const BlockState stateBestMem = ChainState::tStateBest.load();
+            const uint1024_t hashCheckpointMem = ChainState::hashCheckpoint.load();
+
+            /* No staleness detected — nothing to repair. */
+            if(stateBestMem.hashCheckpoint == hashCheckpointMem)
+                return false;
+
+            debug::error(FUNCTION, "CHECKPOINT STALE: in-memory=",
+                hashCheckpointMem.SubString(),
+                " best-state=", stateBestMem.hashCheckpoint.SubString(),
+                " — repairing from best chain state");
+
+            /* Repair: re-derive checkpoint from the best chain state. */
+            const uint1024_t hashCheckpointOld = hashCheckpointMem;
+            ChainState::hashCheckpoint = stateBestMem.hashCheckpoint;
+
+            BlockState stateCheckpoint;
+            if(!LLD::Ledger->ReadBlock(ChainState::hashCheckpoint.load(), stateCheckpoint))
+            {
+                /* Rollback on failure. */
+                ChainState::hashCheckpoint = hashCheckpointOld;
+                debug::error(FUNCTION, "Repair failed: could not read checkpoint block");
+                return false;
+            }
+            ChainState::nCheckpointHeight = stateCheckpoint.nHeight;
+
+            debug::log(0, FUNCTION, "Checkpoint repaired: ", hashCheckpointOld.SubString(),
+                " -> ", ChainState::hashCheckpoint.load().SubString(),
+                " height=", ChainState::nCheckpointHeight.load());
+            return true;
+        }
+
+
+        /* Check descendant status, allowing for blocks that predate a recently-hardened checkpoint. */
+        bool IsDescendantOrPredatesCheckpoint(const BlockState& state)
+        {
+            /* Standard descendant check. */
+            if(IsDescendant(state))
+                return true;
+
+            /* If the block's height is at or above the checkpoint it truly fails. */
+            if(state.nHeight >= ChainState::nCheckpointHeight.load())
+                return false;
+
+            /* The block predates the current checkpoint.  This can happen when
+             * HardenCheckpoint() advances during SetBest() while this block was
+             * still in the Accept() pipeline.
+             *
+             * Verify the block descends from a PREVIOUS checkpoint by reading the
+             * current checkpoint block and checking whether the incoming block's
+             * hashCheckpoint appears in the checkpoint block's ancestor chain. */
+            BlockState stateCheckpoint;
+            if(!LLD::Ledger->ReadBlock(ChainState::hashCheckpoint.load(), stateCheckpoint))
+                return false;
+
+            /* Bounded walk: search at most (checkpointHeight - blockHeight + a small margin). */
+            const uint32_t nCheckpointHeight = ChainState::nCheckpointHeight.load();
+            const uint32_t nMaxWalk = (nCheckpointHeight > state.nHeight)
+                ? (nCheckpointHeight - state.nHeight + 10)
+                : 10u;
+
+            BlockState walk = stateCheckpoint;
+            uint32_t nWalk = 0;
+            while(!walk.IsNull() && nWalk < nMaxWalk)
+            {
+                if(walk.nHeight <= state.nHeight)
+                    break;
+
+                /* Check whether the walked block IS the checkpoint that the incoming block references. */
+                if(walk.GetHash() == state.hashCheckpoint)
+                {
+                    debug::log(0, FUNCTION, "Block at height ", state.nHeight,
+                        " predates checkpoint at height ", nCheckpointHeight,
+                        " but shares ancestor checkpoint — ALLOWING");
+                    return true;
+                }
+
+                walk = walk.Prev();
+                ++nWalk;
+            }
+
+            return false;
+        }
     }
 }
