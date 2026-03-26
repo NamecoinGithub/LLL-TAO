@@ -379,19 +379,73 @@ namespace TAO::Ledger
          *
          * ProofHash() for Prime covers block.nVersion→nBits only (not hashMerkleRoot),
          * and for Hash covers block.nVersion→nNonce only, so mutating the producer
-         * and rebuilding the merkle root does NOT invalidate the miner's proof-of-work. */
+         * and rebuilding the merkle root does NOT invalidate the miner's proof-of-work.
+         *
+         * CRITICAL: block.vtx transactions are connected by Connect() BEFORE the
+         * producer.  Each one calls WriteLast(), so the producer's hashPrevTx must
+         * point to the last vtx transaction for the same genesis — not to whatever is
+         * on disk at refresh time.  We therefore scan block.vtx first and use the
+         * highest-sequence vtx transaction as the true predecessor when present. */
         if(block.nChannel == 1 || block.nChannel == 2)
         {
-            uint512_t hashCurrentLast = 0;
-            const bool fGotLast = LLD::Ledger->ReadLast(block.producer.hashGenesis, hashCurrentLast);
+            /* ── Step 1: find the highest-sequence vtx tx for the producer's genesis ── */
+            uint512_t hashVtxLast       = 0;
+            uint32_t  nVtxLastSeq       = 0;
+            bool      fHasVtxForGenesis = false;
 
-            if(fGotLast && hashCurrentLast != block.producer.hashPrevTx)
+            for(const auto& txpair : block.vtx)
             {
-                const uint32_t nOldSeq = block.producer.nSequence;
-                debug::log(0, FUNCTION, "Producer stale: sigchain advanced since template creation",
-                           " genesis=", block.producer.hashGenesis.SubString(),
-                           " template.hashPrevTx=", block.producer.hashPrevTx.SubString(),
-                           " current.hashLast=", hashCurrentLast.SubString());
+                TAO::Ledger::Transaction txVtx;
+                if(!LLD::Ledger->ReadTx(txpair.second, txVtx, TAO::Ledger::FLAGS::MEMPOOL))
+                    continue;
+
+                if(txVtx.hashGenesis != block.producer.hashGenesis)
+                    continue;
+
+                if(!fHasVtxForGenesis || txVtx.nSequence > nVtxLastSeq)
+                {
+                    hashVtxLast       = txpair.second;
+                    nVtxLastSeq       = txVtx.nSequence;
+                    fHasVtxForGenesis = true;
+                }
+            }
+
+            /* ── Step 2: determine the true predecessor the producer must follow ──
+             * If the block contains vtx transactions for the same genesis, those take
+             * precedence — they will be on-disk by the time the producer connects.
+             * Otherwise fall back to the on-disk/mempool last. */
+            uint512_t hashTrueLast = 0;
+            uint32_t  nTrueLastSeq = 0;
+
+            if(fHasVtxForGenesis)
+            {
+                hashTrueLast = hashVtxLast;
+                nTrueLastSeq = nVtxLastSeq;
+            }
+            else
+            {
+                const bool fGotDiskLast = LLD::Ledger->ReadLast(block.producer.hashGenesis, hashTrueLast);
+                if(fGotDiskLast)
+                {
+                    TAO::Ledger::Transaction txLast;
+                    if(LLD::Ledger->ReadTx(hashTrueLast, txLast, TAO::Ledger::FLAGS::MEMPOOL))
+                        nTrueLastSeq = txLast.nSequence;
+                }
+            }
+
+            /* ── Step 3: decide whether a refresh is needed ── */
+            const bool fProducerStale = (hashTrueLast != 0 &&
+                                         hashTrueLast != block.producer.hashPrevTx);
+
+            if(fProducerStale)
+            {
+                debug::log(0, FUNCTION, "Producer refresh: sigchain/vtx advanced since template creation",
+                           " genesis=",             block.producer.hashGenesis.SubString(),
+                           " producer.hashPrevTx=", block.producer.hashPrevTx.SubString(),
+                           " trueLast=",            hashTrueLast.SubString(),
+                           " trueLastSeq=",         nTrueLastSeq,
+                           " newProducerSeq=",      nTrueLastSeq + 1,
+                           " hasVtxForGenesis=",    fHasVtxForGenesis);
 
                 /* Retrieve credentials for re-signing. */
                 const auto& pCredentials =
@@ -400,21 +454,29 @@ namespace TAO::Ledger
                 if(!pCredentials)
                 {
                     result.reason = "producer refresh: null credentials";
+                    strPIN.clear();
                     return result;
                 }
 
-                /* Create a fresh transaction to obtain up-to-date sigchain fields. */
+                /* CreateTransaction gives us fresh key-chain metadata (nKeyType, nNextType,
+                 * hashRecovery, hashNext, nTimestamp, nVersion).  We override nSequence and
+                 * hashPrevTx with the block-internal correct values below. */
                 TAO::Ledger::Transaction txFresh;
                 if(!CreateTransaction(pCredentials, strPIN, txFresh))
                 {
                     result.reason = "producer refresh: CreateTransaction failed";
+                    strPIN.clear();
                     return result;
                 }
 
-                /* Transfer fresh sigchain metadata onto the existing producer while
-                 * preserving the COINBASE contracts (vContracts unchanged). */
-                block.producer.nSequence   = txFresh.nSequence;
-                block.producer.hashPrevTx  = txFresh.hashPrevTx;
+                /* ── CRITICAL FIX: use block-correct sequence/prev, not CreateTransaction's ──
+                 * CreateTransaction reads disk/mempool state at call time, which does not
+                 * reflect vtx transactions already in this block.  We override with the
+                 * block-internal true predecessor computed in Steps 1-2 above. */
+                block.producer.nSequence   = nTrueLastSeq + 1;
+                block.producer.hashPrevTx  = hashTrueLast;
+
+                /* Copy remaining sigchain metadata from the fresh transaction. */
                 block.producer.nKeyType    = txFresh.nKeyType;
                 block.producer.nNextType   = txFresh.nNextType;
                 block.producer.hashRecovery= txFresh.hashRecovery;
@@ -422,7 +484,7 @@ namespace TAO::Ledger
                 block.producer.nTimestamp  = txFresh.nTimestamp;
                 block.producer.nVersion    = txFresh.nVersion;
 
-                /* Re-sign the producer transaction with the fresh sequence key. */
+                /* Re-sign the producer transaction with the corrected sequence number. */
                 block.producer.Sign(pCredentials->Generate(block.producer.nSequence, strPIN));
 
                 /* Rebuild the merkle root from vtx list plus the refreshed producer. */
@@ -438,12 +500,21 @@ namespace TAO::Ledger
                 if(!FinalizeWalletSignatureForSolvedBlock(block))
                 {
                     result.reason = "producer refresh: block re-sign failed";
+                    strPIN.clear();
                     return result;
                 }
 
-                debug::log(0, FUNCTION, "Producer refresh SUCCESS: nSequence ", nOldSeq,
-                           "→", block.producer.nSequence,
-                           " merkle=", block.hashMerkleRoot.SubString());
+                debug::log(0, FUNCTION, "Producer refresh SUCCESS:",
+                           " nSequence=",  block.producer.nSequence,
+                           " hashPrevTx=", block.producer.hashPrevTx.SubString(),
+                           " merkle=",     block.hashMerkleRoot.SubString());
+            }
+            else if(fHasVtxForGenesis)
+            {
+                debug::log(2, FUNCTION, "Producer consistent with block vtx (no refresh needed):",
+                           " genesis=",              block.producer.hashGenesis.SubString(),
+                           " producer.hashPrevTx=",  block.producer.hashPrevTx.SubString(),
+                           " vtxLast=",              hashVtxLast.SubString());
             }
 
             /* Explicitly clear the sensitive PIN from memory now that producer refresh
