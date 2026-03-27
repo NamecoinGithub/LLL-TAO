@@ -323,12 +323,36 @@ CreateBlockForStatelessMining(nChannel, nExtraNonce, hashRewardAddress)
      └─ CreateBlock(user, pin, nChannel, rBlockRet, ...)
           [create.cpp:377]
           │
-          ├─ CACHE CHECK (local node wallet cache — tBlockCache[nChannel])
-          │   if(hashBestChain == tBlockCached.hashPrevBlock
-          │      && hashGenesis == cached.producer.hashGenesis
-          │      && !timeout):
+          ├─ CACHE INVALIDATION (5 progressive checks — tBlockCache[nChannel])
+          │   fNeedsNewBlock = false
+          │   │
+          │   ├─ PRIMARY:   hashBestChain != tBlockCached.hashPrevBlock
+          │   │             (chain advanced — always invalidates)
+          │   │
+          │   ├─ SECONDARY: hashGenesis != tBlockCached.producer.hashGenesis
+          │   │             (signing wallet changed)
+          │   │
+          │   ├─ TERTIARY:  now >= tBlockCached.producer.nTimestamp + blockrefresh(90s)
+          │   │             (time-based safety expiry)
+          │   │
+          │   ├─ QUATERNARY [PoW ch1/ch2, non-genesis producer only]:
+          │   │             LLD::Ledger->ReadLast(producer.hashGenesis) != producer.hashPrevTx
+          │   │             (sigchain advanced on-disk via a different channel's block)
+          │   │
+          │   └─ QUINARY   [PoW ch1/ch2, non-genesis producer only]:
+          │                 mempool.Get(producer.hashGenesis).GetHash() != producer.hashPrevTx
+          │                 (in-flight mempool tx advances sigchain ahead of cached producer;
+          │                  AddTransactions() would include it in vtx while the cached
+          │                  producer still chains off the old tip — force full rebuild so
+          │                  AddTransactions() runs first, then CreateProducer() sequences
+          │                  the producer correctly after the mempool tx)
+          │
+          │   if(!fNeedsNewBlock):
           │        rBlockRet = tBlockCached  ← REUSE
           │        AddTransactions(rBlockRet)
+          │        [defense-in-depth: check mempool staleness again after AddTransactions,
+          │         rebuild producer only if the mempool changed between Quinary check
+          │         and here]
           │        UpdateProducerTimestamp()
           │        Sign producer
           │        Rebuild hashMerkleRoot  ← always rebuilt on cache hit

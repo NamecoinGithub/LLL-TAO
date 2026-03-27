@@ -465,6 +465,37 @@ namespace TAO::Ledger
             }
         }
 
+        /* Quinary check: mempool has a newer transaction for the producer's sigchain.
+         * AddTransactions() will include any mempool tx that passes its validation
+         * checks.  If the mempool contains a tx for the producer's hashGenesis whose
+         * hash differs from the cached producer.hashPrevTx, AddTransactions() will
+         * add that tx to vtx but the cached producer still chains off the old tip —
+         * causing a sequence error at Transaction::Connect() time.  Detect this
+         * before AddTransactions() runs so the full rebuild path is taken:
+         * AddTransactions() first (includes the in-flight sigchain tx in vtx), then
+         * CreateProducer() (which reads the mempool and sequences the producer after
+         * that tx).
+         *
+         * Note: Same channel/IsFirst() guards as the Quaternary check — only applies
+         * to PoW channels (1=Prime, 2=Hash) with a non-genesis producer. */
+        if(!fNeedsNewBlock
+           && (nChannel == 1 || nChannel == 2)
+           && !tBlockCached.producer.IsFirst())
+        {
+            TAO::Ledger::Transaction txMem;
+            if(mempool.Get(tBlockCached.producer.hashGenesis, txMem)
+               && txMem.GetHash() != tBlockCached.producer.hashPrevTx)
+            {
+                fNeedsNewBlock = true;
+                debug::log(0, FUNCTION,
+                    "Block cache invalidated: mempool sigchain tx advances beyond cached producer"
+                    " genesis=", tBlockCached.producer.hashGenesis.SubString(),
+                    " cached.hashPrevTx=", tBlockCached.producer.hashPrevTx.SubString(),
+                    " mempool.tx=", txMem.GetHash().SubString(),
+                    " - rebuilding template to sequence producer correctly");
+            }
+        }
+
         /* Reuse cached block if no invalidation condition triggered. */
         if(!fNeedsNewBlock)
         {
@@ -483,12 +514,16 @@ namespace TAO::Ledger
             /* Add new transactions. */
             AddTransactions(rBlockRet);
 
-            /* Check that the producer isn't going to orphan any transactions. */
+            /* Defense-in-depth: check that the producer isn't going to orphan any
+             * transactions.  The Quinary invalidation check above should normally
+             * catch this before AddTransactions() runs, but if the mempool is updated
+             * between the Quinary check and this point, the partial producer rebuild
+             * here keeps correctness. */
             TAO::Ledger::Transaction tx;
             if(mempool.Get(rBlockRet.producer.hashGenesis, tx) && rBlockRet.producer.hashPrevTx != tx.GetHash())
             {
                 /* Handle for STALE producer. */
-                debug::log(0, FUNCTION, "Producer is stale, rebuilding...");
+                debug::log(0, FUNCTION, "Producer is stale, rebuilding (post-AddTransactions fallback)...");
 
                 /* Create a new producer transaction for given block.
                  * Pass hashDynamicGenesis (miner reward address) so coinbase is routed
