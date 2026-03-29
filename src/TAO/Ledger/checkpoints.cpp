@@ -89,42 +89,22 @@ namespace TAO
                 return it->second == state.hashCheckpoint;
             }
 
-            /* Snapshot both checkpoint values once so the walk uses a consistent
-             * pair.  With the store order in HardenCheckpoint() (hash first, then
-             * height), reading hash before height guarantees that if we observe a
-             * new height we also observe the matching hash. */
-            const uint1024_t hashCheckpointSnap  = ChainState::hashCheckpoint.load();
-            const uint64_t   nCheckpointHeightSnap = ChainState::nCheckpointHeight.load();
-
             /* Check The Block Hash */
             BlockState check = state;
-            uint32_t nWalkDepth = 0;
             while(!check.IsNull())
             {
                 /* Check that checkpoint exists in the map. */
-                if(hashCheckpointSnap == check.hashCheckpoint)
+                if(ChainState::hashCheckpoint.load() == check.hashCheckpoint)
                     return true;
 
-                /* Break when the walking pointer drops below the checkpoint height. */
-                if(check.nHeight < nCheckpointHeightSnap)
-                {
-                    debug::log(2, FUNCTION, "IsDescendant FAILED: block height=", state.nHeight,
-                        " walked to height=", check.nHeight,
-                        " below checkpointHeight=", nCheckpointHeightSnap,
-                        " checkpoint=", hashCheckpointSnap.SubString(),
-                        " walkDepth=", nWalkDepth);
+                /* Break when new height is found. */
+                if(state.nHeight < ChainState::nCheckpointHeight.load())
                     return false;
-                }
 
                 /* Iterate backwards. */
                 check = check.Prev();
-                ++nWalkDepth;
             }
 
-            debug::log(2, FUNCTION, "IsDescendant FAILED: block height=", state.nHeight,
-                " backward walk exhausted (null block) after ", nWalkDepth, " steps",
-                " checkpoint=", hashCheckpointSnap.SubString(),
-                " checkpointHeight=", nCheckpointHeightSnap);
             return false;
         }
 
@@ -147,17 +127,15 @@ namespace TAO
                 );
             }
 
-            /* Read the checkpoint block BEFORE updating atomics to avoid
-             * partial-update visibility between hashCheckpoint and nCheckpointHeight. */
+            /* Update the Checkpoints into Memory. */
+            ChainState::hashCheckpoint    = state.hashCheckpoint;
+
+            /* Get checkpoint state. */
             BlockState stateCheckpoint;
             if(!LLD::Ledger->ReadBlock(state.hashCheckpoint, stateCheckpoint))
                 return debug::error(FUNCTION, "failed to read checkpoint");
 
-            /* Store hash first, then height.  Any reader that observes the new
-             * (higher) nCheckpointHeight is guaranteed — via sequential-consistency
-             * ordering — to also observe the matching hashCheckpoint.  This is the
-             * critical invariant for the IsDescendant() height guard. */
-            ChainState::hashCheckpoint    = state.hashCheckpoint;
+            /* Set the correct height for the checkpoint. */
             ChainState::nCheckpointHeight = stateCheckpoint.nHeight;
 
             /* Dump the Checkpoint if not Initializing. */
