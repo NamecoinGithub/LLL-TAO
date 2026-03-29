@@ -110,6 +110,7 @@ namespace TAO::Ledger
             if(txMem.nSequence > txPrev.nSequence)
             {
                 txPrev = txMem;
+                hashLast = txMem.GetHash();
                 strSeqSource = (fUsedSessionIndex ? "mempool_override_sessions" : "mempool");
             }
         }
