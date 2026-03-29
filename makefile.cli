@@ -358,6 +358,7 @@ ifdef UNIT_TESTS
 		   build/Tests_TAO_Ledger_create_transaction.o \
 		   build/Tests_TAO_Ledger_mempool.o \
 		   build/Tests_TAO_Ledger_prime.o \
+		   build/Tests_TAO_Ledger_producer_staleness.o \
            build/Tests_TAO_Ledger_transaction.o \
 		   build/Tests_TAO_Ledger_sigchain.o \
 		   build/Tests_TAO_Ledger_stake.o \

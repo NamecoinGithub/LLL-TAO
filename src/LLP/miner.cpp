@@ -2402,14 +2402,28 @@ namespace LLP
             return true;
         }
 
-        /* Pre-connect vtx sigchain staleness check — detect stale vtx transactions
-         * before AcceptMinedBlock() so the miner gets BLOCK_REJECTED and can
-         * request a fresh template rather than receiving a false BLOCK_ACCEPTED. */
-        if(!TAO::Ledger::ValidateVtxSigchainConsistency(*pTritium))
+        /* Cross-check producer's hashPrevTx against current disk last.
+         * If the disk state has advanced since template creation (e.g., another
+         * channel's block committed the producer's sigchain), the producer is
+         * stale and AcceptMinedBlock() will fail with "prev transaction incorrect
+         * sequence" or "last hash mismatch".  Reject early so the miner gets
+         * BLOCK_REJECTED and can request a fresh template. */
         {
-            debug::error(FUNCTION, "SUBMIT_BLOCK: vtx sigchain stale — rejecting");
-            respond(BLOCK_REJECTED);
-            return true;
+            uint512_t hashDiskLast = 0;
+            if(!pTritium->producer.IsFirst() &&
+                LLD::Ledger->ReadLast(pTritium->producer.hashGenesis, hashDiskLast))
+            {
+                if(pTritium->producer.hashPrevTx != hashDiskLast)
+                {
+                    debug::error(FUNCTION,
+                        "SUBMIT_BLOCK: producer sigchain stale — "
+                        "producer.hashPrevTx=", pTritium->producer.hashPrevTx.SubString(),
+                        " disk.hashLast=", hashDiskLast.SubString(),
+                        " — rejecting, miner should request fresh template");
+                    respond(BLOCK_REJECTED);
+                    return true;
+                }
+            }
         }
 
         TAO::Ledger::BlockValidationResult validationResult =

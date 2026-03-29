@@ -1929,15 +1929,29 @@ namespace LLP
                     return true;
                 }
 
-                /* Pre-connect vtx sigchain staleness check — detect stale vtx
-                 * transactions before AcceptMinedBlock() so the miner receives
+                /* Cross-check producer's hashPrevTx against current disk last.
+                 * If the disk state has advanced since template creation (e.g., another
+                 * channel's block committed the producer's sigchain), the producer is
+                 * stale and AcceptMinedBlock() will fail with "prev transaction incorrect
+                 * sequence" or "last hash mismatch".  Reject early so the miner gets
                  * STATELESS_BLOCK_REJECTED and can request a fresh template. */
-                if(!TAO::Ledger::ValidateVtxSigchainConsistency(*pTritium))
                 {
-                    debug::error(FUNCTION, "SUBMIT_BLOCK: vtx sigchain stale — rejecting");
-                    StatelessPacket response(STATELESS_BLOCK_REJECTED);
-                    respond(response);
-                    return true;
+                    uint512_t hashDiskLast = 0;
+                    if(!pTritium->producer.IsFirst() &&
+                        LLD::Ledger->ReadLast(pTritium->producer.hashGenesis, hashDiskLast))
+                    {
+                        if(pTritium->producer.hashPrevTx != hashDiskLast)
+                        {
+                            debug::error(FUNCTION,
+                                "SUBMIT_BLOCK: producer sigchain stale — "
+                                "producer.hashPrevTx=", pTritium->producer.hashPrevTx.SubString(),
+                                " disk.hashLast=", hashDiskLast.SubString(),
+                                " — rejecting, miner should request fresh template");
+                            StatelessPacket response(STATELESS_BLOCK_REJECTED);
+                            respond(response);
+                            return true;
+                        }
+                    }
                 }
 
                 TAO::Ledger::BlockValidationResult validationResult =
