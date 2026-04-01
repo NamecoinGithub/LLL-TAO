@@ -266,7 +266,14 @@ TEST_CASE("PreflightCheck categories enforce health decoupling", "[health_decoup
     SECTION("No diagnostic opcode is in REQUIRE_FULL category")
     {
         /* Exhaustive check: all Category 0 opcodes must NOT be Category 2 */
-        const uint8_t diagnosticOpcodes[] = {212, 219, 220, 221, 253, 254};
+        const uint8_t diagnosticOpcodes[] = {
+            OpcodeUtility::Opcodes::SESSION_KEEPALIVE,   // 212
+            OpcodeUtility::Opcodes::SESSION_STATUS,      // 219
+            OpcodeUtility::Opcodes::SESSION_STATUS_ACK,  // 220
+            OpcodeUtility::Opcodes::SESSION_EXPIRED,     // 221
+            OpcodeUtility::Opcodes::PING,                // 253
+            OpcodeUtility::Opcodes::CLOSE,               // 254
+        };
         for(uint8_t op : diagnosticOpcodes)
         {
             REQUIRE(PreflightCheck::GetPreflightCategory(op) != PreflightCheck::PreflightCategory::REQUIRE_FULL);
