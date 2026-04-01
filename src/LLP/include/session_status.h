@@ -24,6 +24,13 @@ namespace SessionStatus
 {
     //=========================================================================
     // Lane health flags (ACK bytes [4-7])
+    //
+    // IMPORTANT: These flags are REPORTING-ONLY (diagnostic).  They inform
+    // the miner about which lanes are alive and authenticated.  They MUST
+    // NEVER be used as gating conditions for BLOCK_DATA delivery, GET_BLOCK
+    // handling, or any other mining-critical operation.  A stale or missing
+    // SESSION_STATUS_ACK should only trigger diagnostic reports on the miner
+    // side — never prevent or block block data.
     //=========================================================================
     static constexpr uint32_t LANE_PRIMARY_ALIVE   = 0x01; // bit 0: stateless lane up
     static constexpr uint32_t LANE_SECONDARY_ALIVE = 0x02; // bit 1: legacy lane up

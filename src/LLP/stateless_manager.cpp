@@ -36,7 +36,18 @@ namespace LLP
      * window: DEGRADED_MODE_HARD_LIMIT_SECONDS (300s) + 2 keepalive intervals (2×60s = 120s).
      * A miner in DEGRADED MODE sends keepalives every ~60s but may stop sending new
      * MINER_READY for up to 300s while running its escape ladder. Evicting the session
-     * during that window would cause Stateless=0 on the next BroadcastChannel event. */
+     * during that window would cause Stateless=0 on the next BroadcastChannel event.
+     *
+     * KEEPALIVE CADENCE NOTE: KeepAlive was demoted to 4 sends per 24 hours (previously
+     * 1 per hour).  The 420s grace period remains adequate because any single keepalive
+     * within the 24h window satisfies the nKeepaliveCount > 0 condition in the truly-idle
+     * check, protecting the session from cleanup.  The grace period only applies to miners
+     * that have NEVER sent a keepalive (nKeepaliveCount == 0).
+     *
+     * HEALTH DECOUPLING INVARIANT: KeepAlive health is diagnostic-only.  A stale or
+     * missing KeepAlive ACK MUST NEVER gate GET_BLOCK, BLOCK_DATA delivery, or any
+     * other mining-critical operation.  KeepAlive staleness should only trigger
+     * diagnostic reports on the miner side. */
     static const uint64_t KEEPALIVE_GRACE_PERIOD_SEC = 420;
 
     /* Get singleton instance */
@@ -395,7 +406,8 @@ namespace LLP
 
         if(nRemoved > 0)
         {
-            debug::log(2, FUNCTION, "Cleaned up ", nRemoved, " expired sessions");
+            debug::log(0, FUNCTION, "Cleaned up ", nRemoved, " expired sessions"
+                       " — verify miners are sending GET_BLOCK/GET_ROUND to refresh activity timestamp");
         }
 
         /* Also prune session-scoped maps for any sessions no longer in mapMiners */

@@ -313,9 +313,13 @@ namespace LLP
          *  Write a single packet to the TCP stream.
          *
          *  @param[in] PACKET The packet of type PacketType to write.
+         *  @param[in] fMiningCritical If true, force-write the packet even when
+         *             the send buffer is full.  Mining-critical packets (BLOCK_DATA,
+         *             NEW_ROUND, push notifications) must never be silently dropped
+         *             because their loss causes miners to lose work.
          *
          **/
-        void WritePacket(const PacketType& PACKET);
+        void WritePacket(const PacketType& PACKET, bool fMiningCritical = false);
 
 
         /** ReadPacket

@@ -337,6 +337,64 @@ namespace OpcodeUtility
     static constexpr uint32_t MAX_ANY_PACKET_LENGTH = 3 * 1024 * 1024;  // 3 MB safety margin
 
 
+    //=========================================================================
+    // MINING-CRITICAL PACKET CLASSIFICATION
+    //
+    // Mining-critical packets are opcodes whose delivery directly affects
+    // a miner's ability to receive work and mine blocks.  When the send
+    // buffer is saturated (fBufferFull), these packets MUST NOT be silently
+    // dropped — they bypass the normal buffer-full guard in WritePacket().
+    //
+    // Classification: BLOCK_DATA, NEW_ROUND, BLOCK_REJECTED (control),
+    // BLOCK_ACCEPTED, SESSION_EXPIRED, and push-notification opcodes
+    // (PRIME_BLOCK_AVAILABLE, HASH_BLOCK_AVAILABLE).
+    //
+    // Diagnostic-only opcodes (SESSION_KEEPALIVE, SESSION_STATUS_ACK) are
+    // intentionally NOT mining-critical — their loss causes only stale
+    // diagnostics, never lost work.
+    //=========================================================================
+
+
+    /** IsMiningCritical16
+     *
+     *  Returns true if the 16-bit stateless opcode is mining-critical.
+     *  Mining-critical packets are force-sent even when the send buffer is
+     *  saturated, because dropping them causes the miner to lose work.
+     *
+     *  Mining-critical opcodes:
+     *    - BLOCK_DATA              (0xD000) — block template response
+     *    - GET_BLOCK               (0xD081) — proactive push template
+     *    - BLOCK_REJECTED          (0xD0C9) — GET_BLOCK control response
+     *    - BLOCK_ACCEPTED          (0xD0C8) — submit confirmation
+     *    - NEW_ROUND               (0xD0CC) — round change notification
+     *    - SESSION_EXPIRED         (0xD0DD) — session termination notice
+     *    - PRIME_BLOCK_AVAILABLE   (0xD0D9) — push notification
+     *    - HASH_BLOCK_AVAILABLE    (0xD0DA) — push notification
+     *
+     *  @param[in] nOpcode The 16-bit stateless opcode to check
+     *
+     *  @return true if packet delivery is mining-critical
+     *
+     **/
+    inline bool IsMiningCritical16(uint16_t nOpcode)
+    {
+        switch(nOpcode)
+        {
+            case Stateless::BLOCK_DATA:
+            case Stateless::GET_BLOCK:
+            case Stateless::BLOCK_REJECTED:
+            case Stateless::BLOCK_ACCEPTED:
+            case Stateless::NEW_ROUND:
+            case Stateless::SESSION_EXPIRED:
+            case Stateless::PRIME_BLOCK_AVAILABLE:
+            case Stateless::HASH_BLOCK_AVAILABLE:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+
     /** IsStatelessMiningOpcode
      *
      *  Determines if an opcode is part of the stateless mining protocol range.

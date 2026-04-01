@@ -229,7 +229,7 @@ namespace LLP
 
     /*  Write a single packet to the TCP stream. */
     template <class PacketType>
-    void BaseConnection<PacketType>::WritePacket(const PacketType& PACKET)
+    void BaseConnection<PacketType>::WritePacket(const PacketType& PACKET, bool fMiningCritical)
     {
         /* Only get this value one time. */
         static const uint64_t nMaxSendBuffer =
@@ -240,7 +240,8 @@ namespace LLP
 
         /* Stop sending packets if send buffer is full. */
         if(Buffered() + vBytes.size() + 1024 < nMaxSendBuffer //reserve 1Kb of buffer for critical messages
-        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer)) //catch for critical messages (< 1 Kb)
+        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer) //catch for critical messages (< 1 Kb)
+        || fMiningCritical) // mining-critical packets (BLOCK_DATA, NEW_ROUND, push) are NEVER dropped
         {
             /* Debug dump of message type. */
             debug::log(4, NODE, "sent packet (", vBytes.size(), " bytes)");

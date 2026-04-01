@@ -134,6 +134,7 @@ namespace LLP
         std::atomic<uint64_t> g_get_block_control_source_unavailable_total{0};
         std::atomic<uint64_t> g_get_block_control_channel_not_set_total{0};
         std::atomic<uint64_t> g_get_block_silent_drop_total{0};
+        std::atomic<uint64_t> g_mining_critical_buffer_full_total{0};
 
         uint64_t IncrementControlCounter(const GetBlockPolicyReason eReason)
         {
@@ -910,7 +911,17 @@ namespace LLP
 
             LOCK(MUTEX);
 
-            /* Handle GET_BLOCK - requires authentication and channel */
+            /* Handle GET_BLOCK - requires authentication and channel
+             *
+             * HEALTH DECOUPLING INVARIANT: Session Status and KeepAlive health are
+             * diagnostic-only — they MUST NEVER gate this handler.  The only preconditions
+             * for serving BLOCK_DATA are:
+             *   (1) valid session (not expired based on activity timestamp),
+             *   (2) authenticated (Falcon handshake completed), and
+             *   (3) channel set (SET_CHANNEL was called).
+             * SESSION_STATUS_ACK staleness and KeepAlive ACK staleness are irrelevant
+             * to block data delivery.  GET_ROUND and PUSH (BLOCK_AVAILABLE) are the
+             * only barometers for mining health — not keepalive or session-status. */
             if(PACKET.HEADER == GET_BLOCK)
             {
                 /* Count every received GET_BLOCK attempt (including rejected/invalid) to
@@ -3068,17 +3079,43 @@ namespace LLP
          * fBufferFull is set to true by WritePacket() when a write is dropped and reset
          * to false by Socket::Flush() after data drains successfully.  Logging at level 0
          * here makes the saturation condition operator-visible without requiring -v 4. */
-        if(fBufferFull.load() &&
-           (packet.HEADER == OpcodeUtility::Stateless::SESSION_KEEPALIVE  ||
-            packet.HEADER == OpcodeUtility::Stateless::SESSION_STATUS_ACK))
+
+        const bool fBufferSaturated = fBufferFull.load();
+        const bool fCritical = OpcodeUtility::IsMiningCritical16(packet.HEADER);
+
+        if(fBufferSaturated)
         {
-            debug::log(0, FUNCTION, "WARNING: keepalive ACK write may be dropped — "
-                       "send buffer saturated (opcode=0x", std::hex, packet.HEADER, std::dec, "); "
-                       "possible TRANSACTION flood causing send-queue saturation");
+            if(fCritical)
+            {
+                /* Mining-critical packet (BLOCK_DATA, NEW_ROUND, push notification, etc.)
+                 * attempted while send buffer is saturated.  Force-write via WritePacket
+                 * priority bypass to prevent the miner from losing work.
+                 *
+                 * This is the primary fix for the "PUSH arrives but BLOCK_DATA blocked"
+                 * scenario: BLOCK_DATA responses are never silently dropped. */
+                const uint64_t nDrops = ++g_mining_critical_buffer_full_total;
+                debug::log(0, FUNCTION, "🚨 MINING-CRITICAL packet force-sent despite buffer saturation "
+                           "(opcode=0x", std::hex, packet.HEADER, std::dec,
+                           " size=", packet.LENGTH, " bytes"
+                           " buffered=", Buffered(), " bytes"
+                           " mining_critical_buffer_full_total=", nDrops, ")"
+                           " — packet will be force-written to prevent miner work loss");
+            }
+            else if(packet.HEADER == OpcodeUtility::Stateless::SESSION_KEEPALIVE ||
+                    packet.HEADER == OpcodeUtility::Stateless::SESSION_STATUS_ACK)
+            {
+                /* Diagnostic-only packets (keepalive, session-status ACK) — warn but
+                 * do not force-write.  These packets are NOT mining-critical; their loss
+                 * causes only stale diagnostics on the miner side. */
+                debug::log(0, FUNCTION, "WARNING: keepalive ACK write may be dropped — "
+                           "send buffer saturated (opcode=0x", std::hex, packet.HEADER, std::dec, "); "
+                           "possible TRANSACTION flood causing send-queue saturation");
+            }
         }
 
-        /* Serialize and write the packet */
-        WritePacket(packet);
+        /* Serialize and write the packet.  Mining-critical packets pass fMiningCritical=true
+         * to bypass the buffer-full guard in WritePacket(). */
+        WritePacket(packet, fCritical);
     }
 
 
@@ -4639,8 +4676,21 @@ namespace LLP
         debug::log(2, "      client may fall back to polling GET_ROUND (133/0x85).");
         debug::log(2, "════════════════════════════════════════════════════════════");
 
-        /* Send to miner */
+        /* Send to miner — mining-critical priority is handled by respond() which
+         * passes fMiningCritical=true to WritePacket for push notification opcodes,
+         * ensuring the notification is never silently dropped by buffer saturation. */
         respond(notification);
+
+        /* Warn if send buffer is saturated AFTER sending the push notification.
+         * The subsequent GET_BLOCK response (BLOCK_DATA) from the miner will also
+         * be force-written via the mining-critical priority bypass, but this warning
+         * makes the saturation condition operator-visible for monitoring. */
+        if(fBufferFull.load())
+        {
+            debug::log(0, FUNCTION, "⚠️ PUSH notification sent but send buffer is saturated — "
+                       "subsequent BLOCK_DATA response will be force-written via mining-critical bypass "
+                       "(channel=", nChannel, " peer=", GetAddress().ToStringIP(), ")");
+        }
 
         /* Reset connection activity timer — the miner is alive and receiving push notifications.
          * Without this, the node would disconnect active miners during long Prime searches (~2-5 min)
