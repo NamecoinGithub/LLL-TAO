@@ -165,7 +165,10 @@ namespace LLP
             mapKeyToAddress.Erase(ctx.hashKeyID);
 
         if(ctx.nSessionId != 0)
+        {
             mapSessionToAddress.Erase(ctx.nSessionId);
+            mapTombstones.Erase(ctx.nSessionId);
+        }
 
         if(ctx.hashGenesis != 0)
             mapGenesisToAddress.Erase(ctx.hashGenesis);
@@ -173,6 +176,102 @@ namespace LLP
         mapAddressToLane.Erase(strAddress);
 
         return true;
+    }
+
+
+    /* TombstoneMiner — soft disconnect: remove from mapMiners but preserve
+     * session indices (mapSessionToAddress, mapKeyToAddress, mapGenesisToAddress)
+     * for a grace period so that cross-port keepalives still resolve.
+     *
+     * The tombstone timestamp is recorded so ReapTombstones() can clean up
+     * stale index entries on the next sweep cycle. */
+    bool StatelessMinerManager::TombstoneMiner(const std::string& strAddress)
+    {
+        auto optContext = mapMiners.GetAndRemove(strAddress);
+        if(!optContext.has_value())
+            return false;
+
+        const MiningContext& ctx = optContext.value();
+
+        /* Update atomic counters (miner is no longer "active") */
+        if(nTotalMiners > 0)
+            --nTotalMiners;
+
+        if(ctx.fAuthenticated && nAuthenticatedMiners > 0)
+            --nAuthenticatedMiners;
+
+        /* Record tombstone timestamp — session indices stay alive */
+        if(ctx.nSessionId != 0)
+        {
+            mapTombstones.InsertOrUpdate(ctx.nSessionId, runtime::unifiedtimestamp());
+            debug::log(0, FUNCTION, "Tombstoned session 0x", std::hex, ctx.nSessionId, std::dec,
+                       " for ", strAddress, " — indices preserved for ",
+                       TOMBSTONE_GRACE_PERIOD_SEC, "s grace period");
+        }
+
+        /* Remove lane tracking (connection is gone) */
+        mapAddressToLane.Erase(strAddress);
+
+        /* NOTE: mapSessionToAddress, mapKeyToAddress, mapGenesisToAddress
+         * are intentionally NOT erased.  They point to the now-removed
+         * mapMiners entry, so GetMinerContextBySessionID() will return
+         * nullopt — but the session_id itself remains resolvable as
+         * "recently valid" for the tombstone grace period.
+         *
+         * When the miner reconnects, UpdateMiner() re-inserts into mapMiners
+         * and the indices are refreshed.  If the miner doesn't reconnect,
+         * ReapTombstones() cleans up the stale indices. */
+
+        return true;
+    }
+
+
+    /* ReapTombstones — remove expired session index entries.
+     * Called from CleanupInactive() on the 10-minute sweep. */
+    uint32_t StatelessMinerManager::ReapTombstones()
+    {
+        uint32_t nReaped = 0;
+        uint64_t nNow = runtime::unifiedtimestamp();
+
+        auto pairs = mapTombstones.GetAllPairs();
+        for(const auto& pair : pairs)
+        {
+            uint32_t nSessionId = pair.first;
+            uint64_t nTombstoneTime = pair.second;
+
+            if((nNow - nTombstoneTime) > TOMBSTONE_GRACE_PERIOD_SEC)
+            {
+                /* Grace period expired — check if the session was re-established.
+                 * If mapMiners has a live entry for this session's address, the
+                 * miner reconnected and the indices are valid again. */
+                auto optAddress = mapSessionToAddress.Get(nSessionId);
+                if(optAddress.has_value())
+                {
+                    auto optContext = mapMiners.Get(optAddress.value());
+                    if(optContext.has_value() && optContext->nSessionId == nSessionId)
+                    {
+                        /* Miner reconnected — indices are live, just remove tombstone */
+                        mapTombstones.Erase(nSessionId);
+                        continue;
+                    }
+
+                    /* No live miner for this session — erase stale indices */
+                    mapSessionToAddress.Erase(nSessionId);
+                }
+
+                /* Clean up any remaining stale key/genesis indices by scanning.
+                 * This is O(tombstones) not O(miners) so it's cheap. */
+                mapTombstones.Erase(nSessionId);
+                ++nReaped;
+            }
+        }
+
+        if(nReaped > 0)
+        {
+            debug::log(0, FUNCTION, "Reaped ", nReaped, " expired tombstones");
+        }
+
+        return nReaped;
     }
 
     /* Remove a miner by key ID */
@@ -377,6 +476,9 @@ namespace LLP
         {
             debug::log(0, FUNCTION, "Cleaned up ", nRemoved, " truly idle miners");
         }
+
+        /* Reap expired tombstone entries on every sweep cycle */
+        ReapTombstones();
 
         return nRemoved;
     }

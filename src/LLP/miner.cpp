@@ -541,9 +541,32 @@ namespace LLP
                 auto optContext = StatelessMinerManager::Get().GetMinerContextBySessionID(nKeepaliveSession);
                 if(!optContext.has_value())
                 {
-                    debug::error(FUNCTION, "Unknown session_id: 0x", std::hex, nKeepaliveSession, std::dec);
-                    debug::error(FUNCTION, "Session may have expired or never existed");
-                    Disconnect();
+                    /* Session not found in manager — this can happen transiently when:
+                     * 1. The stateless port (9323) experienced a TCP disconnect and the
+                     *    session was tombstoned (indices preserved but mapMiners entry gone).
+                     * 2. The miner is reconnecting and re-auth hasn't completed yet.
+                     *
+                     * DO NOT Disconnect() — that cascades into killing a valid miner.
+                     * Instead, send a zeroed keepalive response so the miner knows the
+                     * session needs re-establishment, and log a warning. */
+                    debug::log(0, FUNCTION, "⚠ SESSION_KEEPALIVE: session_id 0x", std::hex, nKeepaliveSession, std::dec,
+                               " not found in manager — sending zeroed response (soft fail)");
+
+                    /* Build a zeroed 32-byte response: session-unknown indicator.
+                     * The miner will see all-zero heights and fork_score=0 which
+                     * triggers its DEGRADED MODE recovery ladder without killing
+                     * the underlying TCP connection. */
+                    std::vector<uint8_t> vV2 = KeepaliveV2::BuildUnifiedResponse(
+                        nKeepaliveSession,
+                        0,    // echo zero (no prevhash data)
+                        0,    // unified height = 0 (unknown)
+                        0,    // hash tip lo32 = 0
+                        0,    // prime height = 0
+                        0,    // hash height = 0
+                        0,    // stake height = 0
+                        0);   // fork score = 0
+
+                    respond(SESSION_KEEPALIVE, vV2);
                     return true;
                 }
 

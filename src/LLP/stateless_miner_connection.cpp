@@ -664,10 +664,15 @@ namespace LLP
                 if(context.fAuthenticated && context.hashKeyID != 0)
                     NodeSessionRegistry::Get().MarkDisconnected(context.hashKeyID, ProtocolLane::STATELESS);
 
-                /* Remove from StatelessMinerManager tracking */
+                /* Tombstone instead of Remove: preserve session indices for a grace period
+                 * so that cross-port keepalives (port 8323) can still resolve the session_id.
+                 * Without this, a transient TCP disconnect on port 9323 erases the session,
+                 * causing the next legacy keepalive to fail with "session not found" → Disconnect().
+                 *
+                 * The tombstone is reaped by CleanupInactive() on its 10-minute sweep. */
                 {
                     LOCK(MUTEX);
-                    StatelessMinerManager::Get().RemoveMiner(context.strAddress);
+                    StatelessMinerManager::Get().TombstoneMiner(context.strAddress);
                 }
 
                 return;

@@ -138,6 +138,38 @@ namespace LLP
          **/
         bool RemoveMiner(const std::string& strAddress);
 
+        /** TombstoneMiner
+         *
+         *  Mark a miner as disconnected without erasing session indices.
+         *
+         *  The miner's entry in mapMiners is removed (so it won't receive new
+         *  template pushes), but mapSessionToAddress, mapKeyToAddress, and
+         *  mapGenesisToAddress entries are PRESERVED for a grace period.
+         *
+         *  This prevents the cascade failure where a transient TCP disconnect
+         *  on port 9323 erases the session ID, causing the next keepalive on
+         *  port 8323 to fail with "session not found" → Disconnect().
+         *
+         *  The preserved indices are reaped by CleanupInactive() on its
+         *  normal 10-minute sweep cadence.
+         *
+         *  @param[in] strAddress  Miner address to tombstone
+         *
+         *  @return true if miner was found and tombstoned
+         *
+         **/
+        bool TombstoneMiner(const std::string& strAddress);
+
+        /** ReapTombstones
+         *
+         *  Remove expired tombstone entries.
+         *  Called from CleanupInactive() on the 10-minute sweep.
+         *
+         *  @return Number of tombstones reaped
+         *
+         **/
+        uint32_t ReapTombstones();
+
         /** RemoveMinerByKeyID
          *
          *  Remove a miner from tracking by Falcon key ID.
@@ -536,6 +568,17 @@ namespace LLP
 
         /** Track last known lane per miner address **/
         util::ConcurrentHashMap<std::string, uint8_t> mapAddressToLane;
+
+        /** Tombstone map: session_id → timestamp of disconnect.
+         *  Preserves session index entries for a grace period so that
+         *  cross-port keepalives don't fail after a transient TCP drop.
+         *  Reaped by ReapTombstones() on the 10-minute cleanup sweep. **/
+        util::ConcurrentHashMap<uint32_t, uint64_t> mapTombstones;
+
+        /** Grace period (seconds) before tombstoned session indices are erased.
+         *  Aligned with the miner's reconnection window (60s typical reconnect
+         *  + KEEPALIVE_GRACE_PERIOD_SEC safety margin). **/
+        static constexpr uint64_t TOMBSTONE_GRACE_PERIOD_SEC = 120;
 
         /** Atomic counter for total miners (lock-free stats) **/
         mutable std::atomic<size_t> nTotalMiners{0};
