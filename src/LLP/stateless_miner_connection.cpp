@@ -836,7 +836,8 @@ namespace LLP
                  * carries the correct unified height, preventing stale-height throttling. */
                 {
                     TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-                    context = context.WithLastTemplateUnifiedHeight(stateBest.nHeight);
+                    context = context.WithLastTemplateUnifiedHeight(stateBest.nHeight)
+                                     .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
                 }
 
                 /* Persist session and lane state for cross-lane recovery */
@@ -853,18 +854,20 @@ namespace LLP
 
                 /* Atomic transform: update MINER_READY state on CURRENT value in mapMiners.
                  * Captures the connection-specific mutations (subscription, encryption,
-                 * unified height) and applies them atomically to avoid TOCTOU races. */
+                 * unified height, hashLastBlock) and applies them atomically to avoid TOCTOU races. */
                 {
                     bool fSubscribed = context.fSubscribedToNotifications;
                     uint32_t nSubChannel = context.nSubscribedChannel;
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
+                    uint1024_t hashLast = context.hashLastBlock;
                     StatelessMinerManager::Get().TransformMiner(context.strAddress,
-                        [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
+                        [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH, hashLast](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
                                 .WithLastTemplateUnifiedHeight(nLastUH)
+                                .WithHashLastBlock(hashLast)
                                 .WithTimestamp(runtime::unifiedtimestamp());
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
@@ -2436,7 +2439,8 @@ namespace LLP
                  * carries the correct unified height, preventing stale-height throttling. */
                 {
                     TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-                    context = context.WithLastTemplateUnifiedHeight(stateBest.nHeight);
+                    context = context.WithLastTemplateUnifiedHeight(stateBest.nHeight)
+                                     .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
                 }
 
                 /* Persist session and lane state for cross-lane recovery */
@@ -2459,18 +2463,20 @@ namespace LLP
 
                 /* Atomic transform: update MINER_READY state on CURRENT value in mapMiners.
                  * Captures the connection-specific mutations (subscription, encryption,
-                 * unified height) and applies them atomically to avoid TOCTOU races. */
+                 * unified height, hashLastBlock) and applies them atomically to avoid TOCTOU races. */
                 {
                     bool fSubscribed = context.fSubscribedToNotifications;
                     uint32_t nSubChannel = context.nSubscribedChannel;
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
+                    uint1024_t hashLast = context.hashLastBlock;
                     StatelessMinerManager::Get().TransformMiner(context.strAddress,
-                        [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
+                        [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH, hashLast](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
                                 .WithLastTemplateUnifiedHeight(nLastUH)
+                                .WithHashLastBlock(hashLast)
                                 .WithTimestamp(runtime::unifiedtimestamp());
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
@@ -4764,7 +4770,9 @@ namespace LLP
         {
             LOCK(MUTEX);
             context = context.WithNotificationSent(nNotificationTimestamp)
-                             .WithCanonicalSnap(canonicalSnap);
+                             .WithCanonicalSnap(canonicalSnap)
+                             .WithLastTemplateUnifiedHeight(stateBest.nHeight)
+                             .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
             nSessionId_snap = context.nSessionId;
         }
         
