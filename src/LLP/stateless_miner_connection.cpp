@@ -639,7 +639,10 @@ namespace LLP
                         strCategory = "SOFTWARE";
                         break;
                     case DISCONNECT::BUFFER:
-                        strReason = "DISCONNECT::BUFFER (send buffer overflow)";
+                        strReason = "DISCONNECT::BUFFER (send buffer overflow: "
+                            + std::to_string(Buffered()) + "/"
+                            + std::to_string(config::GetArg("-maxsendbuffer", MAX_SEND_BUFFER))
+                            + " bytes)";
                         strCategory = "SOFTWARE";
                         break;
                     case DISCONNECT::TIMEOUT_WRITE:
@@ -4488,7 +4491,22 @@ namespace LLP
             /* Copy channel for use outside lock */
             nChannel = context.nSubscribedChannel;
         }  // MUTEX automatically unlocked here
-        
+
+        /* C2 Fix: Buffer-aware push gating.
+         * Skip the entire push if the send buffer is already under pressure.
+         * Pushes are advisory — the miner will recover via GET_BLOCK or
+         * GET_ROUND polling.  Dropping a push under backpressure is far
+         * better than letting the buffer overflow and having DataThread kill
+         * the connection with DISCONNECT::BUFFER. */
+        if(fBufferFull.load() || Buffered() > MiningConstants::MINING_PUSH_BUFFER_WATERMARK)
+        {
+            debug::log(0, FUNCTION, "Push notification skipped — send buffer backpressure (",
+                       Buffered(), " bytes buffered, watermark=",
+                       MiningConstants::MINING_PUSH_BUFFER_WATERMARK, ") for ",
+                       GetAddress().ToStringIP());
+            return;
+        }
+
         /* Get blockchain state */
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         
@@ -4588,6 +4606,18 @@ namespace LLP
     {
         if(config::fShutdown.load())
             return;
+
+        /* C2 Fix: Buffer-aware gating — skip the expensive new_block() call
+         * entirely when the socket is already under pressure.  This function
+         * is documented as "best-effort"; respecting backpressure makes it
+         * truly best-effort.  The miner will use GET_BLOCK or GET_ROUND
+         * polling as fallback. */
+        if(fBufferFull.load() || Buffered() > MiningConstants::MINING_PUSH_BUFFER_WATERMARK)
+        {
+            debug::log(0, FUNCTION, "TryAttach skipped — send buffer backpressure (",
+                       Buffered(), " bytes buffered) for ", GetAddress().ToStringIP());
+            return;
+        }
 
         /* Create block template — best effort, no retry loop here */
         TAO::Ledger::Block* pBlock = new_block();
@@ -4715,7 +4745,20 @@ namespace LLP
             /* Copy channel for use outside lock */
             nChannel = context.nChannel;
         }  // MUTEX automatically unlocked here
-        
+
+        /* C2 Fix: Buffer-aware push gating.
+         * Skip the entire template push if the send buffer is under pressure.
+         * This is a 228-byte write; skipping it prevents buffer accumulation
+         * that leads to DISCONNECT::BUFFER.  Miner recovers via GET_BLOCK. */
+        if(fBufferFull.load() || Buffered() > MiningConstants::MINING_PUSH_BUFFER_WATERMARK)
+        {
+            debug::log(0, FUNCTION, "Stateless template push skipped — send buffer backpressure (",
+                       Buffered(), " bytes buffered, watermark=",
+                       MiningConstants::MINING_PUSH_BUFFER_WATERMARK, ") for ",
+                       GetAddress().ToStringIP());
+            return;
+        }
+
         debug::log(2, "════════════════════════════════════════════════════════════");
         debug::log(2, "📤 SENDING STATELESS TEMPLATE (0xD081)");
         debug::log(2, "════════════════════════════════════════════════════════════");

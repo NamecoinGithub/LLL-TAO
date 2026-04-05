@@ -104,6 +104,29 @@ namespace MiningConstants
     constexpr uint32_t GET_BLOCK_COOLDOWN_SECONDS = 1;
 
     //=========================================================================
+    // SEND BUFFER BACKPRESSURE
+    //=========================================================================
+
+    /** Buffer watermark for mining push notifications (75% of MAX_SEND_BUFFER).
+     *
+     *  When a mining connection's send buffer exceeds this threshold, push
+     *  notifications (SendChannelNotification), tag-along templates
+     *  (TryAttachBlockTemplate), and unsolicited template pushes
+     *  (SendStatelessTemplate) are skipped entirely.  The miner recovers
+     *  via GET_BLOCK or GET_ROUND polling — pushes are advisory, not
+     *  required.
+     *
+     *  This prevents the DataThread buffer-overflow kill at data.cpp:430
+     *  (DISCONNECT::BUFFER when Buffered() > MAX_SEND_BUFFER = 3 MB) from
+     *  silently terminating active mining sessions whose TCP receive window
+     *  is temporarily full because the miner is CPU-bound hashing.
+     *
+     *  Watermark = 75% of 3 MB = 2.25 MB, leaving 768 KB of headroom
+     *  between "stop pushing" and "DataThread kills the connection."
+     */
+    constexpr uint64_t MINING_PUSH_BUFFER_WATERMARK = (3ULL * 1024 * 1024) * 3 / 4;
+
+    //=========================================================================
     // DIFFICULTY CACHING
     //=========================================================================
     

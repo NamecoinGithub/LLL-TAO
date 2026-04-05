@@ -418,7 +418,10 @@ namespace LLP
                         strCategory = "SOFTWARE";
                         break;
                     case DISCONNECT::BUFFER:
-                        strReason = "DISCONNECT::BUFFER (send buffer overflow)";
+                        strReason = "DISCONNECT::BUFFER (send buffer overflow: "
+                            + std::to_string(Buffered()) + "/"
+                            + std::to_string(config::GetArg("-maxsendbuffer", MAX_SEND_BUFFER))
+                            + " bytes)";
                         strCategory = "SOFTWARE";
                         break;
                     case DISCONNECT::TIMEOUT_WRITE:
@@ -1769,6 +1772,20 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+        }
+
+        /* C2 Fix: Buffer-aware push gating (legacy lane).
+         * Skip the push if the send buffer is already under pressure.
+         * Pushes are advisory — the miner recovers via GET_BLOCK or
+         * GET_ROUND polling.  This prevents DISCONNECT::BUFFER from
+         * killing active mining sessions when the miner is CPU-bound. */
+        if(fBufferFull.load() || Buffered() > MiningConstants::MINING_PUSH_BUFFER_WATERMARK)
+        {
+            debug::log(0, FUNCTION, "Push notification skipped — send buffer backpressure (",
+                       Buffered(), " bytes buffered, watermark=",
+                       MiningConstants::MINING_PUSH_BUFFER_WATERMARK, ") for ",
+                       GetAddress().ToStringIP());
+            return;
         }
 
         /* Get blockchain state */
