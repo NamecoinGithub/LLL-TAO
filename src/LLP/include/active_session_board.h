@@ -143,7 +143,9 @@ namespace LLP
         /* ── Cleanup ───────────────────────────────────────────────────────── */
 
         /** Remove all entries where fMarkedDisconnected == true.
-         *  Called periodically from the cleanup sweep cycle. **/
+         *  Called periodically from the cleanup sweep cycle.
+         *
+         *  @return the number of entries removed. **/
         uint32_t SweepDisconnected();
 
 
