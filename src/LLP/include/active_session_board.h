@@ -140,6 +140,12 @@ namespace LLP
         /** Check if a session+lane is registered and not marked disconnected. **/
         bool IsActive(uint32_t nSessionId, ProtocolLane lane) const;
 
+        /* ── Cleanup ───────────────────────────────────────────────────────── */
+
+        /** Remove all entries where fMarkedDisconnected == true.
+         *  Called periodically from the cleanup sweep cycle. **/
+        uint32_t SweepDisconnected();
+
 
     private:
         ActiveSessionBoard() = default;

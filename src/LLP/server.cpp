@@ -32,6 +32,7 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/session_recovery.h>
 #include <LLP/include/node_session_registry.h>
+#include <LLP/include/active_session_board.h>
 #include <LLP/include/miner_push_dispatcher.h>
 #include <LLP/include/mining_constants.h>
 #include <LLP/include/mining_timers.h>
@@ -1300,6 +1301,8 @@ namespace LLP
                     StatelessMinerManager::Get().PurgeInactiveMiners();
                     SessionRecoveryManager::Get().CleanupExpired(
                         SessionRecoveryManager::Get().GetSessionTimeout());
+
+                    ActiveSessionBoard::Get().SweepDisconnected();
                 }
 
                 CLEANUP_TIMER.Reset();
