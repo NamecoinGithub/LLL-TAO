@@ -134,7 +134,7 @@ namespace LLP
             /* Read 1-byte header, zero-extend to uint16_t for StatelessPacket compatibility. */
             if(Available() >= 1 && INCOMING.IsNull())
             {
-                std::vector<uint8_t> HEADER(1, 255);
+                std::vector<uint8_t> HEADER(1, 0);
                 if(Read(HEADER, 1) == 1)
                     INCOMING.HEADER = HEADER[0];  /* 0x00-0xFE, zero-extended */
             }
@@ -203,7 +203,7 @@ namespace LLP
                 if(fDDOS.load() && Incoming())
                 {
                     const StatelessPacket& PACKET = this->INCOMING;
-                    if(PACKET.LENGTH > 10 * 1024 * 1024)
+                    if(PACKET.LENGTH > MiningConstants::MAX_MINING_PACKET_SIZE)
                     {
                         debug::error(FUNCTION, "Packet length too large: ", PACKET.LENGTH);
                         if(DDOS)
@@ -508,8 +508,15 @@ namespace LLP
         {
             LOCK(MUTEX);
             ctxSnap = context;
+        }
 
-            /* Check push throttle — skip if too recent (unless forced) */
+        /* Must be authenticated and subscribed — check BEFORE throttle. */
+        if(!ctxSnap.fAuthenticated || !ctxSnap.fSubscribedToNotifications)
+            return;
+
+        /* Check push throttle — skip if too recent (unless forced) */
+        {
+            LOCK(MUTEX);
             if(!m_force_next_push)
             {
                 auto tNow = std::chrono::steady_clock::now();
@@ -527,10 +534,6 @@ namespace LLP
             m_force_next_push = false;
             m_last_template_push_time = std::chrono::steady_clock::now();
         }
-
-        /* Must be authenticated and subscribed */
-        if(!ctxSnap.fAuthenticated || !ctxSnap.fSubscribedToNotifications)
-            return;
 
         debug::log(2, FUNCTION, "Push notification sent to ",
                    (m_lane == ProtocolLane::LEGACY ? "legacy" : "stateless"),

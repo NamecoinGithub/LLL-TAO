@@ -74,9 +74,7 @@ namespace LLP
                    "[PUSH][Stateless][", strChannel, "] height=", nHeight,
                    " hash=", std::hex, hashPrefix4, std::dec,
                    " notified=", nStateless,
-                   (nUnified > 0 ? " (+unified=" : ""),
-                   (nUnified > 0 ? std::to_string(nUnified) : ""),
-                   (nUnified > 0 ? ")" : ""));
+                   " unified=", nUnified);
     }
 
 

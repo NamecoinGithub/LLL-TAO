@@ -188,6 +188,11 @@ namespace MiningConstants
     static_assert(DIFFICULTY_CACHE_TTL_MS >= 1000, 
                   "DIFFICULTY_CACHE_TTL_MS must be >= 1000ms (1 second) to avoid truncation");
 
+    /** Maximum allowed mining packet size (10 MB).
+     *  Any incoming packet with LENGTH exceeding this limit is rejected and
+     *  the connection is DDOS-banned + disconnected. */
+    constexpr uint32_t MAX_MINING_PACKET_SIZE = 10 * 1024 * 1024;
+
 } // namespace MiningConstants
 } // namespace LLP
 

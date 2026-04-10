@@ -266,6 +266,9 @@ namespace LLP
         #endif
 
 
+        /* Cache unified mining flag to avoid repeated config lookups. */
+        const bool fUnifiedMining = config::GetBoolArg(std::string("-unifiedmining"), false);
+
         /* STATELESS_MINER_SERVER instance - Phase 2 Stateless Miner LLP */
         /* This server repurposes miningport as the canonical stateless miner LLP port */
         if(config::GetBoolArg(std::string("-mining"), false) && !config::fClient.load())
@@ -276,7 +279,7 @@ namespace LLP
                 debug::error(FUNCTION, "Mining configuration validation failed - mining server will not start");
                 debug::error(FUNCTION, "Please ensure miningpubkey is configured in nexus.conf");
             }
-            else if(config::GetBoolArg(std::string("-unifiedmining"), false))
+            else if(fUnifiedMining)
             {
                 /* UNIFIED_MINER_SERVER — single server handling both stateless (9323) and legacy (8323) */
                 LLP::Config CONFIG = MiningServerFactory::BuildUnifiedConfig();
@@ -318,7 +321,7 @@ namespace LLP
          * Skip if unified mining is enabled — the unified server handles both. */
         if(config::GetBoolArg(std::string("-mining"), false) &&
            !config::fClient.load() &&
-           !config::GetBoolArg(std::string("-unifiedmining"), false))
+           !fUnifiedMining)
         {
             /* Check if legacy mining port is explicitly disabled (set to 0) */
             uint16_t nLegacyPort = GetLegacyMiningPort();
