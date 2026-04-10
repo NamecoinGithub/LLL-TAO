@@ -231,8 +231,9 @@ namespace LLP
                         (
                             &Server::ListeningThread,
                             this,
-                            true, //IPv4
-                            true //Enable SSL
+                            true,  //IPv4
+                            true,  //Enable SSL
+                            false  //Not secondary
                         )
                     )
                 );

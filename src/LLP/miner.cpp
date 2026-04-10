@@ -32,6 +32,7 @@ ________________________________________________________________________________
 #include <LLP/include/session_start_packet.h>
 #include <LLP/include/round_state_utility.h>
 #include <LLP/types/miner.h>
+#include <LLP/types/stateless_miner_connection.h>
 #include <LLP/templates/events.h>
 #include <LLP/templates/ddos.h>
 #include <LLP/types/tritium.h>
