@@ -25,6 +25,7 @@ ________________________________________________________________________________
 #include <LLP/types/miner.h>
 #include <LLP/types/lookup.h>
 #include <LLP/types/stateless_miner_connection.h>
+#include <LLP/types/unified_miner_connection.h>
 
 #include <LLP/include/trust_address.h>
 #include <LLP/include/auto_cooldown_manager.h>
@@ -74,7 +75,9 @@ namespace LLP
 
     template <typename T>
     inline constexpr bool is_miner_protocol_v =
-        std::is_same_v<T, Miner> || std::is_same_v<T, StatelessMinerConnection>;
+        std::is_same_v<T, Miner>
+        || std::is_same_v<T, StatelessMinerConnection>
+        || std::is_same_v<T, UnifiedMinerConnection>;
 }
 
 
@@ -1695,4 +1698,5 @@ namespace LLP
     template class Server<RPCNode>;
     template class Server<Miner>;
     template class Server<StatelessMinerConnection>;
+    template class Server<UnifiedMinerConnection>;
 }

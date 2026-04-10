@@ -305,6 +305,46 @@ namespace LLP
 
             return cfg;
         }
+
+
+        /** BuildUnifiedConfig
+         *
+         *  Build a configuration for the unified mining server that handles both
+         *  stateless (9323) and legacy (8323) protocols from a single Server instance.
+         *
+         *  The unified server uses PORT_BASE/PORT_SSL for stateless ports and
+         *  PORT_LEGACY/PORT_LEGACY_SSL for legacy ports, sharing a single DataThread pool.
+         *
+         *  This config is used when -unifiedmining=1 is set (Phase A migration flag).
+         *
+         *  @return LLP::Config with both stateless and legacy ports configured.
+         *
+         **/
+        static LLP::Config BuildUnifiedConfig()
+        {
+            /* Start with stateless config as the base (PORT_BASE = 9323) */
+            LLP::Config CONFIG = BuildConfig(Lane::STATELESS);
+
+            /* Set legacy ports for the second pair of listen sockets */
+            CONFIG.PORT_LEGACY = GetLegacyMiningPort();
+
+            /* Enable SSL for both lanes if configured */
+            if(config::GetBoolArg(std::string("-miningssl"), false))
+            {
+                CONFIG.ENABLE_SSL     = true;
+                CONFIG.PORT_SSL       = GetMiningSSLPort();
+                CONFIG.PORT_LEGACY_SSL = GetLegacyMiningSSLPort();
+            }
+
+            /* Combined connection capacity (was 128+128 across two servers) */
+            CONFIG.MAX_CONNECTIONS = config::GetArg(std::string("-miningconnections"), 256);
+            CONFIG.MAX_INCOMING    = CONFIG.MAX_CONNECTIONS;
+
+            /* Shared thread pool (was 8+8 across two servers, now 8 shared) */
+            CONFIG.MAX_THREADS = config::GetArg(std::string("-miningthreads"), 8);
+
+            return CONFIG;
+        }
     };
 
 } // namespace LLP

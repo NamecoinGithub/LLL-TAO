@@ -65,10 +65,18 @@ namespace LLP
         else
             debug::log(1, FUNCTION, "[PUSH][Stateless][", strChannel, "] Server not active");
 
+        /* Also notify unified server (handles both lanes from single server) */
+        uint32_t nUnified = 0;
+        if(LLP::UNIFIED_MINER_SERVER)
+            nUnified = LLP::UNIFIED_MINER_SERVER->NotifyChannelMiners(nChannel);
+
         debug::log(0, FUNCTION,
                    "[PUSH][Stateless][", strChannel, "] height=", nHeight,
                    " hash=", std::hex, hashPrefix4, std::dec,
-                   " notified=", nStateless);
+                   " notified=", nStateless,
+                   (nUnified > 0 ? " (+unified=" : ""),
+                   (nUnified > 0 ? std::to_string(nUnified) : ""),
+                   (nUnified > 0 ? ")" : ""));
     }
 
 
@@ -84,6 +92,9 @@ namespace LLP
             nLegacy = LLP::MINING_SERVER->NotifyChannelMiners(nChannel);
         else
             debug::log(1, FUNCTION, "[PUSH][Legacy][", strChannel, "] Server not active");
+
+        /* Unified server already notified in BroadcastStatelessChannel —
+         * skip duplicate notification here to avoid double-sending. */
 
         debug::log(0, FUNCTION,
                    "[PUSH][Legacy][", strChannel, "] height=", nHeight,

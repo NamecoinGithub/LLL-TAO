@@ -26,6 +26,7 @@ ________________________________________________________________________________
 #include <LLP/types/miner.h>
 #include <LLP/types/lookup.h>
 #include <LLP/types/stateless_miner_connection.h>
+#include <LLP/types/unified_miner_connection.h>
 
 #include <Util/include/hex.h>
 
@@ -378,7 +379,8 @@ namespace LLP
 
             constexpr bool fMiningProtocol =
                 std::is_same<ProtocolType, Miner>::value
-                || std::is_same<ProtocolType, StatelessMinerConnection>::value;
+                || std::is_same<ProtocolType, StatelessMinerConnection>::value
+                || std::is_same<ProtocolType, UnifiedMinerConnection>::value;
 
             /* Check all connections for data and packets. */
             for(uint32_t nIndex = 0; nIndex < nSize; ++nIndex)
@@ -461,7 +463,8 @@ namespace LLP
                         !CONNECTION->INCOMING.IsNull() && !CONNECTION->PacketComplete();
                     const bool fMiningConnection =
                         std::is_same<ProtocolType, Miner>::value
-                        || std::is_same<ProtocolType, StatelessMinerConnection>::value;
+                        || std::is_same<ProtocolType, StatelessMinerConnection>::value
+                        || std::is_same<ProtocolType, UnifiedMinerConnection>::value;
                     const bool fTimeoutExempt = CONNECTION->IsTimeoutExempt();
                     const uint32_t nPollEmptyTimeout =
                         fMiningConnection ? MINING_POLL_EMPTY_TIMEOUT_MS : nWait;
@@ -969,4 +972,5 @@ namespace LLP
     template class DataThread<RPCNode>;
     template class DataThread<Miner>;
     template class DataThread<StatelessMinerConnection>;
+    template class DataThread<UnifiedMinerConnection>;
 }

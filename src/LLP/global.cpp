@@ -45,6 +45,7 @@ namespace LLP
     Server<RPCNode>*     RPC_SERVER;
     Server<Miner>*       MINING_SERVER;
     Server<StatelessMinerConnection>* STATELESS_MINER_SERVER;
+    Server<UnifiedMinerConnection>*   UNIFIED_MINER_SERVER;
 
 
     /* Current session identifier. */
@@ -275,6 +276,22 @@ namespace LLP
                 debug::error(FUNCTION, "Mining configuration validation failed - mining server will not start");
                 debug::error(FUNCTION, "Please ensure miningpubkey is configured in nexus.conf");
             }
+            else if(config::GetBoolArg(std::string("-unifiedmining"), false))
+            {
+                /* UNIFIED_MINER_SERVER — single server handling both stateless (9323) and legacy (8323) */
+                LLP::Config CONFIG = MiningServerFactory::BuildUnifiedConfig();
+
+                UNIFIED_MINER_SERVER = new Server<UnifiedMinerConnection>(CONFIG);
+
+                debug::log(0, FUNCTION, "Unified Mining LLP server started — stateless port ",
+                           GetMiningPort(), ", legacy port ", GetLegacyMiningPort());
+
+                if(config::GetBoolArg(std::string("-miningssl"), false))
+                {
+                    debug::log(0, FUNCTION, "Unified Mining SSL — stateless port ", GetMiningSSLPort(),
+                               ", legacy port ", GetLegacyMiningSSLPort());
+                }
+            }
             else
             {
                 /* Generate unified config via MiningServerFactory for stateless lane */
@@ -297,10 +314,11 @@ namespace LLP
         }
 
         /* MINING_SERVER instance - Legacy hybrid stateful/stateless miner (optional) */
-        /* This can be enabled on a different port if needed for backward compatibility */
-        /* With -mining=1, legacy server now starts by default unless explicitly disabled */
+        /* With -mining=1, legacy server now starts by default unless explicitly disabled.
+         * Skip if unified mining is enabled — the unified server handles both. */
         if(config::GetBoolArg(std::string("-mining"), false) &&
-           !config::fClient.load())
+           !config::fClient.load() &&
+           !config::GetBoolArg(std::string("-unifiedmining"), false))
         {
             /* Check if legacy mining port is explicitly disabled (set to 0) */
             uint16_t nLegacyPort = GetLegacyMiningPort();
@@ -368,6 +386,9 @@ namespace LLP
         /* Close sockets for the stateless miner server and its subsystems. */
         CloseSockets<StatelessMinerConnection>(STATELESS_MINER_SERVER);
 
+        /* Close sockets for the unified miner server and its subsystems. */
+        CloseSockets<UnifiedMinerConnection>(UNIFIED_MINER_SERVER);
+
     }
 
 
@@ -401,6 +422,9 @@ namespace LLP
 
         /* Open sockets for the stateless miner server and its subsystems. */
         OpenListening<StatelessMinerConnection>(STATELESS_MINER_SERVER);
+
+        /* Open sockets for the unified miner server and its subsystems. */
+        OpenListening<UnifiedMinerConnection>(UNIFIED_MINER_SERVER);
 
         /* Remove our protocol from suspended state once established. */
         config::fSuspendProtocol.store(false);
@@ -438,6 +462,9 @@ namespace LLP
 
         /* Release the stateless miner server and its subsystems. */
         Release<StatelessMinerConnection>(STATELESS_MINER_SERVER);
+
+        /* Release the unified miner server and its subsystems. */
+        Release<UnifiedMinerConnection>(UNIFIED_MINER_SERVER);
     }
 
 
@@ -456,10 +483,13 @@ namespace LLP
 
         uint32_t nStatelessNotifyAttempts = 0;
         uint32_t nLegacyNotifyAttempts    = 0;
+        uint32_t nUnifiedNotifyAttempts   = 0;
         uint32_t nStatelessNotified       = 0;
         uint32_t nLegacyNotified          = 0;
+        uint32_t nUnifiedNotified         = 0;
         uint32_t nStatelessDisconnected = 0;
         uint32_t nLegacyDisconnected    = 0;
+        uint32_t nUnifiedDisconnected   = 0;
 
         /* ── Phase 1: Send NODE_SHUTDOWN to ALL miners (both lanes) ──────── */
 
@@ -529,10 +559,44 @@ namespace LLP
             MINING_SERVER->NotifyEvent();
         }
 
+        /* Unified lane (both ports via single server) */
+        if(UNIFIED_MINER_SERVER)
+        {
+            auto vConns = UNIFIED_MINER_SERVER->GetConnections();
+            for(auto& pConn : vConns)
+            {
+                if(!pConn || !pConn->Connected())
+                    continue;
+
+                ++nUnifiedNotifyAttempts;
+
+                try
+                {
+                    pConn->SendNodeShutdown(GracefulShutdown::REASON_GRACEFUL);
+
+                    if(pConn->NodeShutdownSent())
+                        ++nUnifiedNotified;
+                }
+                catch(const std::exception& e)
+                {
+                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to unified miner ",
+                                 pConn->GetAddress().ToStringIP(), ": ", e.what());
+                }
+                catch(...)
+                {
+                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to unified miner ",
+                                 pConn->GetAddress().ToStringIP(), ": unknown exception");
+                }
+            }
+
+            UNIFIED_MINER_SERVER->NotifyEvent();
+        }
+
         /* ── Phase 2: Single shared flush window ─────────────────────────── */
         debug::log(0, FUNCTION, "NODE_SHUTDOWN queued for ",
-                   nStatelessNotified, "/", nStatelessNotifyAttempts, " stateless and ",
-                   nLegacyNotified, "/", nLegacyNotifyAttempts, " legacy miners; waiting ",
+                   nStatelessNotified, "/", nStatelessNotifyAttempts, " stateless, ",
+                   nLegacyNotified, "/", nLegacyNotifyAttempts, " legacy, ",
+                   nUnifiedNotified, "/", nUnifiedNotifyAttempts, " unified miners; waiting ",
                    GracefulShutdown::MINER_SHUTDOWN_FLUSH_MS, " ms for egress before disconnect");
         runtime::sleep(GracefulShutdown::MINER_SHUTDOWN_FLUSH_MS);
 
@@ -581,9 +645,32 @@ namespace LLP
             MINING_SERVER->NotifyEvent();
         }
 
+        if(UNIFIED_MINER_SERVER)
+        {
+            auto vConns = UNIFIED_MINER_SERVER->GetConnections();
+            for(auto& pConn : vConns)
+            {
+                if(!pConn || !pConn->Connected())
+                    continue;
+
+                debug::log(1, FUNCTION, "Disconnecting unified miner ",
+                           pConn->GetAddress().ToStringIP(), " after graceful shutdown wait");
+
+                if(!pConn->NodeShutdownSent())
+                    debug::warning(FUNCTION, "Disconnecting unified miner without prior NODE_SHUTDOWN state: ",
+                                   pConn->GetAddress().ToStringIP());
+
+                pConn->Disconnect();
+                ++nUnifiedDisconnected;
+            }
+
+            UNIFIED_MINER_SERVER->NotifyEvent();
+        }
+
         debug::log(0, FUNCTION, "Graceful disconnect complete: ",
                    nStatelessDisconnected, " stateless + ",
-                   nLegacyDisconnected, " legacy miners disconnected");
+                   nLegacyDisconnected, " legacy + ",
+                   nUnifiedDisconnected, " unified miners disconnected");
 
         try
         {
@@ -634,6 +721,9 @@ namespace LLP
 
         /* Shutdown the stateless miner server and its subsystems. */
         Shutdown<StatelessMinerConnection>(STATELESS_MINER_SERVER);
+
+        /* Shutdown the unified miner server and its subsystems. */
+        Shutdown<UnifiedMinerConnection>(UNIFIED_MINER_SERVER);
 
         /* Shutdown the core API server and its subsystems. */
         Shutdown<APINode>(API_SERVER);
