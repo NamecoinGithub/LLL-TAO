@@ -52,43 +52,38 @@ namespace LLP
     }
 
 
-    /* BroadcastStatelessChannel — send one channel notification to stateless lane. */
+    /* BroadcastStatelessChannel — send one channel notification to stateless lane.
+     * With unified mining server, both stateless and legacy connections are in MINING_SERVER. */
     void MinerPushDispatcher::BroadcastStatelessChannel(uint32_t nChannel,
                                                          uint32_t nHeight,
                                                          uint32_t hashPrefix4)
     {
         const char* strChannel = (nChannel == 1) ? "Prime" : "Hash";
 
-        uint32_t nStateless = 0;
-        if(LLP::STATELESS_MINER_SERVER)
-            nStateless = LLP::STATELESS_MINER_SERVER->NotifyChannelMiners(nChannel);
+        uint32_t nNotified = 0;
+        if(LLP::MINING_SERVER)
+            nNotified = LLP::MINING_SERVER->NotifyChannelMiners(nChannel);
         else
             debug::log(1, FUNCTION, "[PUSH][Stateless][", strChannel, "] Server not active");
 
         debug::log(0, FUNCTION,
                    "[PUSH][Stateless][", strChannel, "] height=", nHeight,
                    " hash=", std::hex, hashPrefix4, std::dec,
-                   " notified=", nStateless);
+                   " notified=", nNotified);
     }
 
 
-    /* BroadcastLegacyChannel — send one channel notification to legacy lane. */
+    /* BroadcastLegacyChannel — send one channel notification to legacy lane.
+     * With unified mining server, this is now a no-op since MINING_SERVER already
+     * dispatches to all connections (both protocols) via BroadcastStatelessChannel.
+     * Keep the function for API stability but avoid double-notifying. */
     void MinerPushDispatcher::BroadcastLegacyChannel(uint32_t nChannel,
                                                       uint32_t nHeight,
                                                       uint32_t hashPrefix4)
     {
-        const char* strChannel = (nChannel == 1) ? "Prime" : "Hash";
-
-        uint32_t nLegacy = 0;
-        if(LLP::MINING_SERVER)
-            nLegacy = LLP::MINING_SERVER->NotifyChannelMiners(nChannel);
-        else
-            debug::log(1, FUNCTION, "[PUSH][Legacy][", strChannel, "] Server not active");
-
-        debug::log(0, FUNCTION,
-                   "[PUSH][Legacy][", strChannel, "] height=", nHeight,
-                   " hash=", std::hex, hashPrefix4, std::dec,
-                   " notified=", nLegacy);
+        /* No-op: unified MINING_SERVER handles both protocols.
+         * BroadcastStatelessChannel already notifies all subscribed connections. */
+        debug::log(2, FUNCTION, "[PUSH][Legacy] Unified server — skipping duplicate dispatch");
     }
 
 

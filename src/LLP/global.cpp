@@ -44,7 +44,6 @@ namespace LLP
     Server<FileNode>*    FILE_SERVER;
     Server<RPCNode>*     RPC_SERVER;
     Server<Miner>*       MINING_SERVER;
-    Server<StatelessMinerConnection>* STATELESS_MINER_SERVER;
 
 
     /* Current session identifier. */
@@ -265,8 +264,10 @@ namespace LLP
         #endif
 
 
-        /* STATELESS_MINER_SERVER instance - Phase 2 Stateless Miner LLP */
-        /* This server repurposes miningport as the canonical stateless miner LLP port */
+        /* Unified MINING_SERVER — handles both stateless (port 9323) and legacy (port 8323)
+         * miners in a single Server<Miner> instance with shared DataThread pool.
+         * Protocol is auto-detected per-connection on the first byte (see Miner::ReadPacket).
+         * The legacy port can be disabled with -legacyminingport=0. */
         if(config::GetBoolArg(std::string("-mining"), false) && !config::fClient.load())
         {
             /* Load and validate mining configuration before starting server */
@@ -277,55 +278,35 @@ namespace LLP
             }
             else
             {
-                /* Generate unified config via MiningServerFactory for stateless lane */
-                LLP::Config CONFIG = MiningServerFactory::BuildConfig(
-                    MiningServerFactory::Lane::STATELESS);
+                /* Generate unified config with both ports via MiningServerFactory. */
+                LLP::Config CONFIG = MiningServerFactory::BuildUnifiedConfig();
 
-                /* Create the Phase 2 stateless miner server instance. */
-                STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(CONFIG);
+                /* Create the unified mining server instance. */
+                MINING_SERVER = new Server<Miner>(CONFIG);
 
-                debug::log(0, FUNCTION, "Phase 2 Stateless Miner LLP server started on port ", GetMiningPort());
+                /* Log startup for primary (stateless) port. */
+                debug::log(0, FUNCTION, "Unified Mining LLP server started on port ", GetMiningPort(),
+                           " (stateless 16-bit protocol auto-detected)");
+
+                /* Log startup for secondary (legacy) port if enabled. */
+                uint16_t nLegacyPort = GetLegacyMiningPort();
+                if(nLegacyPort != 0)
+                {
+                    debug::log(0, FUNCTION, "Unified Mining LLP also listening on legacy port ", nLegacyPort,
+                               " (8-bit protocol auto-detected)");
+                }
+                else
+                {
+                    debug::log(0, FUNCTION, "Legacy mining port disabled (set to 0)");
+                }
 
                 if(config::GetBoolArg(std::string("-miningssl"), false))
                 {
                     if(config::GetBoolArg(std::string("-miningsslrequired"), false))
-                        debug::log(0, FUNCTION, "Stateless Miner SSL listener on port ", GetMiningSSLPort(), " (plaintext suppressed)");
+                        debug::log(0, FUNCTION, "Mining SSL listener on port ", GetMiningSSLPort(), " (plaintext suppressed)");
                     else
-                        debug::log(0, FUNCTION, "Stateless Miner SSL listener on port ", GetMiningSSLPort(), " (plaintext also open on port ", GetMiningPort(), ")");
+                        debug::log(0, FUNCTION, "Mining SSL listener on port ", GetMiningSSLPort(), " (plaintext also open)");
                 }
-            }
-        }
-
-        /* MINING_SERVER instance - Legacy hybrid stateful/stateless miner (optional) */
-        /* This can be enabled on a different port if needed for backward compatibility */
-        /* With -mining=1, legacy server now starts by default unless explicitly disabled */
-        if(config::GetBoolArg(std::string("-mining"), false) &&
-           !config::fClient.load())
-        {
-            /* Check if legacy mining port is explicitly disabled (set to 0) */
-            uint16_t nLegacyPort = GetLegacyMiningPort();
-            if(nLegacyPort != 0)
-            {
-                /* Generate unified config via MiningServerFactory for legacy lane */
-                LLP::Config LEGACY_CONFIG = MiningServerFactory::BuildConfig(
-                    MiningServerFactory::Lane::LEGACY);
-
-                /* Create the legacy miner server instance. */
-                MINING_SERVER = new Server<Miner>(LEGACY_CONFIG);
-
-                debug::log(0, FUNCTION, "Legacy Mining LLP server started on port ", nLegacyPort);
-
-                if(config::GetBoolArg(std::string("-miningssl"), false))
-                {
-                    if(config::GetBoolArg(std::string("-miningsslrequired"), false))
-                        debug::log(0, FUNCTION, "Legacy Miner SSL listener on port ", GetLegacyMiningSSLPort(), " (plaintext suppressed)");
-                    else
-                        debug::log(0, FUNCTION, "Legacy Miner SSL listener on port ", GetLegacyMiningSSLPort(), " (plaintext also open on port ", nLegacyPort, ")");
-                }
-            }
-            else
-            {
-                debug::log(0, FUNCTION, "Legacy Mining LLP server disabled (port set to 0)");
             }
         }
 
@@ -365,9 +346,6 @@ namespace LLP
         /* Close sockets for the mining server and its subsystems. */
         CloseSockets<Miner>(MINING_SERVER);
 
-        /* Close sockets for the stateless miner server and its subsystems. */
-        CloseSockets<StatelessMinerConnection>(STATELESS_MINER_SERVER);
-
     }
 
 
@@ -398,9 +376,6 @@ namespace LLP
 
         /* Open sockets for the mining server and its subsystems. */
         OpenListening<Miner>(MINING_SERVER);
-
-        /* Open sockets for the stateless miner server and its subsystems. */
-        OpenListening<StatelessMinerConnection>(STATELESS_MINER_SERVER);
 
         /* Remove our protocol from suspended state once established. */
         config::fSuspendProtocol.store(false);
@@ -435,9 +410,6 @@ namespace LLP
 
         /* Release the mining server and its subsystems. */
         Release<Miner>(MINING_SERVER);
-
-        /* Release the stateless miner server and its subsystems. */
-        Release<StatelessMinerConnection>(STATELESS_MINER_SERVER);
     }
 
 
@@ -454,49 +426,11 @@ namespace LLP
     {
         debug::log(0, FUNCTION, "Sending graceful disconnect to all connected miners...");
 
-        uint32_t nStatelessNotifyAttempts = 0;
-        uint32_t nLegacyNotifyAttempts    = 0;
-        uint32_t nStatelessNotified       = 0;
-        uint32_t nLegacyNotified          = 0;
-        uint32_t nStatelessDisconnected = 0;
-        uint32_t nLegacyDisconnected    = 0;
+        uint32_t nNotifyAttempts = 0;
+        uint32_t nNotified       = 0;
+        uint32_t nDisconnected   = 0;
 
-        /* ── Phase 1: Send NODE_SHUTDOWN to ALL miners (both lanes) ──────── */
-
-        /* Stateless lane (port 9323) */
-        if(STATELESS_MINER_SERVER)
-        {
-            auto vConns = STATELESS_MINER_SERVER->GetConnections();
-            for(auto& pConn : vConns)
-            {
-                if(!pConn || !pConn->Connected())
-                    continue;
-
-                ++nStatelessNotifyAttempts;
-
-                try
-                {
-                    pConn->SendNodeShutdown(GracefulShutdown::REASON_GRACEFUL);
-
-                    if(pConn->NodeShutdownSent())
-                        ++nStatelessNotified;
-                }
-                catch(const std::exception& e)
-                {
-                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to stateless miner ",
-                                 pConn->GetAddress().ToStringIP(), ": ", e.what());
-                }
-                catch(...)
-                {
-                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to stateless miner ",
-                                 pConn->GetAddress().ToStringIP(), ": unknown exception");
-                }
-            }
-
-            STATELESS_MINER_SERVER->NotifyEvent();
-        }
-
-        /* Legacy lane (port 8323) */
+        /* ── Phase 1: Send NODE_SHUTDOWN to ALL miners ──────────────────── */
         if(MINING_SERVER)
         {
             auto vConns = MINING_SERVER->GetConnections();
@@ -505,23 +439,23 @@ namespace LLP
                 if(!pConn || !pConn->Connected())
                     continue;
 
-                ++nLegacyNotifyAttempts;
+                ++nNotifyAttempts;
 
                 try
                 {
                     pConn->SendNodeShutdown(GracefulShutdown::REASON_GRACEFUL);
 
                     if(pConn->NodeShutdownSent())
-                        ++nLegacyNotified;
+                        ++nNotified;
                 }
                 catch(const std::exception& e)
                 {
-                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to legacy miner ",
+                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to miner ",
                                  pConn->GetAddress().ToStringIP(), ": ", e.what());
                 }
                 catch(...)
                 {
-                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to legacy miner ",
+                    debug::error(FUNCTION, "Failed to send NODE_SHUTDOWN to miner ",
                                  pConn->GetAddress().ToStringIP(), ": unknown exception");
                 }
             }
@@ -531,34 +465,11 @@ namespace LLP
 
         /* ── Phase 2: Single shared flush window ─────────────────────────── */
         debug::log(0, FUNCTION, "NODE_SHUTDOWN queued for ",
-                   nStatelessNotified, "/", nStatelessNotifyAttempts, " stateless and ",
-                   nLegacyNotified, "/", nLegacyNotifyAttempts, " legacy miners; waiting ",
+                   nNotified, "/", nNotifyAttempts, " miners; waiting ",
                    GracefulShutdown::MINER_SHUTDOWN_FLUSH_MS, " ms for egress before disconnect");
         runtime::sleep(GracefulShutdown::MINER_SHUTDOWN_FLUSH_MS);
 
         /* ── Phase 3: Hard-disconnect all miners and wake DataThreads ────── */
-        if(STATELESS_MINER_SERVER)
-        {
-            auto vConns = STATELESS_MINER_SERVER->GetConnections();
-            for(auto& pConn : vConns)
-            {
-                if(!pConn || !pConn->Connected())
-                    continue;
-
-                debug::log(1, FUNCTION, "Disconnecting stateless miner ",
-                           pConn->GetAddress().ToStringIP(), " after graceful shutdown wait");
-
-                if(!pConn->NodeShutdownSent())
-                    debug::warning(FUNCTION, "Disconnecting stateless miner without prior NODE_SHUTDOWN state: ",
-                                   pConn->GetAddress().ToStringIP());
-
-                pConn->Disconnect();
-                ++nStatelessDisconnected;
-            }
-
-            STATELESS_MINER_SERVER->NotifyEvent();
-        }
-
         if(MINING_SERVER)
         {
             auto vConns = MINING_SERVER->GetConnections();
@@ -567,23 +478,22 @@ namespace LLP
                 if(!pConn || !pConn->Connected())
                     continue;
 
-                debug::log(1, FUNCTION, "Disconnecting legacy miner ",
+                debug::log(1, FUNCTION, "Disconnecting miner ",
                            pConn->GetAddress().ToStringIP(), " after graceful shutdown wait");
 
                 if(!pConn->NodeShutdownSent())
-                    debug::warning(FUNCTION, "Disconnecting legacy miner without prior NODE_SHUTDOWN state: ",
+                    debug::warning(FUNCTION, "Disconnecting miner without prior NODE_SHUTDOWN state: ",
                                    pConn->GetAddress().ToStringIP());
 
                 pConn->RequestShutdown();
-                ++nLegacyDisconnected;
+                ++nDisconnected;
             }
 
             MINING_SERVER->NotifyEvent();
         }
 
         debug::log(0, FUNCTION, "Graceful disconnect complete: ",
-                   nStatelessDisconnected, " stateless + ",
-                   nLegacyDisconnected, " legacy miners disconnected");
+                   nDisconnected, " miners disconnected");
 
         try
         {
@@ -631,9 +541,6 @@ namespace LLP
 
         /* Shutdown the mining server and its subsystems. */
         Shutdown<Miner>(MINING_SERVER);
-
-        /* Shutdown the stateless miner server and its subsystems. */
-        Shutdown<StatelessMinerConnection>(STATELESS_MINER_SERVER);
 
         /* Shutdown the core API server and its subsystems. */
         Shutdown<APINode>(API_SERVER);

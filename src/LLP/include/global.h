@@ -25,7 +25,6 @@ ________________________________________________________________________________
 #include <LLP/types/lookup.h>
 #include <LLP/types/rpcnode.h>
 #include <LLP/types/miner.h>
-#include <LLP/types/stateless_miner_connection.h>
 
 namespace LLP
 {
@@ -41,7 +40,6 @@ namespace LLP
     extern Server<FileNode>*                FILE_SERVER;
     extern Server<RPCNode>*                 RPC_SERVER;
     extern Server<Miner>*                   MINING_SERVER;
-    extern Server<StatelessMinerConnection>* STATELESS_MINER_SERVER;
 
 
     /** Current session identifier. **/

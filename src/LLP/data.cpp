@@ -286,14 +286,13 @@ namespace LLP
         const uint32_t nWait  = config::GetArg("-llpwait", 1);
 
         /* Determine the poll() timeout for this DataThread at startup.
-         * Mining DataThreads (Miner, StatelessMinerConnection) use a much
+         * Mining DataThreads (Miner) use a much
          * shorter timeout (default 10 ms, configurable via -miningpolltimeout)
          * to minimize read-side latency for incoming share submissions.
          * Non-mining DataThreads keep the traditional 100 ms timeout.
          * Resolved at compile time — zero runtime cost. */
         constexpr bool fMiningThread =
-            std::is_same<ProtocolType, Miner>::value
-            || std::is_same<ProtocolType, StatelessMinerConnection>::value;
+            std::is_same<ProtocolType, Miner>::value;
 
         const int32_t nPollTimeout = fMiningThread
             ? static_cast<int32_t>(config::GetArg("-miningpolltimeout",
@@ -410,8 +409,7 @@ namespace LLP
                     static_cast<int64_t>(DEFAULT_LLP_TIME_BUDGET_MS)));
 
             constexpr bool fMiningProtocol =
-                std::is_same<ProtocolType, Miner>::value
-                || std::is_same<ProtocolType, StatelessMinerConnection>::value;
+                std::is_same<ProtocolType, Miner>::value;
 
             /* Check all connections for data and packets. */
             for(uint32_t nIndex = 0; nIndex < nSize; ++nIndex)
@@ -428,10 +426,11 @@ namespace LLP
                     if(!CONNECTION || !CONNECTION->Connected())
                         continue;
                     
-                    /* Detect stateless Miner connections for special handling.
-                     * All Miner connections now use stateless protocol (no session required).
+                    /* Detect Miner connections for special handling.
+                     * The unified mining server handles both legacy (8-bit) and stateless (16-bit)
+                     * protocols within the Miner connection type via protocol detection.
                      * Resolved at compile time since ProtocolType is a template parameter. */
-                    constexpr bool fStatelessMiner = std::is_same<ProtocolType, Miner>::value;
+                    constexpr bool fMinerType = std::is_same<ProtocolType, Miner>::value;
                     
                     /* Log data thread connection assignment at verbose level 3. */
                     if(config::nVerbose.load() >= 3 && CONNECTION->PacketComplete())
@@ -439,7 +438,7 @@ namespace LLP
                         debug::log(3, FUNCTION, "DataThread[", ID, "]: Processing connection id=", nIndex, 
                                    " type=", ProtocolType::Name(), 
                                    " from ", CONNECTION->GetAddress().ToStringIP(), ":", CONNECTION->GetAddress().GetPort(),
-                                   " stateless=", (fStatelessMiner ? "true" : "false"));
+                                   " mining=", (fMinerType ? "true" : "false"));
                     }
 
                     /* Disconnect if there was a polling error */
@@ -493,8 +492,7 @@ namespace LLP
                     const bool fHasPartialPacket =
                         !CONNECTION->INCOMING.IsNull() && !CONNECTION->PacketComplete();
                     const bool fMiningConnection =
-                        std::is_same<ProtocolType, Miner>::value
-                        || std::is_same<ProtocolType, StatelessMinerConnection>::value;
+                        std::is_same<ProtocolType, Miner>::value;
                     const bool fTimeoutExempt = CONNECTION->IsTimeoutExempt();
                     const uint32_t nPollEmptyTimeout =
                         fMiningConnection ? MINING_POLL_EMPTY_TIMEOUT_MS : nWait;
@@ -671,12 +669,10 @@ namespace LLP
                     bool fSessionError = (strError.find("Session not found") != std::string::npos);
                     
                     /* Check if this is a mining connection (stateless protocol doesn't use TAO API sessions).
-                     * CRITICAL: Stateless mining can happen on two server types:
-                     * 1. MINING_SERVER (port 9325) - uses Miner class (thin wrapper to StatelessMiner)
-                     * 2. STATELESS_MINER_SERVER (port 8323) - uses StatelessMinerConnection class
-                     * Both should be allowed to continue even if legacy code tries to access sessions. */
+                     * The unified MINING_SERVER handles both stateless (16-bit) and legacy (8-bit)
+                     * connections via protocol detection in Miner::ReadPacket(). */
                     std::string strProtocol = ProtocolType::Name();
-                    bool fMiningConnection = (strProtocol == "Miner" || strProtocol == "StatelessMiner");
+                    bool fMiningConnection = (strProtocol == "Miner");
                     
                     /* Allow mining connections to proceed even without TAO API session.
                      * The stateless mining protocol uses MiningContext state tracked by
@@ -1001,5 +997,4 @@ namespace LLP
     template class DataThread<FileNode>;
     template class DataThread<RPCNode>;
     template class DataThread<Miner>;
-    template class DataThread<StatelessMinerConnection>;
 }

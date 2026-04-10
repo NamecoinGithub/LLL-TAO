@@ -500,9 +500,9 @@ namespace LLP
         /* Use compile-time check to only execute for protocols that support mining notifications */
         if constexpr (has_mining_notifications_v<ProtocolType>)
         {
-            /* Determine lane name at compile time for clear per-lane logging */
-            constexpr const char* strLane =
-                std::is_same_v<ProtocolType, StatelessMinerConnection> ? "Stateless" : "Legacy";
+            /* With unified mining server, all connections are Miner type.
+             * Protocol detection (stateless vs legacy) happens per-connection. */
+            constexpr const char* strLane = "Unified";
 
             /* Early exit if shutdown is in progress */
             if (config::fShutdown.load())

@@ -44,30 +44,24 @@ namespace LLP
      *  ======
      *  In global.cpp Initialize():
      *
-     *    // Stateless lane
+     *    // Unified mining server (both stateless and legacy)
+     *    LLP::Config CONFIG = MiningServerFactory::BuildUnifiedConfig();
+     *    MINING_SERVER = new Server<Miner>(CONFIG);
+     *
+     *    // Or for a specific lane only:
      *    LLP::Config CONFIG = MiningServerFactory::BuildConfig(
      *        MiningServerFactory::Lane::STATELESS);
-     *    STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(CONFIG);
-     *
-     *    // Legacy lane
-     *    LLP::Config LEGACY_CONFIG = MiningServerFactory::BuildConfig(
-     *        MiningServerFactory::Lane::LEGACY);
-     *    MINING_SERVER = new Server<Miner>(LEGACY_CONFIG);
+     *    MINING_SERVER = new Server<Miner>(CONFIG);
      *
      *  USAGE (SSL-enabled):
      *  ====================
      *  When -miningssl=1 is set, BuildConfig() automatically wires PORT_SSL.
      *  BuildSSLConfig() can be used for explicit SSL-only server construction:
      *
-     *    // Stateless SSL lane (port 9325)
+     *    // Mining SSL (port 9325)
      *    LLP::Config cfg = MiningServerFactory::BuildSSLConfig(
      *        MiningServerFactory::Lane::STATELESS);
-     *    STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(cfg);
-     *
-     *    // Legacy SSL lane (port 8325) — guaranteed clean reconnect
-     *    LLP::Config legacy_cfg = MiningServerFactory::BuildSSLConfig(
-     *        MiningServerFactory::Lane::LEGACY);
-     *    MINING_SERVER = new Server<Miner>(legacy_cfg);
+     *    MINING_SERVER = new Server<Miner>(cfg);
      *
      *  LANE DIFFERENCES:
      *  =================
@@ -194,15 +188,9 @@ namespace LLP
          *
          *  Example Usage:
          *  --------------
-         *  // Stateless mining server
-         *  LLP::Config cfg = MiningServerFactory::BuildConfig(
-         *      MiningServerFactory::Lane::STATELESS);
-         *  STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(cfg);
-         *
-         *  // Legacy mining server
-         *  LLP::Config legacy_cfg = MiningServerFactory::BuildConfig(
-         *      MiningServerFactory::Lane::LEGACY);
-         *  MINING_SERVER = new Server<Miner>(legacy_cfg);
+         *  // Unified mining server
+         *  LLP::Config cfg = MiningServerFactory::BuildUnifiedConfig();
+         *  MINING_SERVER = new Server<Miner>(cfg);
          *
          **/
         static LLP::Config BuildConfig(Lane lane)
@@ -304,6 +292,36 @@ namespace LLP
                 GetMiningSSLPort() : GetLegacyMiningSSLPort();
 
             return cfg;
+        }
+
+
+        /** BuildUnifiedConfig
+         *
+         *  Build a single mining server configuration that listens on both the stateless
+         *  port (PORT_BASE, default 9323) and the legacy port (PORT_SECONDARY, default 8323).
+         *
+         *  This enables a single Server<Miner> instance to accept connections from both
+         *  legacy 8-bit and stateless 16-bit miners in one shared DataThread pool.
+         *  Protocol detection happens per-connection on the first byte: 0xD0 → stateless,
+         *  otherwise → legacy.
+         *
+         *  The legacy port can be disabled by setting -legacyminingport=0, in which case
+         *  PORT_SECONDARY is set to 0 and no secondary listener is created.
+         *
+         *  @return LLP::Config with PORT_BASE=stateless port and PORT_SECONDARY=legacy port
+         *
+         **/
+        static LLP::Config BuildUnifiedConfig()
+        {
+            /* Build base config from the STATELESS lane (primary port = 9323). */
+            LLP::Config CONFIG = BuildConfig(Lane::STATELESS);
+
+            /* Set the secondary port to the legacy mining port (default 8323).
+             * A value of 0 means the user explicitly disabled the legacy port. */
+            uint16_t nLegacyPort = GetLegacyMiningPort();
+            CONFIG.PORT_SECONDARY = nLegacyPort;
+
+            return CONFIG;
         }
     };
 

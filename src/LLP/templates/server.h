@@ -257,7 +257,7 @@ namespace LLP
          *
          *  @return Number of miners that were notified on this lane.
          *
-         *  @note This method is only meaningful for StatelessMinerConnection and Miner servers.
+         *  @note This method is only meaningful for Miner servers (unified mining).
          *        For other protocol types, it will be a no-op that returns 0.
          *
          **/
