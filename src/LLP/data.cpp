@@ -430,7 +430,7 @@ namespace LLP
                      * The unified mining server handles both legacy (8-bit) and stateless (16-bit)
                      * protocols within the Miner connection type via protocol detection.
                      * Resolved at compile time since ProtocolType is a template parameter. */
-                    constexpr bool fMinerType = std::is_same<ProtocolType, Miner>::value;
+                    constexpr bool fIsMiner = std::is_same<ProtocolType, Miner>::value;
                     
                     /* Log data thread connection assignment at verbose level 3. */
                     if(config::nVerbose.load() >= 3 && CONNECTION->PacketComplete())
@@ -438,7 +438,7 @@ namespace LLP
                         debug::log(3, FUNCTION, "DataThread[", ID, "]: Processing connection id=", nIndex, 
                                    " type=", ProtocolType::Name(), 
                                    " from ", CONNECTION->GetAddress().ToStringIP(), ":", CONNECTION->GetAddress().GetPort(),
-                                   " mining=", (fMinerType ? "true" : "false"));
+                                   " mining=", (fIsMiner ? "true" : "false"));
                     }
 
                     /* Disconnect if there was a polling error */
