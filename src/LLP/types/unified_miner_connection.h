@@ -22,6 +22,7 @@ ________________________________________________________________________________
 #include <LLP/include/auto_cooldown.h>
 #include <LLP/include/get_block_policy.h>
 #include <LLP/include/mining_constants.h>
+#include <LLP/include/push_notification.h>
 #include <TAO/Ledger/types/block.h>
 #include <atomic>
 #include <chrono>
@@ -60,16 +61,9 @@ namespace LLP
     {
     public:
 
-        /** ProtocolLane
-         *
-         *  Immutable after EVENTS::CONNECT. Determines packet framing and opcode range.
-         *
-         **/
-        enum class ProtocolLane
-        {
-            STATELESS,  // 16-bit framing, port 9323/9325
-            LEGACY      // 8-bit framing, port 8323/8325
-        };
+        /** Uses the existing LLP::ProtocolLane enum from push_notification.h
+         *  (STATELESS = port 9323, LEGACY = port 8323).
+         *  Set once at EVENTS::CONNECT, immutable thereafter. **/
 
 
         /** Default Constructor **/

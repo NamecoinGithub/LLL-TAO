@@ -280,7 +280,7 @@ namespace LLP
                     LOCK(MUTEX);
                     if(context.fAuthenticated)
                     {
-                        StatelessMinerManager::Get().UnregisterMiner(context.hashKeyID);
+                        StatelessMinerManager::Get().RemoveMinerByKeyID(context.hashKeyID);
                     }
                 }
 
@@ -516,7 +516,7 @@ namespace LLP
                 auto tElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     tNow - m_last_template_push_time).count();
 
-                if(tElapsed < MiningConstants::PUSH_THROTTLE_MIN_INTERVAL_MS)
+                if(tElapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
                 {
                     debug::log(3, FUNCTION, "Push throttled for ",
                                GetAddress().ToStringIP(), " (", tElapsed, "ms since last)");
@@ -529,7 +529,7 @@ namespace LLP
         }
 
         /* Must be authenticated and subscribed */
-        if(!ctxSnap.fAuthenticated || !ctxSnap.fSubscribed)
+        if(!ctxSnap.fAuthenticated || !ctxSnap.fSubscribedToNotifications)
             return;
 
         debug::log(2, FUNCTION, "Push notification sent to ",
@@ -566,7 +566,7 @@ namespace LLP
         PACKET.DATA[1] = static_cast<uint8_t>((nReasonCode >> 16) & 0xFF);
         PACKET.DATA[2] = static_cast<uint8_t>((nReasonCode >>  8) & 0xFF);
         PACKET.DATA[3] = static_cast<uint8_t>((nReasonCode      ) & 0xFF);
-        PACKET.SetLength();
+        PACKET.LENGTH = static_cast<uint32_t>(PACKET.DATA.size());
 
         QueuePacket(PACKET);
 
@@ -640,14 +640,6 @@ namespace LLP
     /** clear_map **/
     void UnifiedMinerConnection::clear_map()
     {
-        for(auto& entry : mapBlocks)
-        {
-            if(entry.second.pBlock)
-            {
-                delete entry.second.pBlock;
-                entry.second.pBlock = nullptr;
-            }
-        }
         mapBlocks.clear();
     }
 

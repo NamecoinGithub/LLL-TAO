@@ -1131,10 +1131,11 @@ namespace LLP
                     DataThread<ProtocolType> *dt = THREADS_DATA[nThread];
 
                     /* Accept an incoming connection.
-                     * Pass nListenPort as a variadic arg — the ProtocolType constructor
-                     * can use it for lane detection (e.g. UnifiedMinerConnection). */
-                    if(nListenPort != 0)
-                        dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr, false, nListenPort);
+                     * For UnifiedMinerConnection: pass nListenPort as a variadic arg
+                     * so the constructor can determine the protocol lane.
+                     * For other protocol types: use the standard 0-arg call. */
+                    if constexpr (std::is_same_v<ProtocolType, UnifiedMinerConnection>)
+                        dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr, nListenPort);
                     else
                         dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr);
 

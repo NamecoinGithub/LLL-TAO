@@ -330,6 +330,8 @@ namespace LLP
         std::map<message_t, Trigger*> TRIGGERS;
 
 
+    protected:
+
         /** Mutex to protect the outgoing packet queue. **/
         std::mutex OUTGOING_MUTEX;
 
