@@ -53,7 +53,7 @@ namespace LLP
          *  Regular Connection Read Packet Method.
          *
          **/
-        void ReadPacket() final;
+        virtual void ReadPacket();
 
     };
 }

@@ -457,9 +457,15 @@ namespace LLP
         uint256_t            hashKeyID = 0;      // Falcon key hash for cross-lane disconnect tracking (0 = unauthenticated)
 
         /* Protocol lane detection flag.
-         * Set to true after successful Falcon authentication handshake.
-         * When true, respond_auto() uses 16-bit stateless framing; otherwise 8-bit legacy. */
+         * Set to true on first byte detection (0xD0) or after Falcon auth.
+         * When true, ReadPacket() uses 16-bit stateless framing and
+         * respond_auto() uses 16-bit stateless framing; otherwise 8-bit legacy. */
         bool                 fStatelessProtocol{false};
+
+        /* Tracks whether the first 0xD0 prefix byte of a 16-bit header has been consumed
+         * during protocol detection but the second byte hasn't arrived yet.
+         * Only relevant during the very first packet; reset once the full header is read. */
+        bool                 fStatelessHeaderPartial{false};
 
         /* ChaCha20 encryption state (established after Falcon auth) */
         std::vector<uint8_t> vChaChaKey;         // ChaCha20 session key
@@ -560,6 +566,22 @@ namespace LLP
          {
              return "Miner";
          }
+
+
+        /** ReadPacket
+         *
+         *  Protocol-detecting packet reader.
+         *
+         *  On the first byte of a new connection, detects whether the client
+         *  speaks legacy 8-bit LLP (any opcode except 0xD0) or stateless 16-bit
+         *  LLP (first byte == 0xD0).  Once detected, sets fStatelessProtocol
+         *  and reads the appropriate framing for the life of the connection.
+         *
+         *  Legacy framing:   HEADER (1 byte) + LENGTH (4 bytes BE) + DATA
+         *  Stateless framing: HEADER (2 bytes BE) + LENGTH (4 bytes BE) + DATA
+         *
+         **/
+        void ReadPacket() override;
 
 
         /** Event

@@ -288,10 +288,170 @@ namespace LLP
         vAuthNonce.clear();
         fMinerAuthenticated = false;
         fStatelessProtocol = false;
+        fStatelessHeaderPartial = false;
         hashKeyID = 0;
 
         /* Send a notification to wake up sleeping thread to finish shutdown process. */
         this->NotifyEvent();
+    }
+
+
+    /* Protocol-detecting ReadPacket for unified mining server.
+     *
+     * On the very first byte of the connection (when INCOMING is null and the
+     * protocol is unknown), peeks at byte[0]:
+     *   - 0xD0 → stateless 16-bit framing (sets fStatelessProtocol = true)
+     *   - anything else → legacy 8-bit framing
+     *
+     * Once the protocol is detected, all subsequent packets on this connection
+     * use the detected framing.  Stateless connections read 2-byte big-endian
+     * headers; legacy connections read 1-byte headers.
+     *
+     * This enables a single Server<Miner> to accept both legacy (port 8323) and
+     * stateless (port 9323) miners in one shared DataThread pool. */
+    void Miner::ReadPacket()
+    {
+        /* ── Stateless 16-bit framing ──
+         * Once detected (fStatelessProtocol == true), all packets on this
+         * connection use the 2-byte header format. */
+        if(fStatelessProtocol)
+        {
+            /* Handle partial header: we consumed the 0xD0 prefix byte during
+             * protocol detection but the second byte wasn't available yet. */
+            if(fStatelessHeaderPartial && INCOMING.IsNull())
+            {
+                if(Available() >= 1)
+                {
+                    std::vector<uint8_t> HEADER2(1, 0);
+                    if(Read(HEADER2, 1) == 1)
+                    {
+                        uint16_t nOpcode = (static_cast<uint16_t>(0xD0) << 8)
+                                         | static_cast<uint16_t>(HEADER2[0]);
+                        INCOMING.HEADER = OpcodeUtility::Stateless::Unmirror(nOpcode);
+                        fStatelessHeaderPartial = false;
+                    }
+                }
+                else
+                {
+                    return; /* Still waiting for byte[1] */
+                }
+            }
+
+            /* Read 16-bit HEADER (big-endian) for subsequent packets. */
+            if(Available() >= 2 && INCOMING.IsNull())
+            {
+                std::vector<uint8_t> HEADER(2, 0);
+                if(Read(HEADER, 2) == 2)
+                {
+                    uint16_t nOpcode = (static_cast<uint16_t>(HEADER[0]) << 8)
+                                     | static_cast<uint16_t>(HEADER[1]);
+                    INCOMING.HEADER = OpcodeUtility::Stateless::Unmirror(nOpcode);
+                }
+            }
+
+            /* Read the packet length (4 bytes, big-endian) — same as legacy. */
+            if(Available() >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
+            {
+                std::vector<uint8_t> BYTES(4, 0);
+                if(Read(BYTES, 4) == 4)
+                {
+                    INCOMING.SetLength(BYTES);
+                    Event(EVENTS::HEADER);
+                }
+            }
+
+            /* Read payload data — same as legacy. */
+            uint32_t nAvailable = Available();
+            if(INCOMING.Header() && nAvailable > 0
+               && !INCOMING.IsNull() && INCOMING.DATA.size() < INCOMING.LENGTH)
+            {
+                uint32_t nMaxRead = static_cast<uint32_t>(INCOMING.LENGTH - INCOMING.DATA.size());
+                std::vector<uint8_t> DATA(std::min(nAvailable, nMaxRead), 0);
+
+                int32_t nRead = Read(DATA, DATA.size());
+                if(nRead > 0)
+                    INCOMING.DATA.insert(INCOMING.DATA.end(), DATA.begin(), DATA.begin() + nRead);
+
+                if(INCOMING.Complete())
+                    Event(EVENTS::PACKET, static_cast<uint32_t>(DATA.size()));
+            }
+
+            return;
+        }
+
+        /* ── Protocol detection on first byte ──
+         * The very first byte of any client connection disambiguates:
+         *   0xD0 (208) → stateless 16-bit protocol
+         *   anything else → legacy 8-bit protocol
+         *
+         * Legacy opcode 208 = MINER_AUTH_CHALLENGE, which is a server→miner
+         * opcode — never sent by a client as the first byte. */
+        if(Available() >= 1 && INCOMING.IsNull())
+        {
+            std::vector<uint8_t> HEADER(1, 255);
+            if(Read(HEADER, 1) == 1)
+            {
+                if(HEADER[0] == 0xD0)
+                {
+                    /* First byte is 0xD0 → stateless 16-bit protocol. */
+                    fStatelessProtocol = true;
+
+                    debug::log(2, FUNCTION, "Detected stateless 16-bit protocol from ",
+                               GetAddress().ToStringIP());
+
+                    /* Try to read byte[1] immediately if available. */
+                    if(Available() >= 1)
+                    {
+                        std::vector<uint8_t> HEADER2(1, 0);
+                        if(Read(HEADER2, 1) == 1)
+                        {
+                            uint16_t nOpcode = (static_cast<uint16_t>(0xD0) << 8)
+                                             | static_cast<uint16_t>(HEADER2[0]);
+                            INCOMING.HEADER = OpcodeUtility::Stateless::Unmirror(nOpcode);
+                        }
+                    }
+                    else
+                    {
+                        /* Byte[1] not yet available.  Flag partial header so the
+                         * stateless branch completes the read on the next call. */
+                        fStatelessHeaderPartial = true;
+                    }
+
+                    return;
+                }
+
+                /* Not 0xD0 → legacy 8-bit protocol. Set the header normally. */
+                INCOMING.HEADER = HEADER[0];
+            }
+        }
+
+        /* ── Legacy 8-bit framing (remainder) ── */
+
+        /* Read the packet length. */
+        if(Available() >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
+        {
+            std::vector<uint8_t> BYTES(4, 0);
+            if(Read(BYTES, 4) == 4)
+            {
+                INCOMING.SetLength(BYTES);
+                Event(EVENTS::HEADER);
+            }
+        }
+
+        /* Handle Reading Packet Data. */
+        uint32_t nAvailable = Available();
+        if(INCOMING.Header() && nAvailable > 0 && !INCOMING.IsNull() && INCOMING.DATA.size() < INCOMING.LENGTH)
+        {
+            uint32_t nMaxRead = (uint32_t)(INCOMING.LENGTH - INCOMING.DATA.size());
+            std::vector<uint8_t> DATA(std::min(nAvailable, nMaxRead), 0);
+
+            int32_t nRead = Read(DATA, DATA.size());
+            if(nRead > 0)
+                INCOMING.DATA.insert(INCOMING.DATA.end(), DATA.begin(), DATA.begin() + nRead);
+
+            if(INCOMING.Complete())
+                Event(EVENTS::PACKET, static_cast<uint32_t>(DATA.size()));
+        }
     }
 
 

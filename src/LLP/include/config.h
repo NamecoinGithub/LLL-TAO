@@ -58,6 +58,13 @@ namespace LLP
         uint16_t PORT_BASE;
 
 
+        /** Secondary plaintext port (0 = disabled).
+         *  Used by the unified mining server to listen on both the stateless
+         *  port (PORT_BASE, default 9323) and the legacy port (PORT_SECONDARY,
+         *  default 8323) simultaneously with a single DataThread pool. **/
+        uint16_t PORT_SECONDARY;
+
+
         /** Port the server should listen on for SSL connections **/
         uint16_t PORT_SSL;
 
@@ -109,6 +116,7 @@ namespace LLP
         , ENABLE_REMOTE   (false)
         , REQUIRE_SSL     (false)
         , PORT_BASE       (nPort)
+        , PORT_SECONDARY  (0)    //default: disabled (no secondary port)
         , PORT_SSL        (0)    //note: this should be an invalid port to bind to
         , MAX_INCOMING    (317)
         , MAX_CONNECTIONS (333)
@@ -133,6 +141,7 @@ namespace LLP
         , ENABLE_REMOTE   (config.ENABLE_REMOTE)
         , REQUIRE_SSL     (config.REQUIRE_SSL)
         , PORT_BASE       (config.PORT_BASE)
+        , PORT_SECONDARY  (config.PORT_SECONDARY)
         , PORT_SSL        (config.PORT_SSL)
         , MAX_INCOMING    (config.MAX_INCOMING)
         , MAX_CONNECTIONS (config.MAX_CONNECTIONS)
@@ -159,6 +168,7 @@ namespace LLP
         , ENABLE_REMOTE   (std::move(config.ENABLE_REMOTE))
         , REQUIRE_SSL     (std::move(config.REQUIRE_SSL))
         , PORT_BASE       (std::move(config.PORT_BASE))
+        , PORT_SECONDARY  (std::move(config.PORT_SECONDARY))
         , PORT_SSL        (std::move(config.PORT_SSL))
         , MAX_INCOMING    (std::move(config.MAX_INCOMING))
         , MAX_CONNECTIONS (std::move(config.MAX_CONNECTIONS))
@@ -186,6 +196,7 @@ namespace LLP
             ENABLE_REMOTE   = config.ENABLE_REMOTE;
             REQUIRE_SSL     = config.REQUIRE_SSL;
             PORT_BASE       = config.PORT_BASE;
+            PORT_SECONDARY  = config.PORT_SECONDARY;
             PORT_SSL        = config.PORT_SSL;
             MAX_INCOMING    = config.MAX_INCOMING;
             MAX_CONNECTIONS = config.MAX_CONNECTIONS;
@@ -215,6 +226,7 @@ namespace LLP
             ENABLE_REMOTE   = std::move(config.ENABLE_REMOTE);
             REQUIRE_SSL     = std::move(config.REQUIRE_SSL);
             PORT_BASE       = std::move(config.PORT_BASE);
+            PORT_SECONDARY  = std::move(config.PORT_SECONDARY);
             PORT_SSL        = std::move(config.PORT_SSL);
             MAX_INCOMING    = std::move(config.MAX_INCOMING);
             MAX_CONNECTIONS = std::move(config.MAX_CONNECTIONS);

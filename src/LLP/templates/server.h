@@ -68,6 +68,11 @@ namespace LLP
         std::pair<int32_t, int32_t> hListenBase;
 
 
+        /** The listener socket for the secondary plaintext port (0 = disabled).
+         *  Used by the unified mining server to accept connections on a second port. **/
+        std::pair<int32_t, int32_t> hListenSecondary;
+
+
         /** The listener socket instance. **/
         std::pair<int32_t, int32_t> hListenSSL;
 
@@ -438,9 +443,10 @@ namespace LLP
          *
          *  @param[in] fIPv4 Flag indicating to listen on the IPv4 interface
          *  @param[in] fSSL Flag indicating that connections should use SSL
+         *  @param[in] fSecondary Flag indicating to listen on the secondary port (PORT_SECONDARY)
          *
          **/
-        void ListeningThread(bool fIPv4, bool fSSL);
+        void ListeningThread(bool fIPv4, bool fSSL, bool fSecondary = false);
 
 
         /** BindListenPort
@@ -480,13 +486,14 @@ namespace LLP
          *
          *  Gets the listening socket handle
          *
-         *  @param[in] nPort The port to listen on
          *  @param[in] fIPv4 Flag indicating the connection is IPv4
+         *  @param[in] fSSL Flag indicating the connection is SSL
+         *  @param[in] fSecondary Flag indicating the secondary port socket
          *
          *  @return the listening socket handle
          *
          **/
-        SOCKET get_listening_socket(bool fIPv4, bool fSSL);
+        SOCKET get_listening_socket(bool fIPv4, bool fSSL, bool fSecondary = false);
 
     };
 }

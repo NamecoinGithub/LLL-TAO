@@ -74,7 +74,7 @@ namespace LLP
 
     template <typename T>
     inline constexpr bool is_miner_protocol_v =
-        std::is_same_v<T, Miner> || std::is_same_v<T, StatelessMinerConnection>;
+        std::is_same_v<T, Miner>;
 }
 
 
@@ -86,6 +86,7 @@ namespace LLP
     : CONFIG            (config)
     , DDOS_MAP          (new std::map<BaseAddress, DDOS_Filter*>())
     , hListenBase       (-1, -1)
+    , hListenSecondary  (-1, -1)
     , hListenSSL        (-1, -1)
     , pAddressManager   (nullptr)
     , THREADS_DATA      ( )
@@ -153,7 +154,8 @@ namespace LLP
                             &Server::ListeningThread,
                             this,
                             true, //IPv4
-                            false //No SSL
+                            false, //No SSL
+                            false //Not secondary
                         )
                     )
                 );
@@ -171,6 +173,45 @@ namespace LLP
                                 &Server::UPnP,
                                 this,
                                 CONFIG.PORT_BASE
+                            )
+                        )
+                    );
+                }
+                #endif
+            }
+
+            /* Add a secondary plaintext listener if configured (used by unified mining server
+             * to accept legacy miners on PORT_SECONDARY while stateless miners connect on PORT_BASE). */
+            if(CONFIG.PORT_SECONDARY != 0 && !CONFIG.REQUIRE_SSL)
+            {
+                THREAD_LISTEN.push_back
+                (
+                    std::thread
+                    (
+                        std::bind
+                        (
+                            &Server::ListeningThread,
+                            this,
+                            true,  //IPv4
+                            false, //No SSL
+                            true   //Secondary port
+                        )
+                    )
+                );
+
+                /* Initialize UPnP for the secondary port if remote connections are allowed. */
+                #ifdef USE_UPNP
+                if(CONFIG.ENABLE_REMOTE && CONFIG.ENABLE_UPNP)
+                {
+                    THREAD_UPNP.push_back
+                    (
+                        std::thread
+                        (
+                            std::bind
+                            (
+                                &Server::UPnP,
+                                this,
+                                CONFIG.PORT_SECONDARY
                             )
                         )
                     );
@@ -909,7 +950,7 @@ namespace LLP
     /*  Main Listening Thread of LLP Server. Handles new Connections and
      *  DDOS associated with Connection if enabled. */
     template <class ProtocolType>
-    void Server<ProtocolType>::ListeningThread(bool fIPv4, bool fSSL)
+    void Server<ProtocolType>::ListeningThread(bool fIPv4, bool fSSL, bool fSecondary)
     {
         SOCKET hSocket;
         BaseAddress addr;
@@ -932,7 +973,7 @@ namespace LLP
 
             /* Set the listing socket descriptor on the pollfd.  We do this inside the loop in case the listening socket is
                explicitly closed and reopened whilst the app is running (used for mobile) */
-            fds[0].fd = get_listening_socket(fIPv4, fSSL);
+            fds[0].fd = get_listening_socket(fIPv4, fSSL, fSecondary);
             if(fds[0].fd != INVALID_SOCKET)
             {
                 /* Poll the sockets. */
@@ -960,7 +1001,7 @@ namespace LLP
 
                 /* Attempt to accept the socket connection */
                 struct sockaddr_in sockaddr;
-                hSocket = accept(get_listening_socket(fIPv4, fSSL), (struct sockaddr*)&sockaddr, fIPv4 ? &len_v4 : &len_v6);
+                hSocket = accept(get_listening_socket(fIPv4, fSSL, fSecondary), (struct sockaddr*)&sockaddr, fIPv4 ? &len_v4 : &len_v6);
                 if (hSocket != INVALID_SOCKET)
                     addr = BaseAddress(sockaddr);
 
@@ -1059,7 +1100,10 @@ namespace LLP
                     }
 
                     /* DDOS Operations: Only executed when DDOS is enabled. */
-                    if(!CheckPermissions(addr.ToStringIP(), fSSL ? CONFIG.PORT_SSL : CONFIG.PORT_BASE))
+                    const uint16_t nActivePort = fSecondary ? CONFIG.PORT_SECONDARY
+                                               : fSSL      ? CONFIG.PORT_SSL
+                                               :             CONFIG.PORT_BASE;
+                    if(!CheckPermissions(addr.ToStringIP(), nActivePort))
                     {
                         debug::notice(FUNCTION, "Connection Request ",  addr.ToString(), " refused... Denied by allowip whitelist.");
 
@@ -1088,7 +1132,7 @@ namespace LLP
                         pAddressManager->AddAddress(addr, ConnectState::CONNECTED);
 
                     /* Verbose output. */
-                    debug::log(4, FUNCTION, "Accepted Connection ", addr.ToString(), " on port ", fSSL ? CONFIG.PORT_SSL : CONFIG.PORT_BASE);
+                    debug::log(4, FUNCTION, "Accepted Connection ", addr.ToString(), " on port ", nActivePort);
                 }
             }
             else
@@ -1101,7 +1145,7 @@ namespace LLP
         }
 
         /* Thread exiting so close the listening socket */
-        closesocket(get_listening_socket(fIPv4, fSSL));
+        closesocket(get_listening_socket(fIPv4, fSSL, fSecondary));
     }
 
 
@@ -1390,11 +1434,13 @@ namespace LLP
 
     /* Gets the listening socket handle */
     template <class ProtocolType>
-    SOCKET Server<ProtocolType>::get_listening_socket(bool fIPv4, bool fSSL)
+    SOCKET Server<ProtocolType>::get_listening_socket(bool fIPv4, bool fSSL, bool fSecondary)
     {
         SOCKET hListen;
 
-        if(fSSL)
+        if(fSecondary)
+            hListen = (fIPv4 ? hListenSecondary.first : hListenSecondary.second);
+        else if(fSSL)
             hListen = (fIPv4 ? hListenSSL.first : hListenSSL.second);
         else
             hListen = (fIPv4 ? hListenBase.first : hListenBase.second);
@@ -1414,6 +1460,13 @@ namespace LLP
         {
             closesocket(hListenBase.first);
             hListenBase.first = 0;
+        }
+
+        /* Close the secondary port socket if configured */
+        if(CONFIG.PORT_SECONDARY != 0)
+        {
+            closesocket(hListenSecondary.first);
+            hListenSecondary.first = 0;
         }
 
         /* Close the ssl socket if running */
@@ -1445,6 +1498,18 @@ namespace LLP
             }
 
             debug::log(0, "Opening ", ProtocolType::Name(), " listening sockets on port ", CONFIG.PORT_BASE);
+        }
+
+        /* Bind the secondary port if configured (e.g., legacy mining port for unified server). */
+        if(CONFIG.PORT_SECONDARY != 0 && !CONFIG.REQUIRE_SSL)
+        {
+            if(!BindListenPort(hListenSecondary.first, CONFIG.PORT_SECONDARY, true, CONFIG.ENABLE_REMOTE))
+            {
+                ::Shutdown();
+                return;
+            }
+
+            debug::log(0, "Opening ", ProtocolType::Name(), " secondary listening sockets on port ", CONFIG.PORT_SECONDARY);
         }
 
         /* Handle for our SSL socket. */
@@ -1578,5 +1643,4 @@ namespace LLP
     template class Server<FileNode>;
     template class Server<RPCNode>;
     template class Server<Miner>;
-    template class Server<StatelessMinerConnection>;
 }
