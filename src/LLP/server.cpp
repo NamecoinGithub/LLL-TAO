@@ -87,6 +87,8 @@ namespace LLP
     , DDOS_MAP          (new std::map<BaseAddress, DDOS_Filter*>())
     , hListenBase       (-1, -1)
     , hListenSSL        (-1, -1)
+    , hListenLegacy     (-1, -1)
+    , hListenLegacySSL  (-1, -1)
     , pAddressManager   (nullptr)
     , THREADS_DATA      ( )
     , THREAD_LISTEN     ( )
@@ -153,7 +155,8 @@ namespace LLP
                             &Server::ListeningThread,
                             this,
                             true, //IPv4
-                            false //No SSL
+                            false, //No SSL
+                            CONFIG.PORT_BASE
                         )
                     )
                 );
@@ -191,7 +194,8 @@ namespace LLP
                             &Server::ListeningThread,
                             this,
                             true, //IPv4
-                            true //Enable SSL
+                            true, //Enable SSL
+                            CONFIG.PORT_SSL
                         )
                     )
                 );
@@ -214,6 +218,44 @@ namespace LLP
                     );
                 }
                 #endif
+            }
+
+            /* Legacy plaintext listener for multi-port servers (unified mining). */
+            if(CONFIG.PORT_LEGACY != 0 && !CONFIG.REQUIRE_SSL)
+            {
+                THREAD_LISTEN.push_back
+                (
+                    std::thread
+                    (
+                        std::bind
+                        (
+                            &Server::ListeningThread,
+                            this,
+                            true,  //IPv4
+                            false, //No SSL
+                            CONFIG.PORT_LEGACY
+                        )
+                    )
+                );
+            }
+
+            /* Legacy SSL listener for multi-port servers (unified mining). */
+            if(CONFIG.PORT_LEGACY_SSL != 0 && CONFIG.ENABLE_SSL)
+            {
+                THREAD_LISTEN.push_back
+                (
+                    std::thread
+                    (
+                        std::bind
+                        (
+                            &Server::ListeningThread,
+                            this,
+                            true, //IPv4
+                            true, //Enable SSL
+                            CONFIG.PORT_LEGACY_SSL
+                        )
+                    )
+                );
             }
         }
 
@@ -909,7 +951,7 @@ namespace LLP
     /*  Main Listening Thread of LLP Server. Handles new Connections and
      *  DDOS associated with Connection if enabled. */
     template <class ProtocolType>
-    void Server<ProtocolType>::ListeningThread(bool fIPv4, bool fSSL)
+    void Server<ProtocolType>::ListeningThread(bool fIPv4, bool fSSL, uint16_t nListenPort)
     {
         SOCKET hSocket;
         BaseAddress addr;
@@ -932,7 +974,9 @@ namespace LLP
 
             /* Set the listing socket descriptor on the pollfd.  We do this inside the loop in case the listening socket is
                explicitly closed and reopened whilst the app is running (used for mobile) */
-            fds[0].fd = get_listening_socket(fIPv4, fSSL);
+            fds[0].fd = (nListenPort != 0)
+                ? get_listening_socket_for_port(nListenPort, fIPv4)
+                : get_listening_socket(fIPv4, fSSL);
             if(fds[0].fd != INVALID_SOCKET)
             {
                 /* Poll the sockets. */
@@ -960,7 +1004,10 @@ namespace LLP
 
                 /* Attempt to accept the socket connection */
                 struct sockaddr_in sockaddr;
-                hSocket = accept(get_listening_socket(fIPv4, fSSL), (struct sockaddr*)&sockaddr, fIPv4 ? &len_v4 : &len_v6);
+                const SOCKET hListenSock = (nListenPort != 0)
+                    ? get_listening_socket_for_port(nListenPort, fIPv4)
+                    : get_listening_socket(fIPv4, fSSL);
+                hSocket = accept(hListenSock, (struct sockaddr*)&sockaddr, fIPv4 ? &len_v4 : &len_v6);
                 if (hSocket != INVALID_SOCKET)
                     addr = BaseAddress(sockaddr);
 
@@ -1080,15 +1127,21 @@ namespace LLP
                     /* Get the data thread. */
                     DataThread<ProtocolType> *dt = THREADS_DATA[nThread];
 
-                    /* Accept an incoming connection. */
-                    dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr);
+                    /* Accept an incoming connection.
+                     * Pass nListenPort as a variadic arg — the ProtocolType constructor
+                     * can use it for lane detection (e.g. UnifiedMinerConnection). */
+                    if(nListenPort != 0)
+                        dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr, false, nListenPort);
+                    else
+                        dt->AddConnection(sockNew, CONFIG.ENABLE_DDOS ? DDOS_MAP->at(addr) : nullptr);
 
                     /* Add the address to the address manager if it exists. */
                     if(pAddressManager)
                         pAddressManager->AddAddress(addr, ConnectState::CONNECTED);
 
                     /* Verbose output. */
-                    debug::log(4, FUNCTION, "Accepted Connection ", addr.ToString(), " on port ", fSSL ? CONFIG.PORT_SSL : CONFIG.PORT_BASE);
+                    const uint16_t nLogPort = (nListenPort != 0) ? nListenPort : (fSSL ? CONFIG.PORT_SSL : CONFIG.PORT_BASE);
+                    debug::log(4, FUNCTION, "Accepted Connection ", addr.ToString(), " on port ", nLogPort);
                 }
             }
             else
@@ -1101,7 +1154,10 @@ namespace LLP
         }
 
         /* Thread exiting so close the listening socket */
-        closesocket(get_listening_socket(fIPv4, fSSL));
+        const SOCKET hExitSock = (nListenPort != 0)
+            ? get_listening_socket_for_port(nListenPort, fIPv4)
+            : get_listening_socket(fIPv4, fSSL);
+        closesocket(hExitSock);
     }
 
 
@@ -1383,7 +1439,9 @@ namespace LLP
     }
 
 
-    /* Gets the listening socket handle */
+    /* Gets the listening socket handle.
+     * When nPort is provided (non-zero), returns the socket for that specific port.
+     * Falls back to original fIPv4/fSSL logic for backward compatibility. */
     template <class ProtocolType>
     SOCKET Server<ProtocolType>::get_listening_socket(bool fIPv4, bool fSSL)
     {
@@ -1395,6 +1453,33 @@ namespace LLP
             hListen = (fIPv4 ? hListenBase.first : hListenBase.second);
 
         return hListen;
+    }
+
+
+    /** get_listening_socket_for_port
+     *
+     *  Returns the listening socket handle for a specific port.
+     *  Used by multi-port ListeningThread to identify the correct socket.
+     *
+     **/
+    template <class ProtocolType>
+    SOCKET Server<ProtocolType>::get_listening_socket_for_port(uint16_t nPort, bool fIPv4)
+    {
+        /* Check base ports first */
+        if(nPort == CONFIG.PORT_BASE)
+            return fIPv4 ? hListenBase.first : hListenBase.second;
+
+        if(nPort == CONFIG.PORT_SSL)
+            return fIPv4 ? hListenSSL.first : hListenSSL.second;
+
+        /* Check legacy ports */
+        if(nPort == CONFIG.PORT_LEGACY && CONFIG.PORT_LEGACY != 0)
+            return fIPv4 ? hListenLegacy.first : hListenLegacy.second;
+
+        if(nPort == CONFIG.PORT_LEGACY_SSL && CONFIG.PORT_LEGACY_SSL != 0)
+            return fIPv4 ? hListenLegacySSL.first : hListenLegacySSL.second;
+
+        return INVALID_SOCKET;
     }
 
 
@@ -1418,6 +1503,18 @@ namespace LLP
             hListenSSL.first = 0;
         }
 
+        /* Close legacy listen sockets if active */
+        if(CONFIG.PORT_LEGACY != 0)
+        {
+            closesocket(hListenLegacy.first);
+            hListenLegacy.first = 0;
+        }
+
+        if(CONFIG.PORT_LEGACY_SSL != 0)
+        {
+            closesocket(hListenLegacySSL.first);
+            hListenLegacySSL.first = 0;
+        }
     }
 
 
@@ -1452,6 +1549,30 @@ namespace LLP
             }
 
             debug::log(0, "Opening ", ProtocolType::Name(), " SSL listening sockets on port ", CONFIG.PORT_SSL);
+        }
+
+        /* Bind legacy plaintext port if configured. */
+        if(CONFIG.PORT_LEGACY != 0 && !CONFIG.REQUIRE_SSL)
+        {
+            if(!BindListenPort(hListenLegacy.first, CONFIG.PORT_LEGACY, true, CONFIG.ENABLE_REMOTE))
+            {
+                ::Shutdown();
+                return;
+            }
+
+            debug::log(0, "Opening ", ProtocolType::Name(), " legacy listening sockets on port ", CONFIG.PORT_LEGACY);
+        }
+
+        /* Bind legacy SSL port if configured. */
+        if(CONFIG.PORT_LEGACY_SSL != 0 && CONFIG.ENABLE_SSL)
+        {
+            if(!BindListenPort(hListenLegacySSL.first, CONFIG.PORT_LEGACY_SSL, true, CONFIG.ENABLE_REMOTE))
+            {
+                ::Shutdown();
+                return;
+            }
+
+            debug::log(0, "Opening ", ProtocolType::Name(), " legacy SSL listening sockets on port ", CONFIG.PORT_LEGACY_SSL);
         }
     }
 

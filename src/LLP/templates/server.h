@@ -72,6 +72,14 @@ namespace LLP
         std::pair<int32_t, int32_t> hListenSSL;
 
 
+        /** Legacy plaintext listen sockets (IPv4, IPv6) for multi-port servers. **/
+        std::pair<int32_t, int32_t> hListenLegacy;
+
+
+        /** Legacy SSL listen sockets (IPv4, IPv6) for multi-port servers. **/
+        std::pair<int32_t, int32_t> hListenLegacySSL;
+
+
         /** Address for handling outgoing connections **/
         AddressManager* pAddressManager;
 
@@ -438,9 +446,10 @@ namespace LLP
          *
          *  @param[in] fIPv4 Flag indicating to listen on the IPv4 interface
          *  @param[in] fSSL Flag indicating that connections should use SSL
+         *  @param[in] nListenPort The port this thread listens on (passed to AddConnection for lane detection)
          *
          **/
-        void ListeningThread(bool fIPv4, bool fSSL);
+        void ListeningThread(bool fIPv4, bool fSSL, uint16_t nListenPort = 0);
 
 
         /** BindListenPort
@@ -487,6 +496,19 @@ namespace LLP
          *
          **/
         SOCKET get_listening_socket(bool fIPv4, bool fSSL);
+
+
+        /** get_listening_socket_for_port
+         *
+         *  Gets the listening socket handle for a specific port.
+         *
+         *  @param[in] nPort The port to look up
+         *  @param[in] fIPv4 Flag indicating the connection is IPv4
+         *
+         *  @return the listening socket handle
+         *
+         **/
+        SOCKET get_listening_socket_for_port(uint16_t nPort, bool fIPv4);
 
     };
 }

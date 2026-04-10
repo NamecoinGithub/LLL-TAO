@@ -62,6 +62,17 @@ namespace LLP
         uint16_t PORT_SSL;
 
 
+        /** Legacy plaintext port for unified multi-port servers (0 = disabled).
+         *  Only used by the unified mining server to listen on both stateless (9323)
+         *  and legacy (8323) ports from a single Server instance. **/
+        uint16_t PORT_LEGACY;
+
+
+        /** Legacy SSL port for unified multi-port servers (0 = disabled).
+         *  Only used by the unified mining server for legacy SSL (8325). **/
+        uint16_t PORT_LEGACY_SSL;
+
+
         /** Max number of incoming connections this server can make. **/
         uint32_t MAX_INCOMING;
 
@@ -110,6 +121,8 @@ namespace LLP
         , REQUIRE_SSL     (false)
         , PORT_BASE       (nPort)
         , PORT_SSL        (0)    //note: this should be an invalid port to bind to
+        , PORT_LEGACY     (0)    //disabled by default; unified mining server sets this
+        , PORT_LEGACY_SSL (0)    //disabled by default; unified mining server sets this
         , MAX_INCOMING    (317)
         , MAX_CONNECTIONS (333)
         , MAX_THREADS     (4)    //default: 4 threads
@@ -134,6 +147,8 @@ namespace LLP
         , REQUIRE_SSL     (config.REQUIRE_SSL)
         , PORT_BASE       (config.PORT_BASE)
         , PORT_SSL        (config.PORT_SSL)
+        , PORT_LEGACY     (config.PORT_LEGACY)
+        , PORT_LEGACY_SSL (config.PORT_LEGACY_SSL)
         , MAX_INCOMING    (config.MAX_INCOMING)
         , MAX_CONNECTIONS (config.MAX_CONNECTIONS)
         , MAX_THREADS     (config.MAX_THREADS)
@@ -160,6 +175,8 @@ namespace LLP
         , REQUIRE_SSL     (std::move(config.REQUIRE_SSL))
         , PORT_BASE       (std::move(config.PORT_BASE))
         , PORT_SSL        (std::move(config.PORT_SSL))
+        , PORT_LEGACY     (std::move(config.PORT_LEGACY))
+        , PORT_LEGACY_SSL (std::move(config.PORT_LEGACY_SSL))
         , MAX_INCOMING    (std::move(config.MAX_INCOMING))
         , MAX_CONNECTIONS (std::move(config.MAX_CONNECTIONS))
         , MAX_THREADS     (std::move(config.MAX_THREADS))
@@ -187,6 +204,8 @@ namespace LLP
             REQUIRE_SSL     = config.REQUIRE_SSL;
             PORT_BASE       = config.PORT_BASE;
             PORT_SSL        = config.PORT_SSL;
+            PORT_LEGACY     = config.PORT_LEGACY;
+            PORT_LEGACY_SSL = config.PORT_LEGACY_SSL;
             MAX_INCOMING    = config.MAX_INCOMING;
             MAX_CONNECTIONS = config.MAX_CONNECTIONS;
             MAX_THREADS     = config.MAX_THREADS;
@@ -216,6 +235,8 @@ namespace LLP
             REQUIRE_SSL     = std::move(config.REQUIRE_SSL);
             PORT_BASE       = std::move(config.PORT_BASE);
             PORT_SSL        = std::move(config.PORT_SSL);
+            PORT_LEGACY     = std::move(config.PORT_LEGACY);
+            PORT_LEGACY_SSL = std::move(config.PORT_LEGACY_SSL);
             MAX_INCOMING    = std::move(config.MAX_INCOMING);
             MAX_CONNECTIONS = std::move(config.MAX_CONNECTIONS);
             MAX_THREADS     = std::move(config.MAX_THREADS);
