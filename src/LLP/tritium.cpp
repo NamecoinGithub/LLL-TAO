@@ -3931,6 +3931,29 @@ namespace LLP
     /* Helper function to switch the nodes on sync. */
     void TritiumNode::SwitchNode()
     {
+        /* Limit recursion depth to prevent stack overflow on unstable networks. */
+        static thread_local uint32_t nRecursionDepth = 0;
+        ++nRecursionDepth;
+
+        /* Guard: fall through to reconnection path after 3 retries. */
+        if(nRecursionDepth > 3)
+        {
+            nRecursionDepth = 0;
+
+            /* Reset the current sync node. */
+            TAO::Ledger::nSyncSession.store(0);
+
+            /* Logging to verify (for debugging). */
+            debug::log(0, FUNCTION, "SwitchNode exceeded retry limit, reconnecting to DNS seeds in 3 seconds...");
+
+            /* Brief wait, then attempt fresh connections. */
+            runtime::sleep(3000);
+
+            /* Reconnect to our seed nodes. */
+            LLP::MakeConnections(TRITIUM_SERVER);
+            return;
+        }
+
         /* Track our current sync sessions. */
         std::pair<uint32_t, uint32_t> pairSession;
 
@@ -3940,7 +3963,10 @@ namespace LLP
 
             /* Check for session. */
             if(!mapSessions.count(TAO::Ledger::nSyncSession.load()))
+            {
+                nRecursionDepth = 0;
                 return;
+            }
 
             /* Set the current session. */
             pairSession = mapSessions[TAO::Ledger::nSyncSession.load()];
@@ -3963,10 +3989,11 @@ namespace LLP
 
                 /* Initiate the sync */
                 pnode->Sync();
+                nRecursionDepth = 0;
             }
             catch(const std::exception& e)
             {
-                /* Recurse on failure. */
+                /* Recurse on failure (depth-limited). */
                 debug::error(FUNCTION, e.what());
 
                 SwitchNode();
@@ -3974,14 +4001,16 @@ namespace LLP
         }
         else
         {
+            nRecursionDepth = 0;
+
             /* Reset the current sync node. */
             TAO::Ledger::nSyncSession.store(0);
 
             /* Logging to verify (for debugging). */
-            debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 15 seconds...");
+            debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 3 seconds...");
 
-            /* Wait for timeouts and then restart. */
-            runtime::sleep(15000);
+            /* Brief wait, then attempt fresh connections. */
+            runtime::sleep(3000);
 
             /* Reconnect to our seed nodes. */
             LLP::MakeConnections(TRITIUM_SERVER);
