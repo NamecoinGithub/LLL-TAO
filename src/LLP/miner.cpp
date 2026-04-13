@@ -2044,9 +2044,24 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock.
+         * The hash is needed inside the lock to implement the hash-based
+         * bypass: a new hashPrevBlock always bypasses the 1-second floor
+         * so miners receive fresh work after every fork step. */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashBestChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
         /* Push throttle — drop if a template was sent less than
-         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
-         * Re-subscription responses bypass via m_force_next_push. */
+         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago AND the chain tip has not changed
+         * (same hashPrevBlock).  Re-subscription responses bypass via
+         * m_force_next_push.
+         *
+         * Hash-change bypass: a fork step produces a new hashBestChain
+         * within the 1-second window.  Without the hash check, all but the
+         * first SetBest() notification in a burst are dropped, leaving miners
+         * on a stale template for up to 1 second.  With it, each distinct tip
+         * is delivered immediately regardless of timing. */
         {
             LOCK(MUTEX);
             if(shouldAbortNotification())
@@ -2064,20 +2079,25 @@ namespace LLP
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
             }
+            else if (hashBestChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                           hashBestChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
+            }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
                 debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
-                           GetAddress().ToStringIP(), " — work delivery delayed");
+                           GetAddress().ToStringIP(), " — same tip, work delivery delayed");
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashBestChain;
         }
 
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nSubscribedChannel))
@@ -2088,10 +2108,6 @@ namespace LLP
         
         /* Get difficulty */
         uint32_t nDifficulty = LLP::StatelessMinerConnection::GetCachedDifficulty(nSubscribedChannel);
-
-        /* Keep the tip hash consistent with the loaded best-state snapshot. */
-        const uint1024_t hashBestChain =
-            PushNotificationBuilder::BestChainHashForNotification(stateBest);
 
         if(shouldAbortNotification())
         {
@@ -2145,20 +2161,37 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock (same
+         * pattern as SendChannelNotification) so the hash-based bypass can
+         * be evaluated while holding MUTEX without a blocking load inside. */
+        TAO::Ledger::BlockState stateBestForHash = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashCurrentChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBestForHash);
+
         /* Thread-safe context access and push throttle */
         uint32_t nChannelCopy;
         {
             LOCK(MUTEX);
 
-            /* Push throttle — same pattern as SendStatelessTemplate().
+            /* Push throttle — same pattern as SendChannelNotification().
              * TWO-STEP RE-ARM INVARIANT: caller must re-arm m_force_next_push
-             * after SendChannelNotification() before calling this method. */
+             * after SendChannelNotification() before calling this method.
+             *
+             * Hash-change bypass: if the chain tip advanced since the last push,
+             * skip the time floor so miners receive the new template immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
             if(m_force_next_push)
             {
                 m_force_next_push = false;
+            }
+            else if(hashCurrentChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Legacy template throttle bypassed — new chain tip ",
+                           hashCurrentChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
             }
             else if(m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
@@ -2168,6 +2201,7 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel */
             nChannelCopy = nChannel.load();
@@ -2221,8 +2255,8 @@ namespace LLP
 
         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-        /* Update last template unified height */
-        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+        /* Update last template unified height (atomic store — see nLastTemplateUnifiedHeight comment). */
+        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
     }
 
 
@@ -2332,10 +2366,11 @@ namespace LLP
 
         /* Update last template unified height after sending template.
          * Uses UNIFIED height — every tip move changes hashPrevBlock,
-         * so ALL channels need fresh templates regardless of which channel mined. */
+         * so ALL channels need fresh templates regardless of which channel mined.
+         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
         {
             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-            nLastTemplateUnifiedHeight = stateBest.nHeight;
+            nLastTemplateUnifiedHeight.store(stateBest.nHeight, std::memory_order_relaxed);
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
@@ -2793,16 +2828,11 @@ namespace LLP
          * CRITICAL: Use UNIFIED height — every tip move (any channel) changes
          * hashPrevBlock, requiring ALL channels to get fresh templates.
          *
-         * FIX: Re-read nLastTemplateUnifiedHeight under MUTEX to avoid a data race
-         * with SendLegacyTemplate() which writes nLastTemplateUnifiedHeight from the
-         * FLUSH_THREAD.  Using the live value prevents a false-positive "height changed"
-         * that would trigger a redundant new_block() call. */
+         * nLastTemplateUnifiedHeight is now std::atomic<uint32_t>, so we can
+         * read it safely without holding MUTEX. */
         uint32_t nCurrentChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannel);
-        uint32_t nLiveLastTemplateHeight;
-        {
-            LOCK(MUTEX);
-            nLiveLastTemplateHeight = nLastTemplateUnifiedHeight;
-        }
+        const uint32_t nLiveLastTemplateHeight =
+            nLastTemplateUnifiedHeight.load(std::memory_order_relaxed);
         bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
             nLiveLastTemplateHeight, snap);
 
@@ -2842,8 +2872,9 @@ namespace LLP
 
                         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-                        /* Update last template unified height only after successful send */
-                        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+                        /* Update last template unified height only after successful send.
+                         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
+                        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
                     }
                 }
                 catch(const std::exception& e) {

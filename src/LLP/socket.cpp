@@ -44,6 +44,7 @@ namespace LLP
     , nLastRecv          (0)
     , nError             (0)
     , vBuffer            ( )
+    , m_nFlushOffset     (0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -67,6 +68,7 @@ namespace LLP
     , nLastRecv          (socket.nLastRecv.load())
     , nError             (socket.nError.load())
     , vBuffer            (socket.vBuffer)
+    , m_nFlushOffset     (socket.m_nFlushOffset)
     , nBufferSize        (socket.nBufferSize.load())
     , fBufferFull        (socket.fBufferFull.load())
     , nConsecutiveErrors (socket.nConsecutiveErrors.load())
@@ -102,6 +104,7 @@ namespace LLP
     , nLastRecv          (0)
     , nError             (0)
     , vBuffer            ( )
+    , m_nFlushOffset     (0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -256,6 +259,7 @@ namespace LLP
     , nLastRecv          (0)
     , nError             (0)
     , vBuffer            ( )
+    , m_nFlushOffset     (0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -851,45 +855,44 @@ namespace LLP
     {
         int32_t nSent = 0;
 
-        /* Clear stale fBufferFull latch — if the buffer has drained to zero
-         * but fBufferFull is still set (Flush() returned early on empty buffer,
-         * or race window between nBufferSize.store(0) and fBufferFull.store(false)
-         * in Flush()), reset it now so subsequent Flush() calls don't
-         * attempt to drain an already-empty buffer.
-         *
-         * Use compare_exchange to avoid clobbering a concurrent
-         * fBufferFull.store(true) from WritePacket() on another thread. */
-        if(nBufferSize.load() == 0 && fBufferFull.load())
-        {
-            bool expected = true;
-            fBufferFull.compare_exchange_strong(expected, false);
-        }
-
-        /* Check overflow buffer. */
-        if(nBufferSize.load() > 0)
+        /* Single critical section covering both the overflow-buffer check and
+         * the direct-send path.  The previous design used two separate
+         * RECURSIVE(SOCKET_MUTEX) acquisitions, creating a window where
+         * Flush() could drain vBuffer between the first unlock and the second
+         * lock acquisition, potentially reordering new data ahead of buffered
+         * data.  TCP ordering preserves correctness for the TCP case, but the
+         * single-section approach is safer for any future transport and removes
+         * a redundant lock acquisition on the common (empty buffer) path. */
         {
             RECURSIVE(SOCKET_MUTEX);
 
-            /* Re-check under lock: FLUSH_THREAD could have drained the buffer
-             * between the atomic check above and the mutex acquisition.  If the
-             * buffer is now empty, fall through to the direct-send path instead
-             * of needlessly buffering (which would add a Flush round-trip). */
-            if(!vBuffer.empty())
+            /* Clear stale fBufferFull latch under the lock.  If the buffer
+             * has drained to zero since the last Write() but fBufferFull is
+             * still set (Flush() returned early on an empty buffer, or a race
+             * between nBufferSize.store(0) and fBufferFull.store(false)),
+             * reset it now so subsequent Flush() calls don't spin unnecessarily.
+             * Use compare_exchange to avoid clobbering a concurrent
+             * fBufferFull.store(true) from WritePacket() on another thread. */
+            if(nBufferSize.load() == 0 && fBufferFull.load())
             {
-                /* Insert data into the buffer. */
+                bool expected = true;
+                fBufferFull.compare_exchange_strong(expected, false);
+            }
+
+            /* If the overflow buffer still has unsent data, append the new
+             * payload to maintain ordering.  The data will be drained by
+             * FLUSH_THREAD via Flush().  We check the actual vector size minus
+             * the read-offset (unsent bytes) — an empty logical buffer means
+             * we can try a direct send instead. */
+            const size_t nUnsent = vBuffer.size() - m_nFlushOffset;
+            if(nUnsent > 0)
+            {
                 vBuffer.insert(vBuffer.end(), vData.begin(), vData.end());
-
-                /* Set our atomic with size of vector. */
-                nBufferSize.store(vBuffer.size());
-
+                nBufferSize.store(vBuffer.size() - m_nFlushOffset);
                 return static_cast<int32_t>(nBytes);
             }
-        }
 
-        /* Write the packet. */
-        {
-            RECURSIVE(SOCKET_MUTEX);
-
+            /* No outstanding data — attempt a direct non-blocking send. */
             if(pSSL)
                 nSent = static_cast<int32_t>(SSL_write(pSSL, (int8_t*)&vData[0], nBytes));
             else
@@ -900,40 +903,46 @@ namespace LLP
                 nSent = static_cast<int32_t>(send(fd, (int8_t*)&vData[0], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
             #endif
             }
+
+            /* Handle for error state. */
+            if(nSent < 0)
+            {
+                if(pSSL)
+                    nError = SSL_get_error(pSSL, nSent);
+                else
+                    nError = WSAGetLastError();
+
+                return nSent;
+            }
+
+            /* If not all data was sent non-blocking, buffer the remainder. */
+            if(nSent != static_cast<int32_t>(vData.size()))
+            {
+                /* Insert remaining data into the buffer (after any existing bytes,
+                 * but since nUnsent == 0 the vector may also be cleared first to
+                 * reclaim the space consumed by m_nFlushOffset). */
+                if(m_nFlushOffset == vBuffer.size())
+                {
+                    vBuffer.clear();
+                    m_nFlushOffset = 0;
+                }
+                vBuffer.insert(vBuffer.end(), vData.begin() + nSent, vData.end());
+                nBufferSize.store(vBuffer.size() - m_nFlushOffset);
+
+                /* Update last sent time — partial writes still represent forward
+                 * progress.  Without this update, DISCONNECT::TIMEOUT_WRITE can
+                 * fire spuriously when large mining templates are being sent in
+                 * multiple chunks.  nLastSend must reflect any successful send()
+                 * to prevent the DataThread from killing the connection. */
+                if(nSent > 0)
+                    nLastSend = runtime::timestamp(true);
+
+                return nSent;
+            }
         }
 
-
-        /* Handle for error state. */
-        if(nSent < 0)
-        {
-            if(pSSL)
-                nError = SSL_get_error(pSSL, nSent);
-            else
-                nError = WSAGetLastError();
-        }
-
-        /* If not all data was sent non-blocking, buffer the remainder. */
-        else if(nSent != vData.size())
-        {
-            RECURSIVE(SOCKET_MUTEX);
-
-            /* Insert remaining data into the buffer. */
-            vBuffer.insert(vBuffer.end(), vData.begin() + nSent, vData.end());
-
-            /* Set our atomic with size of vector. */
-            nBufferSize.store(vBuffer.size());
-
-            /* Update last sent time — partial writes still represent forward
-             * progress.  Without this update, DISCONNECT::TIMEOUT_WRITE can
-             * fire spuriously when large mining templates are being sent in
-             * multiple chunks.  nLastSend must reflect any successful send()
-             * to prevent the DataThread from killing the connection. */
-            if(nSent > 0)
-                nLastSend = runtime::timestamp(true);
-        }
-        else //all data was written to the kernel buffer in one shot
-            nLastSend = runtime::timestamp(true);
-
+        /* All data was written to the kernel buffer in one shot. */
+        nLastSend = runtime::timestamp(true);
         return nSent;
     }
 
@@ -953,6 +962,13 @@ namespace LLP
      * the mutex and process inbound data.
      *
      * The chunk limit is configurable via -maxflushchunks (min 1, max 64).
+     *
+     * Performance note: instead of erasing sent bytes from the front of
+     * vBuffer (O(n) memmove), Flush() advances m_nFlushOffset past sent
+     * bytes.  The vector is cleared (and the offset reset) only when all
+     * bytes have been consumed.  This makes every Flush() iteration O(1)
+     * for the common case and eliminates the per-chunk memmove that was
+     * previously O(n) relative to the total buffered size.
      *
      * Returns total bytes sent (≥ 0) or the last send() error (< 0). */
     int Socket::Flush()
@@ -1001,18 +1017,18 @@ namespace LLP
             uint32_t nSize  = static_cast<uint32_t>(nBufferSize.load());
             uint32_t nBytes = std::min(nSize, nMaxChunk);
 
-            /* Send one chunk. */
+            /* Send one chunk starting from the current read offset. */
             {
                 RECURSIVE(SOCKET_MUTEX);
 
                 if(pSSL)
-                    nSent = static_cast<int32_t>(SSL_write(pSSL, (int8_t *)&vBuffer[0], nBytes));
+                    nSent = static_cast<int32_t>(SSL_write(pSSL, (int8_t *)&vBuffer[m_nFlushOffset], nBytes));
                 else
                 {
                 #ifdef WIN32
-                    nSent = static_cast<int32_t>(send(fd, (char*)&vBuffer[0], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
+                    nSent = static_cast<int32_t>(send(fd, (char*)&vBuffer[m_nFlushOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
                 #else
-                    nSent = static_cast<int32_t>(send(fd, (int8_t*)&vBuffer[0], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
+                    nSent = static_cast<int32_t>(send(fd, (int8_t*)&vBuffer[m_nFlushOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
                 #endif
                 }
             }
@@ -1035,23 +1051,31 @@ namespace LLP
             if(nSent == 0)
                 break;
 
-            /* Successful send — erase sent bytes from buffer. */
+            /* Successful send — advance the read offset instead of erasing.
+             * Erasing from the front of a std::vector is O(n) because it
+             * memmoves all remaining elements leftward.  Advancing an offset
+             * is O(1).  When the offset reaches the end of the vector all
+             * bytes have been consumed; at that point we clear the vector and
+             * reset the offset in one shot to reclaim memory. */
             {
                 RECURSIVE(SOCKET_MUTEX);
 
-                /* Erase from current buffer. */
-                vBuffer.erase(vBuffer.begin(), vBuffer.begin() + nSent);
+                m_nFlushOffset += static_cast<size_t>(nSent);
 
-                /* Set our atomic with size of vector. */
-                nBufferSize.store(vBuffer.size());
-
-                /* Only clear fBufferFull when the buffer has fully drained.
-                 * Use compare_exchange to avoid clobbering a concurrent
-                 * fBufferFull.store(true) from WritePacket() on another thread. */
-                if(vBuffer.empty())
+                if(m_nFlushOffset >= vBuffer.size())
                 {
+                    /* All bytes sent — compact the vector to reclaim memory. */
+                    vBuffer.clear();
+                    m_nFlushOffset = 0;
+                    nBufferSize.store(0);
+
+                    /* Clear fBufferFull now that the buffer is fully drained. */
                     bool expected = true;
                     fBufferFull.compare_exchange_strong(expected, false);
+                }
+                else
+                {
+                    nBufferSize.store(vBuffer.size() - m_nFlushOffset);
                 }
             }
 
