@@ -72,6 +72,18 @@ namespace LLP
         std::vector<uint8_t> vBuffer;
 
 
+        /** Read offset into vBuffer.
+         *
+         *  Instead of erasing sent bytes from the front of vBuffer (O(n) memmove),
+         *  Flush() advances this offset past the bytes it has sent.  vBuffer is
+         *  compacted (cleared and offset reset) only when all bytes have been
+         *  consumed, keeping every Flush() iteration O(1) for the common case.
+         *
+         *  Protected by SOCKET_MUTEX (same as vBuffer).
+         *  Always satisfies: m_nFlushOffset <= vBuffer.size(). **/
+        size_t m_nFlushOffset;
+
+
         /** Keep track of the buffer with an atomic. */
         std::atomic<uint64_t> nBufferSize;
 
