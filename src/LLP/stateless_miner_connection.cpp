@@ -88,6 +88,10 @@ namespace LLP
 {
     namespace
     {
+        /* Apply a manager transform using canonical hashKeyID for authenticated miners,
+         * falling back to the transport address only for pre-auth connection state.
+         * ctx identifies the miner, transformer computes the updated MiningContext,
+         * and nLane carries the current mining lane for secondary index maintenance. */
         bool TransformTrackedMiner(
             const MiningContext& ctx,
             std::function<MiningContext(const MiningContext&)> transformer,

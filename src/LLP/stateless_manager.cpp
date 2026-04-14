@@ -34,6 +34,9 @@ namespace LLP
 {
     namespace
     {
+        /* Reconcile a cached MiningContext with the canonical identity fields stored
+         * in NodeSessionRegistry so callers always receive the authoritative
+         * session_id/hashKeyID/hashGenesis tuple derived from hashKeyID. */
         MiningContext CanonicalizeRegistryContext(const NodeSessionEntry& entry)
         {
             MiningContext ctx = entry.context;

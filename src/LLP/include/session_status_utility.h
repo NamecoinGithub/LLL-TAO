@@ -106,9 +106,8 @@ namespace LLP
 
                 if(!optEntry.has_value() && pCurrentContext->hashGenesis != 0)
                 {
-                    MiningContext repairedContext = *pCurrentContext;
-                    repairedContext = repairedContext.WithSession(
-                        MiningContext::DeriveSessionId(repairedContext.hashKeyID));
+                    MiningContext repairedContext = pCurrentContext->WithSession(
+                        MiningContext::DeriveSessionId(pCurrentContext->hashKeyID));
 
                     auto [nCanonicalSessionId, fNewSession] = NodeSessionRegistry::Get().RegisterOrRefresh(
                         repairedContext.hashKeyID,
@@ -143,6 +142,8 @@ namespace LLP
 
             if(!optEntry.has_value())
             {
+                /* Intentional severity downgrade: SESSION_STATUS is a soft health probe,
+                 * so a miss is diagnostic telemetry rather than a miner fault. */
                 debug::log(1, FUNCTION, "SESSION_STATUS: diagnostic miss for session_id=0x",
                            std::hex, req.session_id, std::dec);
                 return SessionStatus::BuildAckPayload(req.session_id, nLaneFlag, 0u, req.status_flags);
