@@ -212,12 +212,14 @@ namespace MiningConstants
      *  This is intentionally coupled to NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS
      *  so transport-idle policy and session-liveness policy cannot drift apart.
      */
-    constexpr uint32_t READ_TIMEOUT_FLOOR_MS =
-        static_cast<uint32_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL);
+    constexpr uint64_t READ_TIMEOUT_FLOOR_MS_U64 =
+        NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL;
 
-    static_assert(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL <=
+    static_assert(READ_TIMEOUT_FLOOR_MS_U64 <=
             static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
         "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint32 milliseconds.");
+    constexpr uint32_t READ_TIMEOUT_FLOOR_MS =
+        static_cast<uint32_t>(READ_TIMEOUT_FLOOR_MS_U64);
     static_assert(DEFAULT_MINING_READ_TIMEOUT_MS >= READ_TIMEOUT_FLOOR_MS,
         "DEFAULT_MINING_READ_TIMEOUT_MS must satisfy the shared mining read-timeout floor.");
 

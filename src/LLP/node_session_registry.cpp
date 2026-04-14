@@ -439,17 +439,13 @@ namespace LLP
         {
             std::lock_guard<std::mutex> lock(m_transitionMutex);
 
-            auto optEntry = m_mapLiveByKey.Get(hashKeyID);
-            if(optEntry.has_value() && !optEntry->AnyPortLive())
+            auto movedEntry = m_mapLiveByKey.GetAndRemove(hashKeyID);
+            if(movedEntry.has_value())
             {
-                auto movedEntry = m_mapLiveByKey.GetAndRemove(hashKeyID);
-                if(movedEntry.has_value())
-                {
-                    if(movedEntry->AnyPortLive())
-                        m_mapLiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
-                    else
-                        m_mapInactiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
-                }
+                if(movedEntry->AnyPortLive())
+                    m_mapLiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
+                else
+                    m_mapInactiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
             }
 
             debug::log(3, FUNCTION, "Marked disconnected key=", hashKeyID.SubString(),
@@ -556,8 +552,18 @@ namespace LLP
                 break;
 
             auto liveEntry = m_mapInactiveByKey.Get(pair.first);
-            if(!liveEntry.has_value() || liveEntry->AnyPortLive())
+            if(!liveEntry.has_value())
                 continue;
+
+            if(liveEntry->AnyPortLive())
+            {
+                debug::warning(FUNCTION, "Inactive cache contained live session ",
+                               liveEntry->nSessionId, " for key ", pair.first.SubString(),
+                               " — restoring it to the live map");
+                m_mapInactiveByKey.Erase(pair.first);
+                m_mapLiveByKey.InsertOrUpdate(pair.first, liveEntry.value());
+                continue;
+            }
 
             m_mapInactiveByKey.Erase(pair.first);
             m_mapSessionToKey.Erase(liveEntry->nSessionId);
