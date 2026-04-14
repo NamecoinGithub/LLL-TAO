@@ -975,7 +975,8 @@ namespace LLP
         if(nRemoved < nToRemove)
         {
             debug::log(1, FUNCTION, "Cache remains over limit (", GetMinerCount(), "/", nMaxSize,
-                       ") because only active authenticated miners remain. Admission control will reject new connections; consider increasing the cache limit or monitoring active miner count.");
+                       ") because only active authenticated miners remain.");
+            debug::log(1, FUNCTION, "Admission control will reject new connections; consider increasing the cache limit or monitoring active miner count.");
         }
 
         return nRemoved;
