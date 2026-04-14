@@ -212,13 +212,17 @@ namespace MiningConstants
      *  This is intentionally coupled to NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS
      *  so transport-idle policy and session-liveness policy cannot drift apart.
      */
+    /** Session-liveness timeout promoted to uint64 before millisecond conversion. */
+    constexpr uint64_t READ_TIMEOUT_FLOOR_SEC_U64 =
+        static_cast<uint64_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
+
     /** 24-hour session-liveness floor expressed in milliseconds before narrowing. */
     constexpr uint64_t READ_TIMEOUT_FLOOR_MS_U64 =
-        NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL;
+        READ_TIMEOUT_FLOOR_SEC_U64 * 1000ULL;
 
-    static_assert(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS <=
+    static_assert(READ_TIMEOUT_FLOOR_SEC_U64 <=
             std::numeric_limits<uint64_t>::max() / 1000ULL,
-        "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint64 milliseconds.");
+        "SESSION_LIVENESS_TIMEOUT_SECONDS must not overflow uint64 during ms conversion.");
     static_assert(READ_TIMEOUT_FLOOR_MS_U64 <=
             static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
         "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint32 milliseconds.");

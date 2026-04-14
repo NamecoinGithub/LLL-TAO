@@ -838,6 +838,9 @@ namespace LLP
                 if(!ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
                     return false;
 
+                /* hashKeyID==0 is the unauthenticated/pre-session sentinel, so
+                 * only canonical authenticated sessions can be revalidated
+                 * against NodeSessionRegistry. */
                 if(ctx.hashKeyID != 0)
                 {
                     auto optEntry = NodeSessionRegistry::Get().LookupByKey(ctx.hashKeyID);
