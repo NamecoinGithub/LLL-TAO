@@ -212,6 +212,7 @@ namespace MiningConstants
      *  This is intentionally coupled to NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS
      *  so transport-idle policy and session-liveness policy cannot drift apart.
      */
+    /** 24-hour session-liveness floor expressed in milliseconds before narrowing. */
     constexpr uint64_t READ_TIMEOUT_FLOOR_MS_U64 =
         NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL;
 
