@@ -713,7 +713,7 @@ namespace LLP
 
                 /* Create initial context with connection address for auth */
                 const std::string strIP = address.ToStringIP();
-                std::string strAddr = strIP + ":" + std::to_string(address.GetPort());
+                std::string strEndpoint = strIP + ":" + std::to_string(address.GetPort());
                 fAuthenticatedAtomic.store(false, std::memory_order_relaxed);
                 fHandshakeInProgressAtomic.store(false, std::memory_order_relaxed);
                 context = MiningContext()
@@ -727,7 +727,7 @@ namespace LLP
                     0,  // nChannel - not set yet
                     TAO::Ledger::ChainState::nBestHeight.load(),  // nHeight - current chain height
                     runtime::unifiedtimestamp(),
-                    strAddr,  // strAddress - for Falcon auth message
+                    strEndpoint,  // strAddress - for Falcon auth message
                     0,  // nProtocolVersion
                     false,  // fAuthenticated
                     0,  // nSessionId
@@ -756,7 +756,7 @@ namespace LLP
                 }
 
                 /* Register with StatelessMinerManager for tracking */
-                StatelessMinerManager::Get().UpdateMiner(strAddr, context, 1);
+                StatelessMinerManager::Get().UpdateMiner(strEndpoint, context, 1);
 
                 return;
             }

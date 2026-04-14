@@ -106,18 +106,18 @@ namespace LLP
 
                 if(!optEntry.has_value() && pCurrentContext->hashGenesis != 0)
                 {
-                    MiningContext repairedContext = pCurrentContext->WithSession(
+                    MiningContext canonicalContext = pCurrentContext->WithSession(
                         MiningContext::DeriveSessionId(pCurrentContext->hashKeyID));
 
                     auto [nCanonicalSessionId, fNewSession] = NodeSessionRegistry::Get().RegisterOrRefresh(
-                        repairedContext.hashKeyID,
-                        repairedContext.hashGenesis,
-                        repairedContext,
-                        repairedContext.nProtocolLane);
+                        canonicalContext.hashKeyID,
+                        canonicalContext.hashGenesis,
+                        canonicalContext,
+                        canonicalContext.nProtocolLane);
 
                     debug::log(1, FUNCTION,
                         "SESSION_STATUS: reconciled missing session via authenticated key=",
-                        repairedContext.hashKeyID.SubString(),
+                        canonicalContext.hashKeyID.SubString(),
                         " requested=0x", std::hex, req.session_id,
                         " canonical=0x", nCanonicalSessionId, std::dec,
                         fNewSession ? " (re-registered)" : " (refreshed)");
@@ -129,7 +129,7 @@ namespace LLP
                     return SessionStatus::BuildAckPayload(
                         nCanonicalSessionId,
                         nLaneFlag | SessionStatus::LANE_AUTHENTICATED,
-                        static_cast<uint32_t>(repairedContext.GetSessionDuration(runtime::unifiedtimestamp())),
+                        static_cast<uint32_t>(canonicalContext.GetSessionDuration(runtime::unifiedtimestamp())),
                         req.status_flags);
                 }
 
