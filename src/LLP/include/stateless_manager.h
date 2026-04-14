@@ -136,6 +136,23 @@ namespace LLP
         bool TransformMinerBySession(uint32_t nSessionId,
                                      std::function<MiningContext(const MiningContext&)> transformer);
 
+        /** TransformMinerByKeyID
+         *
+         *  Atomically transform a miner's context looked up by canonical Falcon key ID.
+         *  This is the preferred authenticated path because hashKeyID remains stable
+         *  even when the transport address changes.
+         *
+         *  @param[in] hashKeyID Canonical Falcon key identifier
+         *  @param[in] transformer Function to produce new context from current context
+         *  @param[in] nLane Mining lane (0=Legacy, 1=Stateless)
+         *
+         *  @return true if miner was found and transformed
+         *
+         **/
+        bool TransformMinerByKeyID(const uint256_t& hashKeyID,
+                                   std::function<MiningContext(const MiningContext&)> transformer,
+                                   uint8_t nLane = 0);
+
         /** GetMinerLane
          *
          *  Retrieve the last known mining lane for an address.

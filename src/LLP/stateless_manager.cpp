@@ -301,6 +301,29 @@ namespace LLP
         return TransformMiner(optAddress.value(), transformer);
     }
 
+
+    /* Atomically transform a miner's context looked up by canonical key ID */
+    bool StatelessMinerManager::TransformMinerByKeyID(
+        const uint256_t& hashKeyID,
+        std::function<MiningContext(const MiningContext&)> transformer,
+        uint8_t nLane
+    )
+    {
+        auto optCanonicalEntry = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
+        if(optCanonicalEntry.has_value())
+        {
+            auto optAddressByKey = mapKeyToAddress.Get(optCanonicalEntry->hashKeyID);
+            if(optAddressByKey.has_value())
+                return TransformMiner(optAddressByKey.value(), transformer, nLane);
+        }
+
+        auto optAddress = mapKeyToAddress.Get(hashKeyID);
+        if(!optAddress.has_value())
+            return false;
+
+        return TransformMiner(optAddress.value(), transformer, nLane);
+    }
+
     /* Get miner lane by address */
     std::optional<uint8_t> StatelessMinerManager::GetMinerLane(
         const std::string& strAddress
@@ -423,6 +446,10 @@ namespace LLP
         const uint256_t& hashKeyID
     ) const
     {
+        auto optEntry = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
+        if(optEntry.has_value())
+            return CanonicalizeRegistryContext(optEntry.value());
+
         auto optAddress = mapKeyToAddress.Get(hashKeyID);
         if(!optAddress.has_value())
             return std::nullopt;

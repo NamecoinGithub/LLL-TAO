@@ -1498,14 +1498,17 @@ namespace LLP
             return false;
         }
 
-        /* Consult the authoritative StatelessMinerManager context when available.
-         * Primary: GetMinerContextByAddressOrIP() handles ephemeral port changes (GAP 3).
-         * Fallback: construct from per-connection member variables (pre-manager state).
-         * Third parameter (fMigrateAddress=false): read-only lookup, do not re-key the
-         * context address in the manager — migration is reserved for SUBMIT_BLOCK. */
+        /* Consult the authoritative canonical mining context when available.
+         * Prefer hashKeyID because it survives address churn; only fall back to the
+         * session/address convenience indexes when no authenticated key is known. */
         const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-        auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-            strLookupAddr, nSessionId, /* fMigrateAddress= */ false);
+        std::optional<MiningContext> optCtx;
+        if(hashKeyID != 0)
+            optCtx = StatelessMinerManager::Get().GetMinerContextByKeyID(hashKeyID);
+
+        if(!optCtx.has_value())
+            optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
+                strLookupAddr, nSessionId, /* fMigrateAddress= */ false);
 
         MiningContext ctx = [&]() -> MiningContext
         {
@@ -2457,21 +2460,25 @@ namespace LLP
          * The live connection context has hashKeyID=0 for legacy-lane miners; the
          * StatelessMinerManager carries the full context populated during auth.
          *
-         * Also resolves nCrossLaneSessionId for the cross-lane SUBMIT_BLOCK fallback
-         * path (GAP 3 hardening: IP-only lookup if IP:port misses on reconnect). */
+         * Also resolves nCrossLaneSessionId from canonical identity when possible. */
         uint32_t nCrossLaneSessionId = nSessionId;   /* default: per-connection session */
         {
             const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-            const auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-                strLookupAddr, nSessionId, true);
+            std::optional<MiningContext> optCtx;
+            if(hashKeyID != 0)
+                optCtx = StatelessMinerManager::Get().GetMinerContextByKeyID(hashKeyID);
+
+            if(!optCtx.has_value())
+                optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
+                    strLookupAddr, nSessionId, true);
             if(optCtx.has_value())
             {
                 nCrossLaneSessionId = optCtx->nSessionId;
-                if(optCtx->strAddress != strLookupAddr)
+                if(hashKeyID != 0 && optCtx->hashKeyID == hashKeyID)
                 {
-                    debug::log(1, FUNCTION, "Legacy lane: resolved session via IP-only fallback from ",
-                               optCtx->strAddress, " to ", strLookupAddr,
-                               ", session=", nCrossLaneSessionId);
+                    debug::log(1, FUNCTION, "Legacy lane: resolved canonical submit context via hashKeyID=",
+                               hashKeyID.SubString(), " session=", nCrossLaneSessionId,
+                               " addr=", optCtx->strAddress);
                 }
                 const SessionConsistencyResult consistency = optCtx->ValidateConsistency();
                 if(consistency != SessionConsistencyResult::Ok)

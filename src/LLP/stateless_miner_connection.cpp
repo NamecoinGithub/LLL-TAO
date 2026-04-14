@@ -88,6 +88,25 @@ namespace LLP
 {
     namespace
     {
+        bool TransformTrackedMiner(
+            const MiningContext& ctx,
+            std::function<MiningContext(const MiningContext&)> transformer,
+            uint8_t nLane = 1)
+        {
+            auto& manager = StatelessMinerManager::Get();
+
+            if(ctx.hashKeyID != 0)
+                return manager.TransformMinerByKeyID(ctx.hashKeyID, std::move(transformer), nLane);
+
+            if(!ctx.strAddress.empty())
+                return manager.TransformMiner(ctx.strAddress, std::move(transformer), nLane);
+
+            return false;
+        }
+    }
+
+    namespace
+    {
         bool SequenceDiagnosticsEnabled()
         {
             return config::GetBoolArg("-nseqdiag", false);
@@ -878,6 +897,23 @@ namespace LLP
                 ctxSnap = context;
             }
 
+            if(ctxSnap.hashKeyID != 0)
+            {
+                auto optCanonical = StatelessMinerManager::Get().GetMinerContextByKeyID(ctxSnap.hashKeyID);
+                if(optCanonical.has_value())
+                {
+                    if(optCanonical->nSessionId != 0 && optCanonical->nSessionId != ctxSnap.nSessionId)
+                    {
+                        debug::log(1, FUNCTION,
+                            "Canonical session refresh for keyID=", ctxSnap.hashKeyID.SubString(),
+                            " local_session=0x", std::hex, ctxSnap.nSessionId,
+                            " canonical_session=0x", optCanonical->nSessionId, std::dec);
+                    }
+
+                    ctxSnap = optCanonical.value();
+                }
+            }
+
             if(!PreflightSessionGate(PACKET, ctxSnap))
                 return true;
 
@@ -903,7 +939,7 @@ namespace LLP
                     return false;
                 }
 
-                context.strAddress = GetAddress().ToStringIP();
+                context.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
 
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
@@ -937,7 +973,7 @@ namespace LLP
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
@@ -1233,7 +1269,7 @@ namespace LLP
                  * avoiding TOCTOU race with NotifyNewRound. We capture chain state
                  * outside the transform and apply it atomically. */
                 {
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [](const MiningContext& current) {
                             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
                             return current.WithTimestamp(runtime::unifiedtimestamp())
@@ -2112,7 +2148,7 @@ namespace LLP
                 /* Atomic transform: update timestamp and height on CURRENT value in mapMiners */
                 {
                     uint32_t nHeight = nCurrentHeight;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                    TransformTrackedMiner(ctxSnap,
                         [nHeight](const MiningContext& current) {
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(nHeight);
@@ -2168,7 +2204,7 @@ namespace LLP
                 }
 
                 /* Atomic transform: update timestamp on CURRENT value in mapMiners */
-                StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                TransformTrackedMiner(ctxSnap,
                     [](const MiningContext& current) {
                         return current.WithTimestamp(runtime::unifiedtimestamp());
                     }, 1);
@@ -2344,7 +2380,7 @@ namespace LLP
                     bool fSent = fTemplateStale;  // approximation for atomic transform
                     uint32_t nUH = snap.nUnifiedHeight;
                     uint1024_t hashBest = snap.hashBestChain;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                    TransformTrackedMiner(ctxSnap,
                         [fSent, nUH, hashBest](const MiningContext& current) {
                             if(fSent)
                                 return current.WithTimestamp(runtime::unifiedtimestamp())
@@ -2649,7 +2685,7 @@ namespace LLP
                  * updates from NotifyNewRound. */
                 {
                     MiningContext authCtx = context;  /* snapshot of all auth state */
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [authCtx](const MiningContext& current) {
                             /* Start from CURRENT (preserves height from NotifyNewRound),
                              * then overlay auth-specific fields from connection context */
@@ -2682,11 +2718,12 @@ namespace LLP
                      * FailoverConnectionTracker::IsFailover() returns true when the CONNECT
                      * event found no recoverable session for this IP, indicating the miner
                      * has failed over to this node and performed a full fresh handshake. */
-                    if(FailoverConnectionTracker::Get().IsFailover(context.strAddress))
+                    const std::string strFailoverIP = GetAddress().ToStringIP();
+                    if(FailoverConnectionTracker::Get().IsFailover(strFailoverIP))
                     {
                         ChannelStateManager::NotifyFailoverConnection(context.hashKeyID, context.strAddress);
                         /* Clear the pending failover flag now that auth has completed */
-                        FailoverConnectionTracker::Get().ClearConnection(context.strAddress);
+                        FailoverConnectionTracker::Get().ClearConnection(strFailoverIP);
                     }
                 }
                 
