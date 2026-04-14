@@ -209,6 +209,8 @@ namespace MiningConstants
      *  Mining read-idle timeout is intentionally aligned with the 24-hour
      *  keepalive/session liveness window so a healthy authenticated miner is
      *  not disconnected earlier than the node would expire its session.
+     *  This is intentionally coupled to NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS
+     *  so transport-idle policy and session-liveness policy cannot drift apart.
      */
     constexpr uint32_t READ_TIMEOUT_FLOOR_MS =
         static_cast<uint32_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL);

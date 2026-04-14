@@ -21,6 +21,7 @@ ________________________________________________________________________________
 #include <LLC/types/uint1024.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <optional>
 #include <atomic>
@@ -522,6 +523,9 @@ namespace LLP
 
         /** Reverse lookup: nSessionId → hashKeyID **/
         util::ConcurrentHashMap<uint32_t, uint256_t> m_mapSessionToKey;
+
+        /** Serializes live↔inactive map transitions to avoid split-map races. **/
+        mutable std::mutex m_transitionMutex;
     };
 
 } // namespace LLP

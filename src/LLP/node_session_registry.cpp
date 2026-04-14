@@ -256,6 +256,24 @@ namespace LLP
             return {nSessionId, false};  // Not new
         }
 
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+
+        /* Retry the live map under transition lock in case a concurrent thread
+         * promoted the session after the first lock-free refresh attempt. */
+        fTransformed = m_mapLiveByKey.Transform(hashKeyID, fnRefreshEntry);
+        if(fTransformed)
+        {
+            auto optEntry = m_mapLiveByKey.Get(hashKeyID);
+            if(optEntry.has_value())
+                fnSyncStore(optEntry.value());
+
+            debug::log(3, FUNCTION, "Refreshed session ", nSessionId,
+                       " for key ", hashKeyID.SubString(),
+                       " lane=", (lane == ProtocolLane::STATELESS ? "STATELESS" : "LEGACY"));
+
+            return {nSessionId, false};
+        }
+
         /* Reactivate a disconnected session from the inactive cache. */
         auto optInactive = m_mapInactiveByKey.GetAndRemove(hashKeyID);
         if(optInactive.has_value())
@@ -270,22 +288,6 @@ namespace LLP
                        " lane=", (lane == ProtocolLane::STATELESS ? "STATELESS" : "LEGACY"));
 
             return {entry.nSessionId, false};
-        }
-
-        /* Retry the live map once more in case a concurrent thread promoted the
-         * session between the first live transform and the inactive removal. */
-        fTransformed = m_mapLiveByKey.Transform(hashKeyID, fnRefreshEntry);
-        if(fTransformed)
-        {
-            auto optEntry = m_mapLiveByKey.Get(hashKeyID);
-            if(optEntry.has_value())
-                fnSyncStore(optEntry.value());
-
-            debug::log(3, FUNCTION, "Refreshed session ", nSessionId,
-                       " for key ", hashKeyID.SubString(),
-                       " lane=", (lane == ProtocolLane::STATELESS ? "STATELESS" : "LEGACY"));
-
-            return {nSessionId, false};
         }
 
         /* New session — live runtime state is non-evictable.
@@ -435,6 +437,8 @@ namespace LLP
 
         if(fTransformed)
         {
+            std::lock_guard<std::mutex> lock(m_transitionMutex);
+
             auto optEntry = m_mapLiveByKey.Get(hashKeyID);
             if(optEntry.has_value() && !optEntry->AnyPortLive())
             {
