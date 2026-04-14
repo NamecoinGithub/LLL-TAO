@@ -989,7 +989,7 @@ namespace LLP
          * Non-exempt connections use the DataThread TIMEOUT (server-configured).
          * Authenticated mining connections (IsTimeoutExempt == true) use the
          * virtual GetReadTimeout() which returns a longer but finite value from
-         * the shared MiningLivenessPolicy (default 1800s / 30 minutes, with a
+         * the shared MiningConstants helpers (default 86400s / 24 hours, with a
          * floor applied to any runtime override).  This prevents a stalled
          * read pipeline from persisting indefinitely
          * while server-initiated PUSH notifications continue to work

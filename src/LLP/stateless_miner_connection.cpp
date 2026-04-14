@@ -27,7 +27,6 @@ ________________________________________________________________________________
 #include <LLP/include/opcode_utility.h>
 #include <LLP/include/push_notification.h>
 #include <LLP/include/mining_constants.h>
-#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/mining_session_health.h>
 #include <LLP/include/session_status.h>
 #include <LLP/include/session_status_utility.h>
@@ -2740,7 +2739,7 @@ namespace LLP
                      * policy value, NOT a per-context field.  nSessionTimeout
                      * was removed from MiningContext. */
                     const uint64_t nLivenessTimeout =
-                        MiningLivenessPolicy::GetSessionLivenessTimeoutSec(context.strAddress);
+                        MiningConstants::GetSessionLivenessTimeoutSec(context.strAddress);
                     StatelessPacket sessionStart(StatelessOpcodes::SESSION_START);
                     sessionStart.DATA = SessionStartPacket::BuildPayload(
                         context.nSessionId, nLivenessTimeout, context.hashGenesis);
@@ -4190,13 +4189,12 @@ namespace LLP
 
 
     /* GetReadTimeout - authenticated miners use a long but finite read-idle
-     * timeout sourced from the shared MiningLivenessPolicy.  Runtime config is
-     * clamped to the shared safety floor so Prime miners are not disconnected
-     * during legitimate deep-search idle periods. */
+     * timeout sourced from the shared MiningConstants helpers.  Runtime config
+     * is clamped to the shared 24-hour safety floor. */
     uint32_t StatelessMinerConnection::GetReadTimeout() const
     {
         if(fAuthenticatedAtomic.load(std::memory_order_relaxed))
-            return MiningLivenessPolicy::GetConfiguredReadTimeoutMs();
+            return MiningConstants::GetConfiguredReadTimeoutMs();
 
         return 0;  /* Use DataThread default TIMEOUT for unauthenticated connections */
     }

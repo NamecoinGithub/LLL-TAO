@@ -28,7 +28,6 @@ ________________________________________________________________________________
 
 #include <LLP/include/trust_address.h>
 #include <LLP/include/auto_cooldown_manager.h>
-#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/node_session_registry.h>
@@ -1353,7 +1352,7 @@ namespace LLP
                 if constexpr (is_miner_protocol_v<ProtocolType>)
                 {
                     const uint64_t nSessionLivenessTimeoutSec =
-                        MiningLivenessPolicy::GetSessionLivenessTimeoutSec();
+                        MiningConstants::GetSessionLivenessTimeoutSec();
 
                     /* SweepExpired runs first to mark dead registry entries.
                      * Then CleanupInactive catches any orphaned entries in

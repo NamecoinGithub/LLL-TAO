@@ -307,9 +307,9 @@ namespace LLP
         /** GetReadTimeout
          *
          *  Authenticated stateless miners use a long but finite read-idle
-         *  timeout sourced from the shared MiningLivenessPolicy.  The runtime
+         *  timeout sourced from the shared MiningConstants helpers.  The runtime
          *  override is clamped so it cannot fall below the safety floor
-         *  required for Prime mining workloads and mining liveness behavior.
+         *  required for the 24-hour mining liveness contract.
          *
          *  @return read-idle timeout in milliseconds, or 0 for default.
          *

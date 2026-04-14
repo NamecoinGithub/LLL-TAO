@@ -13,9 +13,9 @@ ________________________________________________________________________________
 
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/genesis_constants.h>
+#include <LLP/include/mining_constants.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/node_session_registry.h>
-#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/mining_timers.h>
 #include <LLP/include/session_store.h>
 
@@ -844,7 +844,7 @@ namespace LLP
         uint32_t nToRemove = static_cast<uint32_t>(nCurrentSize - nMaxSize);
         uint32_t nRemoved = 0;
         const uint64_t nNow = runtime::unifiedtimestamp();
-        const uint64_t nInactiveTimeoutSec = MiningLivenessPolicy::GetSessionLivenessTimeoutSec();
+        const uint64_t nInactiveTimeoutSec = MiningConstants::GetSessionLivenessTimeoutSec();
 
         debug::log(1, FUNCTION, "Cache limit exceeded (", nCurrentSize, "/", nMaxSize, 
                   "), removing ", nToRemove, " least recently active entries");
