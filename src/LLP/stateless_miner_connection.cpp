@@ -694,7 +694,8 @@ namespace LLP
                 LOCK(MUTEX);
 
                 /* Create initial context with connection address for auth */
-                std::string strAddr = GetAddress().ToStringIP();
+                const std::string strIP = GetAddress().ToStringIP();
+                std::string strAddr = strIP + ":" + std::to_string(GetAddress().GetPort());
                 fAuthenticatedAtomic.store(false, std::memory_order_relaxed);
                 fHandshakeInProgressAtomic.store(false, std::memory_order_relaxed);
                 context = MiningContext()
@@ -725,13 +726,13 @@ namespace LLP
                  * Record it via FailoverConnectionTracker so that after the subsequent fresh
                  * Falcon handshake completes we can notify ChannelStateManager and update
                  * the Colin report. */
-                if(strAddr != "127.0.0.1" && strAddr != "::1")
+                if(strIP != "127.0.0.1" && strIP != "::1")
                 {
-                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strAddr);
+                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strIP);
                     if(!optExistingCtx.has_value())
                     {
-                        FailoverConnectionTracker::Get().RecordConnection(strAddr);
-                        debug::log(0, FUNCTION, "No prior session for ", strAddr,
+                        FailoverConnectionTracker::Get().RecordConnection(strIP);
+                        debug::log(0, FUNCTION, "No prior session for ", strIP,
                                    " — recording as potential failover connection");
                     }
                 }
@@ -812,7 +813,10 @@ namespace LLP
                  * MarkDisconnected) internally. */
                 {
                     LOCK(MUTEX);
-                    StatelessMinerManager::Get().RemoveMiner(context.strAddress);
+                    if(context.hashKeyID != 0)
+                        StatelessMinerManager::Get().RemoveMinerByKeyID(context.hashKeyID);
+                    else if(!context.strAddress.empty())
+                        StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 
                 return;
@@ -2381,9 +2385,15 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext contextSnapshot;
+                {
+                    LOCK(MUTEX);
+                    contextSnapshot = context;
+                }
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_PRIMARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_PRIMARY_ALIVE, &contextSnapshot, fSessionValid);
 
                 StatelessPacket ackResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                 ackResponse.DATA = vAck;

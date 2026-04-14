@@ -554,9 +554,15 @@ namespace LLP
                  * StatelessMinerManager entry from prior stateless activity. */
                 if(fMinerAuthenticated)
                 {
-                    const std::string strMinerAddress = GetAddress().ToStringIP();
-                    if(!strMinerAddress.empty())
-                        StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    if(hashKeyID != 0)
+                        StatelessMinerManager::Get().RemoveMinerByKeyID(hashKeyID);
+                    else
+                    {
+                        const std::string strMinerAddress =
+                            GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+                        if(!strMinerAddress.empty())
+                            StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    }
                 }
 
                 /* Notify Colin agent on disconnect (only if genesis was known) */
@@ -788,9 +794,22 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext currentContext(
+                    nSubscribedChannel,
+                    nBestHeight.load(std::memory_order_relaxed),
+                    runtime::unifiedtimestamp(),
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort()),
+                    0,
+                    fMinerAuthenticated.load(std::memory_order_relaxed),
+                    nSessionId,
+                    hashKeyID,
+                    hashGenesis
+                );
+                currentContext = currentContext.WithProtocolLane(ProtocolLane::LEGACY);
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_SECONDARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_SECONDARY_ALIVE, &currentContext, fSessionValid);
 
                 respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
 
