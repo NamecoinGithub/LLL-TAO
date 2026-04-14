@@ -215,6 +215,9 @@ namespace MiningConstants
     constexpr uint64_t READ_TIMEOUT_FLOOR_MS_U64 =
         NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS * 1000ULL;
 
+    static_assert(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS <=
+            std::numeric_limits<uint64_t>::max() / 1000ULL,
+        "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint64 milliseconds.");
     static_assert(READ_TIMEOUT_FLOOR_MS_U64 <=
             static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
         "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint32 milliseconds.");

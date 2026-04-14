@@ -256,6 +256,10 @@ namespace LLP
             return {nSessionId, false};  // Not new
         }
 
+        /* Split-map transitions are serialized only on the slow path after the
+         * lock-free live refresh misses.  This keeps the common live-session
+         * refresh path lock-free while ensuring inactive↔live promotion cannot
+         * race with disconnect demotion. */
         std::lock_guard<std::mutex> lock(m_transitionMutex);
 
         /* Retry the live map under transition lock in case a concurrent thread
@@ -439,6 +443,10 @@ namespace LLP
         {
             std::lock_guard<std::mutex> lock(m_transitionMutex);
 
+            /* Remove-and-classify under the transition lock.  A concurrent
+             * refresh that misses the now-absent live entry must wait on the
+             * same transition mutex before promoting from inactive or creating
+             * a new entry, so the entry cannot end up live and inactive at once. */
             auto movedEntry = m_mapLiveByKey.GetAndRemove(hashKeyID);
             if(movedEntry.has_value())
             {

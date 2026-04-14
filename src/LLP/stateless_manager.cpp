@@ -825,6 +825,10 @@ namespace LLP
     uint32_t StatelessMinerManager::EnforceCacheLimit(size_t nMaxSize)
     {
         const uint64_t nNow = runtime::unifiedtimestamp();
+
+        /* This runs only on the periodic cleanup path, not on share-submission
+         * or authentication hot paths, so per-entry registry revalidation is an
+         * acceptable trade-off for keeping active runtime state non-evictable. */
         const auto fnIsInactiveCandidate =
             [nNow](const MiningContext& ctx) -> bool
             {
