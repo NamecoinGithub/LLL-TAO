@@ -104,7 +104,7 @@ namespace LLP
             {
                 optEntry = NodeSessionRegistry::Get().LookupByKey(pCurrentContext->hashKeyID);
 
-                if(!optEntry.has_value() && pCurrentContext->hashGenesis != 0)
+                if(!optEntry.has_value() && pCurrentContext != nullptr && pCurrentContext->hashGenesis != 0)
                 {
                     MiningContext repairedContext = pCurrentContext->WithSession(
                         MiningContext::DeriveSessionId(pCurrentContext->hashKeyID));
@@ -122,6 +122,9 @@ namespace LLP
                         " canonical=0x", nCanonicalSessionId, std::dec,
                         fNewSession ? " (re-registered)" : " (refreshed)");
 
+                    /* Returning the canonical registry session ID here is the explicit
+                     * reconciliation contract: the wire alias may drift, but the ACK
+                     * repairs the miner back onto the registry-derived session. */
                     fValid = true;
                     return SessionStatus::BuildAckPayload(
                         nCanonicalSessionId,

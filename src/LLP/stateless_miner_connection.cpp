@@ -906,6 +906,9 @@ namespace LLP
                 auto optCanonical = StatelessMinerManager::Get().GetMinerContextByKeyID(ctxSnap.hashKeyID);
                 if(optCanonical.has_value())
                 {
+                    /* Refresh to the canonical authenticated snapshot even when the
+                     * session_id is unchanged, because crypto/liveness fields may
+                     * have been repaired or refreshed in the registry-backed store. */
                     if(optCanonical->nSessionId != 0 && optCanonical->nSessionId != ctxSnap.nSessionId)
                     {
                         debug::log(1, FUNCTION,
