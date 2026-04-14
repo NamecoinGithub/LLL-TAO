@@ -574,6 +574,10 @@ namespace LLP
             if(!snapshotCtx.IsConsideredInactive(nNow, nTimeoutSec))
                 continue;
 
+            /* Re-read the live entry before deleting to avoid removing a miner that
+             * was refreshed or replaced after the snapshot was taken.  This mirrors
+             * NodeSessionRegistry::SweepExpired() and intentionally prefers a fresh
+             * second lookup over acting on stale snapshot state. */
             auto optLive = mapMiners.Get(pair.first);
             if(!optLive.has_value())
                 continue;
