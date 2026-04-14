@@ -505,7 +505,7 @@ namespace LLP
         if(m_mapByKey.Size() > nMaxSize)
         {
             debug::log(1, FUNCTION, "Registry remains over limit (", m_mapByKey.Size(), "/",
-                       nMaxSize, ") because all remaining sessions are live; preserving live sessions.");
+                       nMaxSize, ") because all remaining sessions are live; preserving live sessions and relying on connection admission control. Consider increasing the registry limit if this persists.");
         }
 
         return nRemoved;
