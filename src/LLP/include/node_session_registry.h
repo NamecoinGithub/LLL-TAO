@@ -485,8 +485,9 @@ namespace LLP
         /** EnforceCacheLimit
          *
          *  Enforce maximum capacity on the registry to prevent unbounded growth
-         *  from auth floods (BUG-5 fix).  Evicts the oldest expired sessions
-         *  first, then the oldest disconnected sessions if still over limit.
+         *  from auth floods (BUG-5 fix).  Evicts only entries with no live
+         *  connections; live sessions are authoritative runtime state and are
+         *  never killed to satisfy cache pressure.
          *
          *  @param[in] nMaxSize Maximum allowed entries (default: 1000)
          *

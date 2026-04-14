@@ -27,6 +27,7 @@ ________________________________________________________________________________
 #include <LLP/include/opcode_utility.h>
 #include <LLP/include/push_notification.h>
 #include <LLP/include/mining_constants.h>
+#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/mining_session_health.h>
 #include <LLP/include/session_status.h>
 #include <LLP/include/session_status_utility.h>
@@ -2735,9 +2736,11 @@ namespace LLP
                     debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication");
 
                     /* Build SESSION_START using shared utility.
-                     * The session liveness timeout is a node-wide constant from NodeCache,
-                     * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                    const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(context.strAddress);
+                     * The session liveness timeout is a shared mining-liveness
+                     * policy value, NOT a per-context field.  nSessionTimeout
+                     * was removed from MiningContext. */
+                    const uint64_t nLivenessTimeout =
+                        MiningLivenessPolicy::GetSessionLivenessTimeoutSec(context.strAddress);
                     StatelessPacket sessionStart(StatelessOpcodes::SESSION_START);
                     sessionStart.DATA = SessionStartPacket::BuildPayload(
                         context.nSessionId, nLivenessTimeout, context.hashGenesis);
@@ -4187,14 +4190,13 @@ namespace LLP
 
 
     /* GetReadTimeout - authenticated miners use a long but finite read-idle
-     * timeout (default 600s / 10 minutes, configurable via -miningreadtimeout).
-     * This replaces the previous infinite exemption from read-idle timeout,
-     * ensuring that a stalled read pipeline is eventually cleaned up rather
-     * than persisting indefinitely while PUSH notifications continue to work. */
+     * timeout sourced from the shared MiningLivenessPolicy.  Runtime config is
+     * clamped to the shared safety floor so Prime miners are not disconnected
+     * during legitimate deep-search idle periods. */
     uint32_t StatelessMinerConnection::GetReadTimeout() const
     {
         if(fAuthenticatedAtomic.load(std::memory_order_relaxed))
-            return config::GetArg("-miningreadtimeout", MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS);
+            return MiningLivenessPolicy::GetConfiguredReadTimeoutMs();
 
         return 0;  /* Use DataThread default TIMEOUT for unauthenticated connections */
     }

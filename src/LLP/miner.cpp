@@ -1141,9 +1141,11 @@ namespace LLP
                         debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication (legacy lane)");
 
                         /* Build SESSION_START payload using shared utility.
-                         * The session liveness timeout is a node-wide constant from NodeCache,
-                         * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                        const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(updatedContext.strAddress);
+                         * The session liveness timeout is a shared mining-liveness
+                         * policy value, NOT a per-context field.  nSessionTimeout
+                         * was removed from MiningContext. */
+                        const uint64_t nLivenessTimeout =
+                            MiningLivenessPolicy::GetSessionLivenessTimeoutSec(updatedContext.strAddress);
                         std::vector<uint8_t> vSessionStart = SessionStartPacket::BuildPayload(
                             nSessionId, nLivenessTimeout, hashGenesis);
 

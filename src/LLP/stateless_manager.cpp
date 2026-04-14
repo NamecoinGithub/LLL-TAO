@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #include <LLP/include/genesis_constants.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/node_session_registry.h>
+#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/mining_timers.h>
 #include <LLP/include/session_store.h>
 
@@ -842,6 +843,8 @@ namespace LLP
 
         uint32_t nToRemove = static_cast<uint32_t>(nCurrentSize - nMaxSize);
         uint32_t nRemoved = 0;
+        const uint64_t nNow = runtime::unifiedtimestamp();
+        const uint64_t nInactiveTimeoutSec = MiningLivenessPolicy::GetSessionLivenessTimeoutSec();
 
         debug::log(1, FUNCTION, "Cache limit exceeded (", nCurrentSize, "/", nMaxSize, 
                   "), removing ", nToRemove, " least recently active entries");
@@ -888,7 +891,7 @@ namespace LLP
             }
         }
 
-        /* Second pass: remove authenticated remote miners if needed */
+        /* Second pass: remove unauthenticated localhost miners if needed */
         if(nRemoved < nToRemove)
         {
             for(const auto& pair : vMiners)
@@ -901,11 +904,11 @@ namespace LLP
                     continue;
                 const MiningContext& ctx = optLive.value();
 
-                /* Skip localhost miners */
-                if(NodeCache::IsLocalhost(ctx.strAddress))
+                /* Only localhost miners in pass 2 */
+                if(!NodeCache::IsLocalhost(ctx.strAddress))
                     continue;
 
-                if(ctx.fAuthenticated)
+                if(!ctx.fAuthenticated)
                 {
                     if(RemoveMiner(pair.first))
                         ++nRemoved;
@@ -913,7 +916,9 @@ namespace LLP
             }
         }
 
-        /* Final pass: remove localhost miners if absolutely necessary */
+        /* Third pass: remove authenticated remote miners only if they are
+         * inactive.  Active authenticated miners are authoritative live state
+         * and must not be evicted under cache pressure. */
         if(nRemoved < nToRemove)
         {
             for(const auto& pair : vMiners)
@@ -921,11 +926,43 @@ namespace LLP
                 if(nRemoved >= nToRemove)
                     break;
 
-                if(!fnGetLive(pair.first).has_value())
+                auto optLive = fnGetLive(pair.first);
+                if(!optLive.has_value())
                     continue;
 
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
+                const MiningContext& ctx = optLive.value();
+                if(NodeCache::IsLocalhost(ctx.strAddress))
+                    continue;
+
+                if(ctx.fAuthenticated && ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
+                {
+                    if(RemoveMiner(pair.first))
+                        ++nRemoved;
+                }
+            }
+        }
+
+        /* Final pass: remove authenticated localhost miners only if they are inactive. */
+        if(nRemoved < nToRemove)
+        {
+            for(const auto& pair : vMiners)
+            {
+                if(nRemoved >= nToRemove)
+                    break;
+
+                auto optLive = fnGetLive(pair.first);
+                if(!optLive.has_value())
+                    continue;
+
+                const MiningContext& ctx = optLive.value();
+                if(!NodeCache::IsLocalhost(ctx.strAddress))
+                    continue;
+
+                if(ctx.fAuthenticated && ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
+                {
+                    if(RemoveMiner(pair.first))
+                        ++nRemoved;
+                }
             }
         }
 
@@ -933,6 +970,12 @@ namespace LLP
         {
             debug::log(1, FUNCTION, "Enforced cache limit: removed ", nRemoved, 
                       " miners (cache now at ", GetMinerCount(), "/", nMaxSize, ")");
+        }
+
+        if(nRemoved < nToRemove)
+        {
+            debug::log(1, FUNCTION, "Cache remains over limit (", GetMinerCount(), "/", nMaxSize,
+                      ") because only active authenticated miners remain. Admission control must reject new connections.");
         }
 
         return nRemoved;

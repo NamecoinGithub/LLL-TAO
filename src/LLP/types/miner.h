@@ -21,6 +21,7 @@ ________________________________________________________________________________
 #include <LLP/include/legacy_lane_handler.h>
 #include <LLP/include/auto_cooldown.h>
 #include <LLP/include/mining_constants.h>
+#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/get_block_policy.h>
 #include <TAO/Ledger/types/block.h>
 #include <Legacy/types/coinbase.h>
@@ -623,9 +624,10 @@ namespace LLP
 
         /** GetReadTimeout
          *
-         *  Authenticated legacy miners use a long but finite read-idle timeout
-         *  (default 600s / 10 minutes, configurable via -miningreadtimeout).
-         *  This prevents stalled read pipelines from persisting indefinitely.
+         *  Authenticated legacy miners use a long but finite read-idle timeout.
+         *  The effective value comes from the shared MiningLivenessPolicy so the
+         *  runtime override can never fall below the safety floor required for
+         *  Prime mining workloads and mining keepalive/health-probe behavior.
          *
          *  @return read-idle timeout in milliseconds, or 0 for default.
          *
@@ -633,7 +635,7 @@ namespace LLP
         uint32_t GetReadTimeout() const final
         {
             if(fMinerAuthenticated)
-                return config::GetArg("-miningreadtimeout", MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS);
+                return MiningLivenessPolicy::GetConfiguredReadTimeoutMs();
 
             return 0;
         }

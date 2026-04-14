@@ -28,6 +28,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/trust_address.h>
 #include <LLP/include/auto_cooldown_manager.h>
+#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/node_session_registry.h>
@@ -1351,18 +1352,20 @@ namespace LLP
 
                 if constexpr (is_miner_protocol_v<ProtocolType>)
                 {
+                    const uint64_t nSessionLivenessTimeoutSec =
+                        MiningLivenessPolicy::GetSessionLivenessTimeoutSec();
+
                     /* SweepExpired runs first to mark dead registry entries.
                      * Then CleanupInactive catches any orphaned entries in
                      * StatelessMinerManager via RemoveMiner's cross-cache
                      * propagation. */
-                    NodeSessionRegistry::Get().SweepExpired(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
-                    StatelessMinerManager::Get().CleanupInactive(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
+                    NodeSessionRegistry::Get().SweepExpired(nSessionLivenessTimeoutSec);
+                    StatelessMinerManager::Get().CleanupInactive(nSessionLivenessTimeoutSec);
                     StatelessMinerManager::Get().PurgeInactiveMiners();
 
                     /* Unified SessionStore sweep: removes expired sessions
                      * from the canonical store + all secondary indexes. */
-                    SessionStore::Get().SweepExpired(
-                        NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
+                    SessionStore::Get().SweepExpired(nSessionLivenessTimeoutSec);
 
                     /* Recover sessions whose cooldown has expired.
                      * This is the periodic cleanup path; sessions are also

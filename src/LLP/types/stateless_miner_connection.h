@@ -307,9 +307,9 @@ namespace LLP
         /** GetReadTimeout
          *
          *  Authenticated stateless miners use a long but finite read-idle
-         *  timeout (default 600s / 10 minutes, configurable via
-         *  -miningreadtimeout).  This prevents stalled read pipelines from
-         *  persisting indefinitely (shadow ban scenario).
+         *  timeout sourced from the shared MiningLivenessPolicy.  The runtime
+         *  override is clamped so it cannot fall below the safety floor
+         *  required for Prime mining workloads and mining liveness behavior.
          *
          *  @return read-idle timeout in milliseconds, or 0 for default.
          *

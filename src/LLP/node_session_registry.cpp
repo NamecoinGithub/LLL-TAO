@@ -466,7 +466,6 @@ namespace LLP
         if(m_mapByKey.Size() <= nMaxSize)
             return 0;
 
-        const uint64_t nNow = runtime::unifiedtimestamp();
         uint32_t nRemoved = 0;
 
         /* Collect all entries sorted by last activity (oldest first) */
@@ -476,43 +475,37 @@ namespace LLP
                 return a.second.nLastActivity < b.second.nLastActivity;
             });
 
-        /* Pass 1: Evict entries with no live connections (oldest first) */
+        /* Evict entries with no live connections (oldest first).
+         * Re-read the live entry before erasing so a refreshed session is not
+         * removed based on stale snapshot state. */
         for(const auto& pair : allSessions)
         {
             if(m_mapByKey.Size() <= nMaxSize)
                 break;
 
-            if(!pair.second.AnyPortLive())
-            {
-                m_mapByKey.Erase(pair.first);
-                m_mapSessionToKey.Erase(pair.second.nSessionId);
-                ++nRemoved;
-            }
-        }
+            if(pair.second.AnyPortLive())
+                continue;
 
-        /* Pass 2: If still over limit, evict oldest entries regardless of liveness */
-        if(m_mapByKey.Size() > nMaxSize)
-        {
-            for(const auto& pair : allSessions)
-            {
-                if(m_mapByKey.Size() <= nMaxSize)
-                    break;
+            auto liveEntry = m_mapByKey.Get(pair.first);
+            if(!liveEntry.has_value() || liveEntry->AnyPortLive())
+                continue;
 
-                /* May have been erased in pass 1, check existence */
-                auto liveEntry = m_mapByKey.Get(pair.first);
-                if(!liveEntry.has_value())
-                    continue;
-
-                m_mapByKey.Erase(pair.first);
-                m_mapSessionToKey.Erase(liveEntry->nSessionId);
-                ++nRemoved;
-            }
+            m_mapByKey.Erase(pair.first);
+            m_mapSessionToKey.Erase(liveEntry->nSessionId);
+            SessionStore::Get().Remove(pair.first);
+            ++nRemoved;
         }
 
         if(nRemoved > 0)
         {
             debug::log(1, FUNCTION, "Evicted ", nRemoved,
                        " sessions to enforce cache limit of ", nMaxSize);
+        }
+
+        if(m_mapByKey.Size() > nMaxSize)
+        {
+            debug::log(1, FUNCTION, "Registry remains over limit (", m_mapByKey.Size(), "/",
+                       nMaxSize, ") because all remaining sessions are live; preserving live sessions.");
         }
 
         return nRemoved;

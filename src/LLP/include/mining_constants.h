@@ -187,10 +187,15 @@ namespace MiningConstants
      *  the "shadow ban" scenario where PUSH works but all miner→node
      *  requests are silently dropped.
      *
-     *  Default: 600 000 ms (10 minutes).
-     *  Overridable at runtime via -miningreadtimeout=<ms>.
+     *  The shared MiningLivenessPolicy clamps runtime config so the effective
+     *  read timeout never falls below the safety floor derived from mining
+     *  liveness policy and Prime workload expectations.
+     *
+     *  Default: 1 800 000 ms (30 minutes).
+     *  Overridable at runtime via -miningreadtimeout=<ms>, subject to the
+     *  shared policy floor.
      */
-    constexpr uint32_t DEFAULT_MINING_READ_TIMEOUT_MS = 600000;
+    constexpr uint32_t DEFAULT_MINING_READ_TIMEOUT_MS = 1800000;
 
     //=========================================================================
     // DIFFICULTY CACHING

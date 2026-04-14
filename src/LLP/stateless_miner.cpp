@@ -24,6 +24,7 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_opcodes.h>
 #include <LLP/include/session_start_packet.h>
 #include <LLP/include/keepalive_v2.h>
+#include <LLP/include/mining_liveness_policy.h>
 #include <LLP/include/colin_mining_agent.h>
 
 #include <LLD/include/global.h>
@@ -1578,7 +1579,7 @@ namespace LLP
         /* Parse optional session parameters from packet.DATA */
         /* Format: [timeout (4 bytes, optional)] */
         const std::vector<uint8_t>& vData = packet.DATA;
-        uint64_t nRequestedTimeout = NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS;
+        uint64_t nRequestedTimeout = MiningLivenessPolicy::GetSessionLivenessTimeoutSec(context.strAddress);
         if(vData.size() >= 4)
         {
             /* Parse timeout as 4-byte little-endian */
@@ -1597,9 +1598,10 @@ namespace LLP
          *   and nKeepaliveCount to avoid wiping timing/liveness state.
          * - If session is not yet active (first explicit SESSION_START), initialize
          *   nSessionStart to now and reset keepalive counter.
-         * Note: The timeout is a node-wide constant (NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS),
-         * not stored per-context.  It is sent to the miner in the SESSION_START response
-         * payload so the miner knows the keepalive cadence the node requires. */
+         * Note: The timeout is a shared mining-liveness policy value, not
+         * stored per-context.  It is sent to the miner in the SESSION_START
+         * response payload so the miner knows the keepalive cadence the node
+         * requires. */
         MiningContext newContext = context.WithTimestamp(nNow);
         if(!fSessionAlreadyActive)
         {
