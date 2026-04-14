@@ -102,12 +102,13 @@ namespace LLP
             if(!optEntry.has_value() && pCurrentContext != nullptr
             && pCurrentContext->fAuthenticated && pCurrentContext->hashKeyID != 0)
             {
-                optEntry = NodeSessionRegistry::Get().LookupByKey(pCurrentContext->hashKeyID);
+                const MiningContext& currentContext = *pCurrentContext;
+                optEntry = NodeSessionRegistry::Get().LookupByKey(currentContext.hashKeyID);
 
-                if(!optEntry.has_value() && pCurrentContext->hashGenesis != 0)
+                if(!optEntry.has_value() && currentContext.hashGenesis != 0)
                 {
-                    MiningContext canonicalContext = pCurrentContext->WithSession(
-                        MiningContext::DeriveSessionId(pCurrentContext->hashKeyID));
+                    MiningContext canonicalContext = currentContext.WithSession(
+                        MiningContext::DeriveSessionId(currentContext.hashKeyID));
 
                     auto [nCanonicalSessionId, fNewSession] = NodeSessionRegistry::Get().RegisterOrRefresh(
                         canonicalContext.hashKeyID,
