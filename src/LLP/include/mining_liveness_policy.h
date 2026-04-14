@@ -44,7 +44,7 @@ namespace MiningLivenessPolicy
     inline uint32_t GetConfiguredReadTimeoutMs()
     {
         const int64_t nConfigured = config::GetArg(
-            std::string("-miningreadtimeout"),
+            "-miningreadtimeout",
             static_cast<int64_t>(MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS));
 
         const int64_t nClamped =

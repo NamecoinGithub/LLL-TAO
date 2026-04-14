@@ -891,7 +891,7 @@ namespace LLP
             }
         }
 
-        /* Second pass: remove unauthenticated localhost miners if needed */
+        /* Second pass: remove unauthenticated localhost miners if needed. */
         if(nRemoved < nToRemove)
         {
             for(const auto& pair : vMiners)
@@ -904,7 +904,7 @@ namespace LLP
                     continue;
                 const MiningContext& ctx = optLive.value();
 
-                /* Only localhost miners in pass 2 */
+                /* Only unauthenticated localhost miners in pass 2 */
                 if(!NodeCache::IsLocalhost(ctx.strAddress))
                     continue;
 
@@ -975,7 +975,7 @@ namespace LLP
         if(nRemoved < nToRemove)
         {
             debug::log(1, FUNCTION, "Cache remains over limit (", GetMinerCount(), "/", nMaxSize,
-                      ") because only active authenticated miners remain. Admission control must reject new connections.");
+                       ") because only active authenticated miners remain. Admission control must reject new connections.");
         }
 
         return nRemoved;
