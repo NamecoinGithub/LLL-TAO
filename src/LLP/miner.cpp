@@ -679,28 +679,23 @@ namespace LLP
                  * NotifyNewRound could overwrite connection-specific fields. */
                 MiningContext transformedCtx = optContext.value();
                 std::array<uint8_t, 4> prevSuffix = nMinerPrevblockSuffix;
+                const auto applyKeepaliveRefresh = [prevSuffix, &transformedCtx](const MiningContext& current) {
+                    const uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
+                    transformedCtx = current
+                        .WithTimestamp(nKeepaliveTimestamp)
+                        .WithKeepaliveCount(current.nKeepaliveCount + 1)
+                        .WithKeepaliveSent(current.nKeepaliveSent + 1)
+                        .WithLastKeepaliveTime(nKeepaliveTimestamp)
+                        .WithMinerPrevblockSuffix(prevSuffix);
+                    return transformedCtx;
+                };
                 const bool fUpdatedLaneContext = StatelessMinerManager::Get().TransformMiner(
                     strConnectionAddress,
-                    [prevSuffix, &transformedCtx](const MiningContext& current) {
-                        uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
-                        transformedCtx = current
-                            .WithTimestamp(nKeepaliveTimestamp)
-                            .WithKeepaliveCount(current.nKeepaliveCount + 1)
-                            .WithKeepaliveSent(current.nKeepaliveSent + 1)
-                            .WithLastKeepaliveTime(nKeepaliveTimestamp)
-                            .WithMinerPrevblockSuffix(prevSuffix);
-                        return transformedCtx;
-                    }, 0);
+                    applyKeepaliveRefresh, 0);
 
                 if(!fUpdatedLaneContext)
                 {
-                    const uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
-                    transformedCtx = transformedCtx
-                        .WithTimestamp(nKeepaliveTimestamp)
-                        .WithKeepaliveCount(transformedCtx.nKeepaliveCount + 1)
-                        .WithKeepaliveSent(transformedCtx.nKeepaliveSent + 1)
-                        .WithLastKeepaliveTime(nKeepaliveTimestamp)
-                        .WithMinerPrevblockSuffix(prevSuffix);
+                    transformedCtx = applyKeepaliveRefresh(transformedCtx);
 
                     debug::log(1, FUNCTION, "SESSION_KEEPALIVE: no exact legacy-lane manager entry for ",
                                strConnectionAddress, " - refreshed canonical session only");

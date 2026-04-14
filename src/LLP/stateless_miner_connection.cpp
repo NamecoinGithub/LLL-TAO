@@ -92,13 +92,12 @@ namespace LLP
          * Same-node cross-lane aliasing is no longer valid for live lane state. */
         bool TransformTrackedMiner(
             const MiningContext& ctx,
-            std::function<MiningContext(const MiningContext&)> transformer,
-            uint8_t nLane = 1)
+            std::function<MiningContext(const MiningContext&)> transformer)
         {
             auto& manager = StatelessMinerManager::Get();
 
             if(!ctx.strAddress.empty())
-                return manager.TransformMiner(ctx.strAddress, std::move(transformer), nLane);
+                return manager.TransformMiner(ctx.strAddress, std::move(transformer), 1);
 
             return false;
         }
@@ -965,7 +964,7 @@ namespace LLP
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
                             return updated;
-                        }, 1);
+                        });
                 }
                 
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
@@ -1259,7 +1258,7 @@ namespace LLP
                                           .WithHeight(stateBest.nHeight)
                                           .WithLastTemplateUnifiedHeight(stateBest.nHeight)
                                           .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
-                        }, 1);
+                        });
                 }
                 StatelessMinerManager::Get().IncrementTemplatesServed();
 
@@ -2113,7 +2112,7 @@ namespace LLP
                         [nHeight](const MiningContext& current) {
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(nHeight);
-                        }, 1);
+                        });
                 }
 
                 return true;
@@ -2168,7 +2167,7 @@ namespace LLP
                 TransformTrackedMiner(ctxSnap,
                     [](const MiningContext& current) {
                         return current.WithTimestamp(runtime::unifiedtimestamp());
-                    }, 1);
+                    });
 
                 return true;
             }
@@ -2350,7 +2349,7 @@ namespace LLP
                                               .WithHashLastBlock(hashBest);
                             else
                                 return current.WithTimestamp(runtime::unifiedtimestamp());
-                        }, 1);
+                        });
                 }
 
                 return true;
@@ -2666,7 +2665,7 @@ namespace LLP
                             if(!authCtx.vDisposablePubKey.empty())
                                 result = result.WithDisposableKey(authCtx.vDisposablePubKey, authCtx.hashDisposableKeyID);
                             return result;
-                        }, 1);
+                        });
                 }
 
                 /* Log session registration for auth packets */

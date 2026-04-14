@@ -281,52 +281,6 @@ namespace LLP
 
         return true;
     }
-
-
-    /* Atomically transform a miner's context looked up by session ID */
-    bool StatelessMinerManager::TransformMinerBySession(
-        uint32_t nSessionId,
-        std::function<MiningContext(const MiningContext&)> transformer
-    )
-    {
-        auto optCanonicalEntry = NodeSessionRegistry::Get().Lookup(nSessionId);
-        if(optCanonicalEntry.has_value() && optCanonicalEntry->hashKeyID != 0)
-        {
-            auto optAddressByKey = mapKeyToAddress.Get(optCanonicalEntry->hashKeyID);
-            if(optAddressByKey.has_value())
-                return TransformMiner(optAddressByKey.value(), transformer);
-        }
-
-        auto optAddress = mapSessionToAddress.Get(nSessionId);
-        if(!optAddress.has_value())
-            return false;
-
-        return TransformMiner(optAddress.value(), transformer);
-    }
-
-
-    /* Atomically transform a miner's context looked up by canonical key ID */
-    bool StatelessMinerManager::TransformMinerByKeyID(
-        const uint256_t& hashKeyID,
-        std::function<MiningContext(const MiningContext&)> transformer,
-        uint8_t nLane
-    )
-    {
-        auto optCanonicalEntry = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
-        if(optCanonicalEntry.has_value())
-        {
-            auto optAddressByKey = mapKeyToAddress.Get(optCanonicalEntry->hashKeyID);
-            if(optAddressByKey.has_value())
-                return TransformMiner(optAddressByKey.value(), transformer, nLane);
-        }
-
-        auto optAddress = mapKeyToAddress.Get(hashKeyID);
-        if(!optAddress.has_value())
-            return false;
-
-        return TransformMiner(optAddress.value(), transformer, nLane);
-    }
-
     /* Get miner lane by address */
     std::optional<uint8_t> StatelessMinerManager::GetMinerLane(
         const std::string& strAddress
