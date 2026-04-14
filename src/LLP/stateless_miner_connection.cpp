@@ -88,19 +88,14 @@ namespace LLP
 {
     namespace
     {
-        /* Apply a manager transform using canonical hashKeyID for authenticated miners,
-         * falling back to the transport address only for pre-auth connection state.
-         * ctx identifies the miner, transformer computes the updated MiningContext,
-         * and nLane carries the current mining lane for secondary index maintenance. */
+        /* Apply a manager transform only to this exact stateless-lane connection.
+         * Same-node cross-lane aliasing is no longer valid for live lane state. */
         bool TransformTrackedMiner(
             const MiningContext& ctx,
             std::function<MiningContext(const MiningContext&)> transformer,
             uint8_t nLane = 1)
         {
             auto& manager = StatelessMinerManager::Get();
-
-            if(ctx.hashKeyID != 0)
-                return manager.TransformMinerByKeyID(ctx.hashKeyID, std::move(transformer), nLane);
 
             if(!ctx.strAddress.empty())
                 return manager.TransformMiner(ctx.strAddress, std::move(transformer), nLane);
@@ -899,26 +894,6 @@ namespace LLP
             {
                 LOCK(MUTEX);
                 ctxSnap = context;
-            }
-
-            if(ctxSnap.hashKeyID != 0)
-            {
-                auto optCanonical = StatelessMinerManager::Get().GetMinerContextByKeyID(ctxSnap.hashKeyID);
-                if(optCanonical.has_value())
-                {
-                    /* Refresh to the canonical authenticated snapshot even when the
-                     * session_id is unchanged, because crypto/liveness fields may
-                     * have been repaired or refreshed in the registry-backed store. */
-                    if(optCanonical->nSessionId != 0 && optCanonical->nSessionId != ctxSnap.nSessionId)
-                    {
-                        debug::log(1, FUNCTION,
-                            "Canonical session refresh for keyID=", ctxSnap.hashKeyID.SubString(),
-                            " local_session=0x", std::hex, ctxSnap.nSessionId,
-                            " canonical_session=0x", optCanonical->nSessionId, std::dec);
-                    }
-
-                    ctxSnap = optCanonical.value();
-                }
             }
 
             if(!PreflightSessionGate(PACKET, ctxSnap))
@@ -1903,28 +1878,6 @@ namespace LLP
                     response.LENGTH = static_cast<uint32_t>(response.DATA.size());
                     respond(response);
                     debug::log(0, ANSI_COLOR_BRIGHT_RED, "📥 === SUBMIT_BLOCK: REJECTED (Stale block) ===", ANSI_COLOR_RESET);
-                    return true;
-                }
-
-                /* ── SIM Link deduplication check ────────────────────────────────
-                 *  Shared dedup cache (via ColinMiningAgent) detects when the same
-                 *  solution is submitted on both the stateless lane (this handler,
-                 *  port 9323) and the legacy lane (miner.cpp, port 8323).
-                 */
-                if(ColinMiningAgent::Get().check_and_record_submission(
-                        pTritium->nHeight, nonce, hashMerkle.GetHex()))
-                {
-                    debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                               "(height=", pTritium->nHeight, " nonce=", nonce,
-                               ") — second connection submission ignored (SIM Link dedup)");
-                    if(ctxSnap.hashGenesis != 0)
-                    {
-                        ColinMiningAgent::Get().on_block_submitted(
-                            ctxSnap.hashGenesis.SubString(8), pTritium->nChannel,
-                            false, "DUPLICATE_SUBMISSION");
-                    }
-                    StatelessPacket response(STATELESS_BLOCK_REJECTED);
-                    respond(response);
                     return true;
                 }
 
