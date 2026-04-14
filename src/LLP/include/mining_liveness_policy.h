@@ -16,7 +16,10 @@ namespace LLP
 {
 namespace MiningLivenessPolicy
 {
-    constexpr uint32_t PRIME_WORKLOAD_READ_TIMEOUT_FLOOR_MS = 1800000; // 30 minutes
+    /* 30-minute transport floor:
+     * - long enough for legitimate Prime deep-search idle periods
+     * - still above the keepalive grace and health-probe windows */
+    constexpr uint32_t WORKLOAD_READ_TIMEOUT_FLOOR_MS = 1800000;
 
     constexpr uint32_t HEALTH_PROBE_WINDOW_MS =
         static_cast<uint32_t>(MiningTimers::HEALTH_PROBE_INTERVAL_SEC * 2 * 1000);
@@ -25,9 +28,9 @@ namespace MiningLivenessPolicy
         static_cast<uint32_t>(MiningTimers::KEEPALIVE_GRACE_PERIOD_SEC * 1000);
 
     constexpr uint32_t READ_TIMEOUT_FLOOR_MS =
-        (PRIME_WORKLOAD_READ_TIMEOUT_FLOOR_MS >= HEALTH_PROBE_WINDOW_MS)
-            ? ((PRIME_WORKLOAD_READ_TIMEOUT_FLOOR_MS >= KEEPALIVE_GRACE_PERIOD_MS)
-                ? PRIME_WORKLOAD_READ_TIMEOUT_FLOOR_MS
+        (WORKLOAD_READ_TIMEOUT_FLOOR_MS >= HEALTH_PROBE_WINDOW_MS)
+            ? ((WORKLOAD_READ_TIMEOUT_FLOOR_MS >= KEEPALIVE_GRACE_PERIOD_MS)
+                ? WORKLOAD_READ_TIMEOUT_FLOOR_MS
                 : KEEPALIVE_GRACE_PERIOD_MS)
             : ((HEALTH_PROBE_WINDOW_MS >= KEEPALIVE_GRACE_PERIOD_MS)
                 ? HEALTH_PROBE_WINDOW_MS

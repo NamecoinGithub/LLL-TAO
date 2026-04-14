@@ -487,7 +487,9 @@ namespace LLP
          *  Enforce maximum capacity on the registry to prevent unbounded growth
          *  from auth floods (BUG-5 fix).  Evicts only entries with no live
          *  connections; live sessions are authoritative runtime state and are
-         *  never killed to satisfy cache pressure.
+         *  never killed to satisfy cache pressure.  Dead entries removed here
+         *  are also deleted from SessionStore to keep the canonical store and
+         *  registry indexes consistent.
          *
          *  @param[in] nMaxSize Maximum allowed entries (default: 1000)
          *
