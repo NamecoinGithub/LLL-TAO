@@ -122,20 +122,6 @@ namespace LLP
                             std::function<MiningContext(const MiningContext&)> transformer,
                             uint8_t nLane = 0);
 
-        /** TransformMinerBySession
-         *
-         *  Atomically transform a miner's context looked up by session ID.
-         *  Resolves session → address, then applies transformer atomically.
-         *
-         *  @param[in] nSessionId Session identifier
-         *  @param[in] transformer Function to produce new context from current context
-         *
-         *  @return true if miner was found and transformed
-         *
-         **/
-        bool TransformMinerBySession(uint32_t nSessionId,
-                                     std::function<MiningContext(const MiningContext&)> transformer);
-
         /** GetMinerLane
          *
          *  Retrieve the last known mining lane for an address.

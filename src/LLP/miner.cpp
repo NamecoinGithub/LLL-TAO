@@ -554,9 +554,15 @@ namespace LLP
                  * StatelessMinerManager entry from prior stateless activity. */
                 if(fMinerAuthenticated)
                 {
-                    const std::string strMinerAddress = GetAddress().ToStringIP();
-                    if(!strMinerAddress.empty())
-                        StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    if(hashKeyID != 0)
+                        StatelessMinerManager::Get().RemoveMinerByKeyID(hashKeyID);
+                    else
+                    {
+                        const std::string strMinerAddress =
+                            GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+                        if(!strMinerAddress.empty())
+                            StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    }
                 }
 
                 /* Notify Colin agent on disconnect (only if genesis was known) */
@@ -664,25 +670,36 @@ namespace LLP
                     return true;
                 }
 
-                /* Capture address before atomic transform for session recovery */
-                std::string strSessionAddress = optContext.value().strAddress;
+                const auto& address = GetAddress();
+                const std::string strConnectionAddress =
+                    address.ToStringIP() + ":" + std::to_string(address.GetPort());
 
                 /* Atomic transform: update timestamp, keepalive count, and prevblock suffix
                  * directly on the CURRENT value in mapMiners, avoiding TOCTOU race where
                  * NotifyNewRound could overwrite connection-specific fields. */
-                MiningContext transformedCtx;
+                MiningContext transformedCtx = optContext.value();
                 std::array<uint8_t, 4> prevSuffix = nMinerPrevblockSuffix;
-                StatelessMinerManager::Get().TransformMinerBySession(nKeepaliveSession,
-                    [prevSuffix, &transformedCtx](const MiningContext& current) {
-                        uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
-                        transformedCtx = current
-                            .WithTimestamp(nKeepaliveTimestamp)
-                            .WithKeepaliveCount(current.nKeepaliveCount + 1)
-                            .WithKeepaliveSent(current.nKeepaliveSent + 1)
-                            .WithLastKeepaliveTime(nKeepaliveTimestamp)
-                            .WithMinerPrevblockSuffix(prevSuffix);
-                        return transformedCtx;
-                    });
+                const auto applyKeepaliveRefresh = [prevSuffix, &transformedCtx](const MiningContext& current) {
+                    const uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
+                    transformedCtx = current
+                        .WithTimestamp(nKeepaliveTimestamp)
+                        .WithKeepaliveCount(current.nKeepaliveCount + 1)
+                        .WithKeepaliveSent(current.nKeepaliveSent + 1)
+                        .WithLastKeepaliveTime(nKeepaliveTimestamp)
+                        .WithMinerPrevblockSuffix(prevSuffix);
+                    return transformedCtx;
+                };
+                const bool fUpdatedLaneContext = StatelessMinerManager::Get().TransformMiner(
+                    strConnectionAddress,
+                    applyKeepaliveRefresh, 0);
+
+                if(!fUpdatedLaneContext)
+                {
+                    transformedCtx = applyKeepaliveRefresh(transformedCtx);
+
+                    debug::log(1, FUNCTION, "SESSION_KEEPALIVE: no exact legacy-lane manager entry for ",
+                               strConnectionAddress, " - refreshed canonical session only");
+                }
 
                 /* CRITICAL FIX: Refresh the canonical session identity in NodeSessionRegistry.
                  * Previously, keepalive updated MiningContext.nTimestamp but never touched
@@ -788,9 +805,22 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext currentContext(
+                    nSubscribedChannel,
+                    nBestHeight.load(std::memory_order_relaxed),
+                    runtime::unifiedtimestamp(),
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort()),
+                    0,
+                    fMinerAuthenticated.load(std::memory_order_relaxed),
+                    nSessionId,
+                    hashKeyID,
+                    hashGenesis
+                );
+                currentContext = currentContext.WithProtocolLane(ProtocolLane::LEGACY);
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_SECONDARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_SECONDARY_ALIVE, &currentContext, fSessionValid);
 
                 respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
 
@@ -1479,14 +1509,11 @@ namespace LLP
             return false;
         }
 
-        /* Consult the authoritative StatelessMinerManager context when available.
-         * Primary: GetMinerContextByAddressOrIP() handles ephemeral port changes (GAP 3).
-         * Fallback: construct from per-connection member variables (pre-manager state).
-         * Third parameter (fMigrateAddress=false): read-only lookup, do not re-key the
-         * context address in the manager — migration is reserved for SUBMIT_BLOCK. */
+        /* Consult only the current legacy-lane manager entry when available.
+         * Same-node cross-lane recovery is no longer valid; protected legacy opcodes
+         * must stay bound to their own lane state. */
         const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-        auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-            strLookupAddr, nSessionId, /* fMigrateAddress= */ false);
+        std::optional<MiningContext> optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
 
         MiningContext ctx = [&]() -> MiningContext
         {
@@ -1671,11 +1698,6 @@ namespace LLP
 
         /* Clear the parallel hash-snapshot map. */
         mapBlockHashes.clear();
-
-        /* Clear the cross-connection SUBMIT_BLOCK deduplication cache on new round.
-         * Same block solutions submitted on both SIM Link lanes after the round
-         * ends would be expired anyway, but clearing eagerly avoids false positives. */
-        ColinMiningAgent::Get().clear_dedup_cache();
 
         /* Reset the coinbase transaction. */
         tCoinbaseTx.SetNull();
@@ -2019,7 +2041,7 @@ namespace LLP
         ctx.nChannel = nChannel;
         ctx.fSubscribedToNotifications = fSubscribedToNotifications;
         ctx.nSubscribedChannel = nSubscribedChannel;
-        ctx.strAddress = GetAddress().ToStringIP();
+        ctx.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
         ctx.nProtocolLane = ProtocolLane::LEGACY;  // Legacy Miner uses 8-bit opcodes
         return ctx;
     }
@@ -2433,27 +2455,13 @@ namespace LLP
     /* Stateless handler for SUBMIT_BLOCK - validates and processes a block submission */
     bool Miner::handle_submit_block_stateless(const Packet& PACKET)
     {
-        /* R-02: Session consistency gate — validate the authoritative session context
-         * persisted in StatelessMinerManager before proceeding with block processing.
-         * The live connection context has hashKeyID=0 for legacy-lane miners; the
-         * StatelessMinerManager carries the full context populated during auth.
-         *
-         * Also resolves nCrossLaneSessionId for the cross-lane SUBMIT_BLOCK fallback
-         * path (GAP 3 hardening: IP-only lookup if IP:port misses on reconnect). */
-        uint32_t nCrossLaneSessionId = nSessionId;   /* default: per-connection session */
+        /* R-02: Lane-local session consistency gate — legacy SUBMIT_BLOCK must rely
+         * only on this connection's own lane state, not on any other-lane alias. */
         {
             const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-            const auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-                strLookupAddr, nSessionId, true);
+            const auto optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
             if(optCtx.has_value())
             {
-                nCrossLaneSessionId = optCtx->nSessionId;
-                if(optCtx->strAddress != strLookupAddr)
-                {
-                    debug::log(1, FUNCTION, "Legacy lane: resolved session via IP-only fallback from ",
-                               optCtx->strAddress, " to ", strLookupAddr,
-                               ", session=", nCrossLaneSessionId);
-                }
                 const SessionConsistencyResult consistency = optCtx->ValidateConsistency();
                 if(consistency != SessionConsistencyResult::Ok)
                 {
@@ -2465,7 +2473,8 @@ namespace LLP
             }
             else
             {
-                debug::log(2, FUNCTION, "Legacy lane: no session context found, cross-lane resolution unavailable");
+                debug::log(2, FUNCTION, "Legacy lane: no exact-address session context found for ",
+                           strLookupAddr, " - relying on local connection state");
             }
         }
 
@@ -2659,30 +2668,6 @@ namespace LLP
                        pTritium->hashPrevBlock.SubString(),
                        " != hashBestChain=", hashCurrentBest.SubString());
             respond_auto(ORPHAN_BLOCK);
-            return true;
-        }
-
-        /* ── SIM Link deduplication check ─────────────────────────────────────
-         *  When a miner runs two simultaneous connections (NexusMiner SIM Link:
-         *  one on legacy port 8323, one on stateless port 9323) both lanes may
-         *  submit the same solution within milliseconds of each other.  Deduplicate
-         *  by caching a hash of (nHeight, nNonce, hashMerkleRoot) for 10 seconds.
-         *  Only the first submission is forwarded to ValidateMinedBlock / AcceptMinedBlock.
-         *  The second is silently rejected with BLOCK_REJECTED.
-         */
-        if(ColinMiningAgent::Get().check_and_record_submission(
-                pTritium->nHeight, nonce, hashMerkle.GetHex()))
-        {
-            debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                       "(height=", pTritium->nHeight, " nonce=", nonce,
-                       ") — second connection submission ignored (SIM Link dedup)");
-            if(hashGenesis != 0)
-            {
-                ColinMiningAgent::Get().on_block_submitted(
-                    hashGenesis.SubString(8), pTritium->nChannel,
-                    false, "DUPLICATE_SUBMISSION");
-            }
-            respond_auto(BLOCK_REJECTED);
             return true;
         }
 

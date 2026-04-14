@@ -32,6 +32,28 @@ ________________________________________________________________________________
 
 namespace LLP
 {
+    namespace
+    {
+        /* Reconcile a cached MiningContext with the canonical identity fields stored
+         * in NodeSessionRegistry so callers always receive the authoritative
+         * session_id/hashKeyID/hashGenesis tuple derived from hashKeyID. */
+        MiningContext CanonicalizeRegistryContext(const NodeSessionEntry& entry)
+        {
+            MiningContext ctx = entry.context;
+
+            if(entry.nSessionId != 0 && ctx.nSessionId != entry.nSessionId)
+                ctx = ctx.WithSession(entry.nSessionId);
+
+            if(entry.hashKeyID != 0 && ctx.hashKeyID != entry.hashKeyID)
+                ctx = ctx.WithKeyId(entry.hashKeyID);
+
+            if(entry.hashGenesis != 0 && ctx.hashGenesis != entry.hashGenesis)
+                ctx = ctx.WithGenesis(entry.hashGenesis);
+
+            return ctx;
+        }
+    }
+
     /* Grace period for keepalive check in smart timeout logic.
      * Now sourced from the centralized MiningTimers::KEEPALIVE_GRACE_PERIOD_SEC
      * constant.  See mining_timers.h for the full rationale. */
@@ -259,21 +281,6 @@ namespace LLP
 
         return true;
     }
-
-
-    /* Atomically transform a miner's context looked up by session ID */
-    bool StatelessMinerManager::TransformMinerBySession(
-        uint32_t nSessionId,
-        std::function<MiningContext(const MiningContext&)> transformer
-    )
-    {
-        auto optAddress = mapSessionToAddress.Get(nSessionId);
-        if(!optAddress.has_value())
-            return false;
-
-        return TransformMiner(optAddress.value(), transformer);
-    }
-
     /* Get miner lane by address */
     std::optional<uint8_t> StatelessMinerManager::GetMinerLane(
         const std::string& strAddress
@@ -396,6 +403,10 @@ namespace LLP
         const uint256_t& hashKeyID
     ) const
     {
+        auto optEntry = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
+        if(optEntry.has_value())
+            return CanonicalizeRegistryContext(optEntry.value());
+
         auto optAddress = mapKeyToAddress.Get(hashKeyID);
         if(!optAddress.has_value())
             return std::nullopt;
@@ -427,23 +438,15 @@ namespace LLP
         if(optContext.has_value())
             return optContext;
 
-        /* Try IP-only key (stateless miners are canonically keyed by IP without port) */
-        const size_t nColon = strAddress.rfind(':');
-        if(nColon == std::string::npos)
-            return std::nullopt;
+        if(nExpectedSessionId != 0)
+        {
+            auto optEntry = NodeSessionRegistry::Get().Lookup(nExpectedSessionId);
+            if(optEntry.has_value())
+                return CanonicalizeRegistryContext(optEntry.value());
+        }
 
-        const std::string strIP = strAddress.substr(0, nColon);
-        auto optNormalizedContext = mapMiners.Get(strIP);
-        if(optNormalizedContext.has_value())
-            return optNormalizedContext;
-
-        /* IP-only fallback via mapIPToAddress is architecturally unsound for NAT
-         * environments: multiple miners behind the same NAT share the same IP, so
-         * the index can only track one of them.  Address migration based on this
-         * index creates persistent data-consistency issues.
-         *
-         * Callers should use session-ID-based lookups (GetMinerContextBySessionID)
-         * or the NodeSessionRegistry for cross-connection session recovery. */
+        /* IP-only fallback is intentionally excluded from correctness paths.
+         * Callers should use the canonical session registry for recovery. */
         return std::nullopt;
     }
 
@@ -452,6 +455,10 @@ namespace LLP
         uint32_t nSessionId
     ) const
     {
+        auto optEntry = NodeSessionRegistry::Get().Lookup(nSessionId);
+        if(optEntry.has_value())
+            return CanonicalizeRegistryContext(optEntry.value());
+
         auto optAddress = mapSessionToAddress.Get(nSessionId);
         if(!optAddress.has_value())
             return std::nullopt;
@@ -546,22 +553,41 @@ namespace LLP
         auto pairs = mapMiners.GetAllPairs();
         for(const auto& pair : pairs)
         {
-            const MiningContext& ctx = pair.second;
+            const MiningContext& snapshotCtx = pair.second;
 
-            if(ctx.IsConsideredInactive(nNow, nTimeoutSec))
+            if(!snapshotCtx.IsConsideredInactive(nNow, nTimeoutSec))
+                continue;
+
+            /* Re-read the live entry before deleting to avoid removing a miner that
+             * was refreshed or replaced after the snapshot was taken.  This mirrors
+             * NodeSessionRegistry::SweepExpired() and intentionally prefers a fresh
+             * second lookup over acting on stale snapshot state. */
+            auto optLive = mapMiners.Get(pair.first);
+            if(!optLive.has_value())
+                continue;
+
+            const MiningContext& ctx = optLive.value();
+            if(!ctx.IsConsideredInactive(nNow, nTimeoutSec))
+                continue;
+
+            if(ctx.hashKeyID != 0)
             {
-                uint64_t nTimeSinceActivity = nNow - ctx.nTimestamp;
-
-                debug::log(0, FUNCTION, "Session ", ctx.strAddress,
-                          " truly idle - activity: ", nTimeSinceActivity, "s, ",
-                          "keepalives_rx: ", ctx.nKeepaliveCount, ", ",
-                          "keepalives_tx: ", ctx.nKeepaliveSent);
-
-                /* RemoveMiner() handles cross-cache cleanup (NodeSessionRegistry
-                 * MarkDisconnected) internally. */
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
+                auto optCanonical = NodeSessionRegistry::Get().LookupByKey(ctx.hashKeyID);
+                if(optCanonical.has_value() && !optCanonical->IsExpired(nTimeoutSec, nNow))
+                    continue;
             }
+
+            uint64_t nTimeSinceActivity = nNow - ctx.nTimestamp;
+
+            debug::log(0, FUNCTION, "Session ", ctx.strAddress,
+                      " truly idle - activity: ", nTimeSinceActivity, "s, ",
+                      "keepalives_rx: ", ctx.nKeepaliveCount, ", ",
+                      "keepalives_tx: ", ctx.nKeepaliveSent);
+
+            /* RemoveMiner() handles cross-cache cleanup (NodeSessionRegistry
+             * MarkDisconnected) internally. */
+            if(RemoveMiner(pair.first))
+                ++nRemoved;
         }
 
         if(nRemoved > 0)

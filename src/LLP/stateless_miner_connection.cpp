@@ -88,6 +88,23 @@ namespace LLP
 {
     namespace
     {
+        /* Apply a manager transform only to this exact stateless-lane connection.
+         * Same-node cross-lane aliasing is no longer valid for live lane state. */
+        bool TransformTrackedMiner(
+            const MiningContext& ctx,
+            std::function<MiningContext(const MiningContext&)> transformer)
+        {
+            auto& manager = StatelessMinerManager::Get();
+
+            if(!ctx.strAddress.empty())
+                return manager.TransformMiner(ctx.strAddress, std::move(transformer), 1);
+
+            return false;
+        }
+    }
+
+    namespace
+    {
         bool SequenceDiagnosticsEnabled()
         {
             return config::GetBoolArg("-nseqdiag", false);
@@ -687,14 +704,16 @@ namespace LLP
                 }
                 
                 /* Log connection details with remote address and port */
+                const auto& address = GetAddress();
                 debug::log(0, FUNCTION, "MinerLLP: New stateless connection from ",
-                           GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                           address.ToStringIP(), ":", address.GetPort());
 
                 /* Initialize context with connection info */
                 LOCK(MUTEX);
 
                 /* Create initial context with connection address for auth */
-                std::string strAddr = GetAddress().ToStringIP();
+                const std::string strIP = address.ToStringIP();
+                std::string strEndpoint = strIP + ":" + std::to_string(address.GetPort());
                 fAuthenticatedAtomic.store(false, std::memory_order_relaxed);
                 fHandshakeInProgressAtomic.store(false, std::memory_order_relaxed);
                 context = MiningContext()
@@ -708,7 +727,7 @@ namespace LLP
                     0,  // nChannel - not set yet
                     TAO::Ledger::ChainState::nBestHeight.load(),  // nHeight - current chain height
                     runtime::unifiedtimestamp(),
-                    strAddr,  // strAddress - for Falcon auth message
+                    strEndpoint,  // strAddress - for Falcon auth message
                     0,  // nProtocolVersion
                     false,  // fAuthenticated
                     0,  // nSessionId
@@ -725,19 +744,19 @@ namespace LLP
                  * Record it via FailoverConnectionTracker so that after the subsequent fresh
                  * Falcon handshake completes we can notify ChannelStateManager and update
                  * the Colin report. */
-                if(strAddr != "127.0.0.1" && strAddr != "::1")
+                if(strIP != "127.0.0.1" && strIP != "::1")
                 {
-                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strAddr);
+                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strIP);
                     if(!optExistingCtx.has_value())
                     {
-                        FailoverConnectionTracker::Get().RecordConnection(strAddr);
-                        debug::log(0, FUNCTION, "No prior session for ", strAddr,
+                        FailoverConnectionTracker::Get().RecordConnection(strIP);
+                        debug::log(0, FUNCTION, "No prior session for ", strIP,
                                    " — recording as potential failover connection");
                     }
                 }
 
                 /* Register with StatelessMinerManager for tracking */
-                StatelessMinerManager::Get().UpdateMiner(strAddr, context, 1);
+                StatelessMinerManager::Get().UpdateMiner(strEndpoint, context, 1);
 
                 return;
             }
@@ -812,7 +831,10 @@ namespace LLP
                  * MarkDisconnected) internally. */
                 {
                     LOCK(MUTEX);
-                    StatelessMinerManager::Get().RemoveMiner(context.strAddress);
+                    if(context.hashKeyID != 0)
+                        StatelessMinerManager::Get().RemoveMinerByKeyID(context.hashKeyID);
+                    else if(!context.strAddress.empty())
+                        StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 
                 return;
@@ -899,7 +921,7 @@ namespace LLP
                     return false;
                 }
 
-                context.strAddress = GetAddress().ToStringIP();
+                context.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
 
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
@@ -933,7 +955,7 @@ namespace LLP
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
@@ -942,7 +964,7 @@ namespace LLP
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
                             return updated;
-                        }, 1);
+                        });
                 }
                 
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
@@ -1229,14 +1251,14 @@ namespace LLP
                  * avoiding TOCTOU race with NotifyNewRound. We capture chain state
                  * outside the transform and apply it atomically. */
                 {
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [](const MiningContext& current) {
                             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(stateBest.nHeight)
                                           .WithLastTemplateUnifiedHeight(stateBest.nHeight)
                                           .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
-                        }, 1);
+                        });
                 }
                 StatelessMinerManager::Get().IncrementTemplatesServed();
 
@@ -1859,28 +1881,6 @@ namespace LLP
                     return true;
                 }
 
-                /* ── SIM Link deduplication check ────────────────────────────────
-                 *  Shared dedup cache (via ColinMiningAgent) detects when the same
-                 *  solution is submitted on both the stateless lane (this handler,
-                 *  port 9323) and the legacy lane (miner.cpp, port 8323).
-                 */
-                if(ColinMiningAgent::Get().check_and_record_submission(
-                        pTritium->nHeight, nonce, hashMerkle.GetHex()))
-                {
-                    debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                               "(height=", pTritium->nHeight, " nonce=", nonce,
-                               ") — second connection submission ignored (SIM Link dedup)");
-                    if(ctxSnap.hashGenesis != 0)
-                    {
-                        ColinMiningAgent::Get().on_block_submitted(
-                            ctxSnap.hashGenesis.SubString(8), pTritium->nChannel,
-                            false, "DUPLICATE_SUBMISSION");
-                    }
-                    StatelessPacket response(STATELESS_BLOCK_REJECTED);
-                    respond(response);
-                    return true;
-                }
-
                 /* ── Pre-validation staleness diagnostics ──────────────────────────────
                  *  If block.vtx contains transactions for the same sigchain genesis as the
                  *  producer, the producer must follow the last vtx tx — not the disk last
@@ -2108,11 +2108,11 @@ namespace LLP
                 /* Atomic transform: update timestamp and height on CURRENT value in mapMiners */
                 {
                     uint32_t nHeight = nCurrentHeight;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                    TransformTrackedMiner(ctxSnap,
                         [nHeight](const MiningContext& current) {
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(nHeight);
-                        }, 1);
+                        });
                 }
 
                 return true;
@@ -2164,10 +2164,10 @@ namespace LLP
                 }
 
                 /* Atomic transform: update timestamp on CURRENT value in mapMiners */
-                StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                TransformTrackedMiner(ctxSnap,
                     [](const MiningContext& current) {
                         return current.WithTimestamp(runtime::unifiedtimestamp());
-                    }, 1);
+                    });
 
                 return true;
             }
@@ -2340,7 +2340,7 @@ namespace LLP
                     bool fSent = fTemplateStale;  // approximation for atomic transform
                     uint32_t nUH = snap.nUnifiedHeight;
                     uint1024_t hashBest = snap.hashBestChain;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                    TransformTrackedMiner(ctxSnap,
                         [fSent, nUH, hashBest](const MiningContext& current) {
                             if(fSent)
                                 return current.WithTimestamp(runtime::unifiedtimestamp())
@@ -2349,7 +2349,7 @@ namespace LLP
                                               .WithHashLastBlock(hashBest);
                             else
                                 return current.WithTimestamp(runtime::unifiedtimestamp());
-                        }, 1);
+                        });
                 }
 
                 return true;
@@ -2381,9 +2381,15 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext contextSnapshot;
+                {
+                    LOCK(MUTEX);
+                    contextSnapshot = context;
+                }
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_PRIMARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_PRIMARY_ALIVE, &contextSnapshot, fSessionValid);
 
                 StatelessPacket ackResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                 ackResponse.DATA = vAck;
@@ -2639,7 +2645,7 @@ namespace LLP
                  * updates from NotifyNewRound. */
                 {
                     MiningContext authCtx = context;  /* snapshot of all auth state */
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [authCtx](const MiningContext& current) {
                             /* Start from CURRENT (preserves height from NotifyNewRound),
                              * then overlay auth-specific fields from connection context */
@@ -2659,7 +2665,7 @@ namespace LLP
                             if(!authCtx.vDisposablePubKey.empty())
                                 result = result.WithDisposableKey(authCtx.vDisposablePubKey, authCtx.hashDisposableKeyID);
                             return result;
-                        }, 1);
+                        });
                 }
 
                 /* Log session registration for auth packets */
@@ -2672,11 +2678,12 @@ namespace LLP
                      * FailoverConnectionTracker::IsFailover() returns true when the CONNECT
                      * event found no recoverable session for this IP, indicating the miner
                      * has failed over to this node and performed a full fresh handshake. */
-                    if(FailoverConnectionTracker::Get().IsFailover(context.strAddress))
+                    const std::string strFailoverIP = GetAddress().ToStringIP();
+                    if(FailoverConnectionTracker::Get().IsFailover(strFailoverIP))
                     {
                         ChannelStateManager::NotifyFailoverConnection(context.hashKeyID, context.strAddress);
                         /* Clear the pending failover flag now that auth has completed */
-                        FailoverConnectionTracker::Get().ClearConnection(context.strAddress);
+                        FailoverConnectionTracker::Get().ClearConnection(strFailoverIP);
                     }
                 }
                 
