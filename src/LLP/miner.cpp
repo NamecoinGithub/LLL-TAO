@@ -670,8 +670,9 @@ namespace LLP
                     return true;
                 }
 
+                const auto& address = GetAddress();
                 const std::string strConnectionAddress =
-                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+                    address.ToStringIP() + ":" + std::to_string(address.GetPort());
 
                 /* Atomic transform: update timestamp, keepalive count, and prevblock suffix
                  * directly on the CURRENT value in mapMiners, avoiding TOCTOU race where

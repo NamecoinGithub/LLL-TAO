@@ -705,15 +705,16 @@ namespace LLP
                 }
                 
                 /* Log connection details with remote address and port */
+                const auto& address = GetAddress();
                 debug::log(0, FUNCTION, "MinerLLP: New stateless connection from ",
-                           GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                           address.ToStringIP(), ":", address.GetPort());
 
                 /* Initialize context with connection info */
                 LOCK(MUTEX);
 
                 /* Create initial context with connection address for auth */
-                const std::string strIP = GetAddress().ToStringIP();
-                std::string strAddr = strIP + ":" + std::to_string(GetAddress().GetPort());
+                const std::string strIP = address.ToStringIP();
+                std::string strAddr = strIP + ":" + std::to_string(address.GetPort());
                 fAuthenticatedAtomic.store(false, std::memory_order_relaxed);
                 fHandshakeInProgressAtomic.store(false, std::memory_order_relaxed);
                 context = MiningContext()

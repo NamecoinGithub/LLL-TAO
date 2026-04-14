@@ -104,7 +104,7 @@ namespace LLP
             {
                 optEntry = NodeSessionRegistry::Get().LookupByKey(pCurrentContext->hashKeyID);
 
-                if(!optEntry.has_value() && pCurrentContext != nullptr && pCurrentContext->hashGenesis != 0)
+                if(!optEntry.has_value() && pCurrentContext->hashGenesis != 0)
                 {
                     MiningContext repairedContext = pCurrentContext->WithSession(
                         MiningContext::DeriveSessionId(pCurrentContext->hashKeyID));
