@@ -111,17 +111,6 @@ namespace LLP
             }
         }
 
-        /* Enforce cache limit before adding new miner (DDOS protection).
-         * Use atomic counter for cheap threshold check to avoid lock contention
-         * on the hot path — full enforcement only when 20% over limit. */
-        if(fNewMiner)
-        {
-            size_t nCurrent = nTotalMiners.load();
-            size_t nLimit = NodeCache::DEFAULT_MAX_CACHE_SIZE;
-            if(nCurrent > nLimit + nLimit / 5)
-                EnforceCacheLimit(nLimit);
-        }
-
         /* Update main miner map */
         mapMiners.InsertOrUpdate(strAddress, context);
 
@@ -832,44 +821,57 @@ namespace LLP
     }
 
 
-    /* Enforce cache size limit for DDOS protection */
+    /* Enforce inactive-cache budget for stale/disconnected miner entries. */
     uint32_t StatelessMinerManager::EnforceCacheLimit(size_t nMaxSize)
     {
-        size_t nCurrentSize = GetMinerCount();
-        
-        /* No action needed if under limit */
-        if(nCurrentSize <= nMaxSize)
+        const uint64_t nNow = runtime::unifiedtimestamp();
+        const auto fnIsInactiveCandidate =
+            [nNow](const MiningContext& ctx) -> bool
+            {
+                const uint64_t nInactiveTimeoutSec =
+                    MiningConstants::GetSessionLivenessTimeoutSec(ctx.strAddress);
+
+                if(!ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
+                    return false;
+
+                if(ctx.hashKeyID != 0)
+                {
+                    auto optEntry = NodeSessionRegistry::Get().LookupByKey(ctx.hashKeyID);
+                    if(optEntry.has_value() && optEntry->AnyPortLive())
+                        return false;
+                }
+
+                return true;
+            };
+
+        std::vector<std::pair<std::string, MiningContext>> vInactive;
+        vInactive.reserve(GetMinerCount());
+
+        mapMiners.ForEach([&](const std::string& strAddress, const MiningContext& ctx) {
+            if(fnIsInactiveCandidate(ctx))
+                vInactive.emplace_back(strAddress, ctx);
+        });
+
+        if(vInactive.size() <= nMaxSize)
             return 0;
 
-        uint32_t nToRemove = static_cast<uint32_t>(nCurrentSize - nMaxSize);
+        uint32_t nToRemove = static_cast<uint32_t>(vInactive.size() - nMaxSize);
         uint32_t nRemoved = 0;
-        const uint64_t nNow = runtime::unifiedtimestamp();
-        const uint64_t nInactiveTimeoutSec = MiningConstants::GetSessionLivenessTimeoutSec();
 
-        debug::log(1, FUNCTION, "Cache limit exceeded (", nCurrentSize, "/", nMaxSize, 
-                  "), removing ", nToRemove, " least recently active entries");
+        debug::log(1, FUNCTION, "Inactive miner cache exceeded budget (", vInactive.size(), "/",
+                   nMaxSize, "), removing ", nToRemove, " oldest stale entries");
 
-        /* Get all miners sorted by last activity timestamp */
-        auto pairs = mapMiners.GetAllPairs();
-        std::vector<std::pair<std::string, MiningContext>> vMiners(pairs.begin(), pairs.end());
-
-        /* Sort by timestamp ascending (least recently active first) */
-        /* This purges inactive older miners to allow newer active miners */
-        std::sort(vMiners.begin(), vMiners.end(), 
+        std::sort(vInactive.begin(), vInactive.end(),
             [](const auto& a, const auto& b) {
                 return a.second.nTimestamp < b.second.nTimestamp;
             });
 
-        /* Helper: re-read live state to avoid removing a miner that was
-         * refreshed after the snapshot was taken. Returns nullopt if gone. */
-        auto fnGetLive = [this](const std::string& strAddr) -> std::optional<MiningContext>
+        const auto fnGetLive = [this](const std::string& strAddr) -> std::optional<MiningContext>
         {
             return mapMiners.Get(strAddr);
         };
 
-        /* Remove least recently active miners first, but prefer unauthenticated and localhost last.
-         * Re-read the live entry before removing to avoid stale-snapshot deletes. */
-        for(const auto& pair : vMiners)
+        for(const auto& pair : vInactive)
         {
             if(nRemoved >= nToRemove)
                 break;
@@ -879,104 +881,17 @@ namespace LLP
                 continue;
             const MiningContext& ctx = optLive.value();
 
-            /* Skip localhost miners in first pass */
-            if(NodeCache::IsLocalhost(ctx.strAddress))
+            if(!fnIsInactiveCandidate(ctx))
                 continue;
 
-            /* Remove unauthenticated miners first */
-            if(!ctx.fAuthenticated)
-            {
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
-            }
-        }
-
-        /* Second pass: remove unauthenticated localhost miners if needed. */
-        if(nRemoved < nToRemove)
-        {
-            for(const auto& pair : vMiners)
-            {
-                if(nRemoved >= nToRemove)
-                    break;
-
-                auto optLive = fnGetLive(pair.first);
-                if(!optLive.has_value())
-                    continue;
-                const MiningContext& ctx = optLive.value();
-
-                /* Only unauthenticated localhost miners in pass 2 */
-                if(!NodeCache::IsLocalhost(ctx.strAddress))
-                    continue;
-
-                if(!ctx.fAuthenticated)
-                {
-                    if(RemoveMiner(pair.first))
-                        ++nRemoved;
-                }
-            }
-        }
-
-        /* Third pass: remove authenticated remote miners only if they are
-         * inactive.  Active authenticated miners are authoritative live state
-         * and must not be evicted under cache pressure. */
-        if(nRemoved < nToRemove)
-        {
-            for(const auto& pair : vMiners)
-            {
-                if(nRemoved >= nToRemove)
-                    break;
-
-                auto optLive = fnGetLive(pair.first);
-                if(!optLive.has_value())
-                    continue;
-
-                const MiningContext& ctx = optLive.value();
-                if(NodeCache::IsLocalhost(ctx.strAddress))
-                    continue;
-
-                if(ctx.fAuthenticated && ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
-                {
-                    if(RemoveMiner(pair.first))
-                        ++nRemoved;
-                }
-            }
-        }
-
-        /* Final pass: remove authenticated localhost miners only if they are inactive. */
-        if(nRemoved < nToRemove)
-        {
-            for(const auto& pair : vMiners)
-            {
-                if(nRemoved >= nToRemove)
-                    break;
-
-                auto optLive = fnGetLive(pair.first);
-                if(!optLive.has_value())
-                    continue;
-
-                const MiningContext& ctx = optLive.value();
-                if(!NodeCache::IsLocalhost(ctx.strAddress))
-                    continue;
-
-                if(ctx.fAuthenticated && ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
-                {
-                    if(RemoveMiner(pair.first))
-                        ++nRemoved;
-                }
-            }
+            if(RemoveMiner(pair.first))
+                ++nRemoved;
         }
 
         if(nRemoved > 0)
         {
-            debug::log(1, FUNCTION, "Enforced cache limit: removed ", nRemoved, 
-                      " miners (cache now at ", GetMinerCount(), "/", nMaxSize, ")");
-        }
-
-        if(nRemoved < nToRemove)
-        {
-            debug::log(1, FUNCTION, "Cache remains over limit (", GetMinerCount(), "/", nMaxSize,
-                       ") because only active authenticated miners remain.");
-            debug::log(1, FUNCTION, "Admission control will reject new connections; consider increasing the cache limit or monitoring active miner count.");
+            debug::log(1, FUNCTION, "Enforced inactive miner cache budget: removed ",
+                       nRemoved, " stale entries");
         }
 
         return nRemoved;

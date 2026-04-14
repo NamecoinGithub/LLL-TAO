@@ -1361,6 +1361,10 @@ namespace LLP
                     NodeSessionRegistry::Get().SweepExpired(nSessionLivenessTimeoutSec);
                     StatelessMinerManager::Get().CleanupInactive(nSessionLivenessTimeoutSec);
                     StatelessMinerManager::Get().PurgeInactiveMiners();
+                    NodeSessionRegistry::Get().EnforceCacheLimit(
+                        NodeSessionRegistry::DEFAULT_MAX_INACTIVE_REGISTRY_SIZE);
+                    StatelessMinerManager::Get().EnforceCacheLimit(
+                        StatelessMinerManager::DEFAULT_MAX_INACTIVE_CACHE_SIZE);
 
                     /* Unified SessionStore sweep: removes expired sessions
                      * from the canonical store + all secondary indexes. */
