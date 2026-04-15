@@ -60,7 +60,7 @@ These should drive workflow design and refactoring order.
 
 1. **Recursive sync failover**
    - `src/LLP/tritium.cpp`
-   - `TritiumNode::SwitchNode()` still recursively calls itself in the exception path
+   - `TritiumNode::SwitchNode()` catches exceptions thrown while unsubscribing/syncing the current peer and then calls `SwitchNode()` again from inside the catch block
    - Risk: retry storms, fragile failure handling, stack amplification, poor observability
 
 2. **Shutdown detach lifetime hazard**
@@ -72,7 +72,7 @@ These should drive workflow design and refactoring order.
 
 3. **Ambiguous sync batching semantics**
    - `src/LLP/tritium.cpp`
-   - outer loop uses `nLimits > 0` while decrement happens only inside the inner loop
+   - the actual `nLimits` counter in the code is checked by the outer loop with `nLimits > 0`, but it is decremented only inside the inner loop
    - Risk: hard-to-reason-about sync budgeting and future regressions
 
 ### Medium Severity
