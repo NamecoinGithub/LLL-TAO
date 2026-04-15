@@ -199,7 +199,7 @@ namespace TestFixtures
             .WithGenesis(testGenesis)
             .WithKeyId(keyId)
             .WithTimestamp(runtime::unifiedtimestamp())
-            .WithSessionStart(runtime::unifiedtimestamp())
+            .WithSessionStart(runtime::unifiedtimestamp());
     }
     
     /** CreateRewardBoundContext

@@ -282,6 +282,13 @@ namespace LLP
         return c;
     }
 
+    MiningContext MiningContext::WithProtocolVersion(uint32_t nProtocolVersion_) const
+    {
+        MiningContext c = *this;
+        c.nProtocolVersion = nProtocolVersion_;
+        return c;
+    }
+
     MiningContext MiningContext::WithAuth(bool fAuthenticated_) const
     {
         MiningContext c = *this;

@@ -86,7 +86,7 @@ TEST_CASE("Integration: Complete Mining Cycle - Single Miner", "[integration][fu
             .WithPubKey(pubKey)
             .WithAuth(true)
             .WithSessionStart(runtime::unifiedtimestamp())
-            .WithSession(12345)
+            .WithSession(12345);
         
         manager.UpdateMiner(authenticated.strAddress, authenticated, 0);
         
@@ -439,13 +439,13 @@ TEST_CASE("Integration: Session Expiration and Cleanup", "[integration][session-
         /* === ACTIVE SESSION === */
         MiningContext active = CreateFullMiningContext(2);
         active = active
-            .WithSessionStart(now)
+            .WithSessionStart(now);
         active.strAddress = "192.168.1.100:9325";
         
         /* === EXPIRED SESSION === */
         MiningContext expired = CreateFullMiningContext(2);
         expired = expired
-            .WithSessionStart(now - 400)  // Started 400s ago
+            .WithSessionStart(now - 400);  // Started 400s ago
         expired.strAddress = "192.168.1.101:9325";
         
         manager.UpdateMiner(active.strAddress, active, 0);

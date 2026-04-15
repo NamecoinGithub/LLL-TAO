@@ -575,14 +575,17 @@ TEST_CASE("Error Handling: Recovery from Errors", "[error-handling][recovery]")
         
         /* Expired session */
         MiningContext expired = MiningContext()
-            .WithSessionStart(now - 400)
-        
+            .WithSessionStart(now - 400);
         
         /* Renew session */
         MiningContext renewed = expired
             .WithSessionStart(now)
             .WithTimestamp(now);
-        
+
+        REQUIRE(expired.nSessionStart == now - 400);
+        REQUIRE(expired.nTimestamp == 0);
+        REQUIRE(renewed.nSessionStart == now);
+        REQUIRE(renewed.nTimestamp == now);
     }
     
     SECTION("Recover from invalid channel")
@@ -617,10 +620,13 @@ TEST_CASE("Error Handling: Defensive Programming Patterns", "[error-handling][de
         REQUIRE(ctx.HasValidPayout() == false);
     }
     
+    SECTION("Default context keeps zero session timestamps")
     {
-        MiningContext ctx = MiningContext()
-        
+        MiningContext ctx = MiningContext();
+
         /* Session start is 0, should be expired */
+        REQUIRE(ctx.nSessionStart == 0);
+        REQUIRE(ctx.nTimestamp == 0);
     }
     
     SECTION("Context updates preserve immutability")

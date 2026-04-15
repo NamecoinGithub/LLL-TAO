@@ -16,6 +16,7 @@ ________________________________________________________________________________
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/falcon_auth.h>
 
+#include <LLC/include/chacha20_helpers.h>
 #include <LLC/include/mining_session_keys.h>
 #include <LLC/include/flkey.h>
 
