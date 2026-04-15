@@ -22,7 +22,7 @@ verify_db_headers() {
     local tmp_src tmp_obj
     tmp_src="$(mktemp /tmp/db-header-check-XXXXXX.cpp)"
     tmp_obj="$(mktemp /tmp/db-header-check-XXXXXX.o)"
-    trap 'rm -f "$tmp_src" "$tmp_obj"' RETURN
+    trap 'rm -f "${tmp_src:-}" "${tmp_obj:-}"' RETURN
 
     cat >"$tmp_src" <<'EOF'
 #include <db_cxx.h>

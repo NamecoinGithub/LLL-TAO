@@ -432,7 +432,7 @@ ifdef UNIT_TESTS
 		   build/Tests_Util_math.o \
 		   build/Tests_Util_nexus_conf_settings.o
 
-	DEFS += -DUNIT_TESTS
+	DEFS += -DUNIT_TESTS -DCATCH_CONFIG_NO_POSIX_SIGNALS
 
 #Run benchmarks on subsystems
 else ifdef BENCHMARKS
