@@ -27,7 +27,7 @@ Before proposing new automation, understand what already exists:
 - `.devcontainer/devcontainer.json` sets up the developer container and calls `.devcontainer/setup.sh`
 - `.devcontainer/setup.sh` delegates dependency installation to `contrib/devtools/install-build-deps.sh`
 - `.github/workflows/copilot-setup-steps.yml` currently validates setup/install only
-- No in-repo references to `AEP-agent-element-protocol` or `dynAEP-dynamic-agent-element-protocol` were found during repository search
+- As of 2026-04-15, no in-repo references to `AEP-agent-element-protocol` or `dynAEP-dynamic-agent-element-protocol` were found in the repository search across `src/`, `docs/`, `.github/`, and the top-level docs
 
 Conclusion: AEP/dynAEP should currently be treated as optional orchestration around
 the repository, not as a core runtime or consensus dependency.

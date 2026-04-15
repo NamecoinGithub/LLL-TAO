@@ -28,7 +28,9 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 59
+    permissions:
+      contents: read
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code
