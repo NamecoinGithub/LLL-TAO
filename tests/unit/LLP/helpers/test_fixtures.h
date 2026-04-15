@@ -39,8 +39,8 @@ namespace TestFixtures
         inline constexpr const char* GENESIS_4 = "d407344f26fd4fb3efd8621615e49afde466f6487728db1b78df2cd61bf02455";
         
         /* Sample register addresses (base58 decoded to uint256_t) */
-        inline constexpr const char* REGISTER_ADDR_1 = "e518455f37fe5fb4f0e9732726f5abfgf577g7598839ec2c89eg3de720g13566";
-        inline constexpr const char* REGISTER_ADDR_2 = "f629566g48gf6gc5g1fa843837g6bcghg688h8609940fd3d90fh4ef831h24677";
+        inline constexpr const char* REGISTER_ADDR_1 = "e518455f37fe5fb4f0e9732726f5abfcf577f7598839ec2c89ef3de720f13566";
+        inline constexpr const char* REGISTER_ADDR_2 = "f629566f48ff6fc5f1fa843837f6bcfcf688f8609940fd3d90ff4ef831f24677";
         
         /* Sample Falcon public key sizes */
         inline constexpr size_t FALCON_PUBKEY_SIZE = 897;

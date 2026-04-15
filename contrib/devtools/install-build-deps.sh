@@ -19,10 +19,11 @@ package_exists() {
 }
 
 verify_db_headers() {
-    local tmp_src tmp_obj
+    local tmp_src tmp_obj tmp_err
     tmp_src="$(mktemp /tmp/db-header-check-XXXXXX.cpp)"
     tmp_obj="$(mktemp /tmp/db-header-check-XXXXXX.o)"
-    trap 'rm -f "${tmp_src:-}" "${tmp_obj:-}"' RETURN
+    tmp_err="$(mktemp /tmp/db-header-check-XXXXXX.log)"
+    trap 'rm -f "${tmp_src:-}" "${tmp_obj:-}" "${tmp_err:-}"' RETURN
 
     cat >"$tmp_src" <<'EOF'
 #include <db_cxx.h>
@@ -33,7 +34,12 @@ int main()
 }
 EOF
 
-    g++ -std=c++17 -c "$tmp_src" -o "$tmp_obj" >/dev/null 2>&1
+    if g++ -std=c++17 -c "$tmp_src" -o "$tmp_obj" >/dev/null 2>"$tmp_err"; then
+        return 0
+    fi
+
+    cat "$tmp_err" >&2
+    return 1
 }
 
 main() {
