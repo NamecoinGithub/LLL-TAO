@@ -330,11 +330,16 @@ namespace LLP
                     " but new key ", hashKeyID.SubString(),
                     " derives the same session ID — evicting displaced entry");
 
-                /* Remove displaced entry from both maps to prevent orphaning */
-                m_mapLiveByKey.Erase(*existingKey);
-                m_mapInactiveByKey.Erase(*existingKey);
+                /* Remove displaced entry from whichever registry map still owns it
+                 * before replacing the reverse session-id binding. */
+                const bool fRemovedLive = m_mapLiveByKey.Erase(*existingKey);
+                const bool fRemovedInactive = m_mapInactiveByKey.Erase(*existingKey);
                 m_mapSessionToKey.Erase(nSessionId);
                 SessionStore::Get().Remove(*existingKey);
+
+                debug::log(2, FUNCTION, "Collision cleanup for session ", nSessionId,
+                           ": live_removed=", fRemovedLive,
+                           " inactive_removed=", fRemovedInactive);
             }
         }
         m_mapLiveByKey.InsertOrUpdate(hashKeyID, entry);
@@ -448,13 +453,28 @@ namespace LLP
              * refresh that misses the now-absent live entry must wait on the
              * same transition mutex before promoting from inactive or creating
              * a new entry, so the entry cannot end up live and inactive at once. */
-            auto movedEntry = m_mapLiveByKey.GetAndRemove(hashKeyID);
-            if(movedEntry.has_value())
+            auto optEntry = m_mapLiveByKey.Get(hashKeyID);
+            if(optEntry.has_value() && !optEntry->AnyPortLive())
             {
-                if(movedEntry->AnyPortLive())
-                    m_mapLiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
-                else
-                    m_mapInactiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
+                auto movedEntry = m_mapLiveByKey.GetAndRemove(hashKeyID);
+                if(movedEntry.has_value())
+                {
+                    if(movedEntry->AnyPortLive())
+                        m_mapLiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
+                    else
+                        m_mapInactiveByKey.InsertOrUpdate(hashKeyID, movedEntry.value());
+                }
+            }
+            else if(optEntry.has_value())
+            {
+                /* Still live on the opposite lane after this disconnect; no move required. */
+            }
+            else
+            {
+                /* Another thread may have already transitioned it while we were
+                 * holding only the per-map transform lock. */
+                debug::log(2, FUNCTION, "MarkDisconnected transition skipped; live entry vanished for key=",
+                           hashKeyID.SubString());
             }
 
             debug::log(3, FUNCTION, "Marked disconnected key=", hashKeyID.SubString(),
