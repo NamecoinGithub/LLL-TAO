@@ -1354,10 +1354,15 @@ namespace LLP
 
                         /* Do a sequential read to obtain the list at our set limit. */
                         std::vector<TAO::Ledger::BlockState> vStates;
-                        while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop
-                            && LLD::Ledger->BatchRead(hashLastRead, "block", vStates,
-                                static_cast<uint32_t>(std::min<int32_t>(nBlockBudget, static_cast<int32_t>(nBatchLimit))), true))
+
+                        while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop)
                         {
+                            const auto nNextBlockBatchSize = static_cast<uint32_t>(
+                                std::min<int32_t>(nBlockBudget, static_cast<int32_t>(nBatchLimit)));
+
+                            if(!LLD::Ledger->BatchRead(hashLastRead, "block", vStates, nNextBlockBatchSize, true))
+                                break;
+
                             /* Loop through all available states. */
                             for(auto& state : vStates)
                             {
@@ -3936,6 +3941,7 @@ namespace LLP
     void TritiumNode::SwitchNode()
     {
         constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
+        /* Retry after 3 seconds to give connection state time to settle. */
         constexpr uint32_t SWITCH_NODE_RETRY_DELAY_MS = 3000;
 
         for(uint32_t nAttempt = 0; nAttempt < SWITCH_NODE_MAX_RETRIES; ++nAttempt)
