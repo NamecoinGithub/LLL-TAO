@@ -3968,7 +3968,15 @@ namespace LLP
             /* Normal case of asking for a getblocks inventory message. */
             std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
             if(pnode == nullptr)
+            {
+                if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
+                {
+                    runtime::sleep(SWITCH_NODE_RETRY_DELAY_MS);
+                    continue;
+                }
+
                 break;
+            }
 
             try
             {
