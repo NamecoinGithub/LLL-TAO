@@ -39,7 +39,7 @@ If your PR description exceeds this limit, the Coding Agent never sees the full 
 [Specific test requirements] (300 chars)
 - Verify X behavior with Y input
 - Test edge case Z
-- Run existing tests: `make test`
+- Run existing builds/tests: `make -f makefile.cli -j2` and `make -f makefile.cli UNIT_TESTS=1 -j2`
 
 ## Acceptance
 [Checklist of completion criteria] (250 chars)

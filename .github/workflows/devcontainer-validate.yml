@@ -1,0 +1,44 @@
+name: Devcontainer Validation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/devcontainer-validate.yml"
+      - ".github/workflows/copilot-setup-steps.yml"
+      - ".devcontainer/**"
+      - "contrib/devtools/install-build-deps.sh"
+      - "makefile.cli"
+      - "src/**"
+      - "tests/**"
+      - "README.md"
+      - "docs/**"
+  pull_request:
+    paths:
+      - ".github/workflows/devcontainer-validate.yml"
+      - ".github/workflows/copilot-setup-steps.yml"
+      - ".devcontainer/**"
+      - "contrib/devtools/install-build-deps.sh"
+      - "makefile.cli"
+      - "src/**"
+      - "tests/**"
+      - "README.md"
+      - "docs/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: sudo bash "${GITHUB_WORKSPACE}/contrib/devtools/install-build-deps.sh"
+
+      - name: Smoke build
+        run: make -f makefile.cli -j2
+
+      - name: Unit-test build
+        run: make -f makefile.cli UNIT_TESTS=1 -j2
