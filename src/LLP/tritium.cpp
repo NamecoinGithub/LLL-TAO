@@ -3941,8 +3941,13 @@ namespace LLP
     void TritiumNode::SwitchNode()
     {
         constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
-        /* Retry after 3 seconds to give connection state time to settle. */
-        constexpr uint32_t SWITCH_NODE_RETRY_DELAY_MS = 3000;
+        constexpr uint32_t SWITCH_NODE_RETRY_DELAY_SECONDS = 3;
+
+        const auto SleepBeforeRetry = [&](const uint32_t nAttempt)
+        {
+            if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
+                runtime::sleep(SWITCH_NODE_RETRY_DELAY_SECONDS * 1000);
+        };
 
         for(uint32_t nAttempt = 0; nAttempt < SWITCH_NODE_MAX_RETRIES; ++nAttempt)
         {
@@ -3975,11 +3980,10 @@ namespace LLP
             std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
             if(pnode == nullptr)
             {
+                SleepBeforeRetry(nAttempt);
+
                 if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
-                {
-                    runtime::sleep(SWITCH_NODE_RETRY_DELAY_MS);
                     continue;
-                }
 
                 break;
             }
@@ -4007,8 +4011,7 @@ namespace LLP
                 debug::error(FUNCTION, e.what());
                 TAO::Ledger::nSyncSession.store(0);
 
-                if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
-                    runtime::sleep(SWITCH_NODE_RETRY_DELAY_MS);
+                SleepBeforeRetry(nAttempt);
             }
         }
 

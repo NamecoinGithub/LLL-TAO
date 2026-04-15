@@ -139,7 +139,8 @@ namespace LLP
         FLUSH_CONDITION.notify_all();
 
         /* Release any blocking waits and cooperatively close active
-         * connections before joining the worker threads. */
+         * connections before joining the worker threads so shutdown keeps
+         * ownership local to this object and does not rely on detached waiters. */
         NotifyTriggers();
         DisconnectAll();
         CONDITION.notify_all();
