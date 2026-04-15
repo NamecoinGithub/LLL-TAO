@@ -3942,8 +3942,11 @@ namespace LLP
     {
         constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
         constexpr uint32_t SWITCH_NODE_RETRY_DELAY_SECONDS = 3;
+        const std::pair<uint32_t, uint32_t> INVALID_SESSION_PAIR(
+            std::numeric_limits<uint32_t>::max(),
+            std::numeric_limits<uint32_t>::max());
 
-        const auto SleepBeforeRetry = [&](const uint32_t nAttempt)
+        const auto sleepBeforeRetry = [&](const uint32_t nAttempt)
         {
             if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
                 runtime::sleep(SWITCH_NODE_RETRY_DELAY_SECONDS * 1000);
@@ -3953,11 +3956,7 @@ namespace LLP
         {
             /* Track our current sync session so we can exclude it when selecting
              * the next peer. Use an impossible index pair to mean "exclude none". */
-            std::pair<uint32_t, uint32_t> pairSession(
-                std::numeric_limits<uint32_t>::max(),
-                std::numeric_limits<uint32_t>::max());
-
-            bool fHaveCurrentSession = false;
+            std::pair<uint32_t, uint32_t> pairSession = INVALID_SESSION_PAIR;
             const uint64_t nSyncSession = TAO::Ledger::nSyncSession.load();
 
             if(nSyncSession != 0)
@@ -3965,10 +3964,7 @@ namespace LLP
 
                 const auto it = mapSessions.find(nSyncSession);
                 if(it != mapSessions.end())
-                {
                     pairSession = it->second;
-                    fHaveCurrentSession = true;
-                }
                 else
                 {
                     debug::warning(FUNCTION, "Sync session ", nSyncSession, " missing from session map; selecting a new peer");
@@ -3980,7 +3976,7 @@ namespace LLP
             std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
             if(pnode == nullptr)
             {
-                SleepBeforeRetry(nAttempt);
+                sleepBeforeRetry(nAttempt);
 
                 if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
                     continue;
@@ -3990,7 +3986,7 @@ namespace LLP
 
             try
             {
-                if(fHaveCurrentSession)
+                if(pairSession != INVALID_SESSION_PAIR)
                 {
                     /* Get the current sync node. */
                     std::shared_ptr<TritiumNode> pcurrent =
@@ -4011,7 +4007,7 @@ namespace LLP
                 debug::error(FUNCTION, e.what());
                 TAO::Ledger::nSyncSession.store(0);
 
-                SleepBeforeRetry(nAttempt);
+                sleepBeforeRetry(nAttempt);
             }
         }
 

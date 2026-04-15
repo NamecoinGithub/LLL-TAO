@@ -143,6 +143,10 @@ namespace LLP
          * ownership local to this object and does not rely on detached waiters. */
         NotifyTriggers();
         DisconnectAll();
+
+        /* Notify both conditions again after releasing triggers and closing
+         * connections so DATA_THREAD / FLUSH_THREAD wake even if they went
+         * back to sleep between the earlier shutdown signal and cleanup. */
         CONDITION.notify_all();
         FLUSH_CONDITION.notify_all();
 
