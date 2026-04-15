@@ -7,7 +7,7 @@ log() {
     echo "[install-build-deps] $*"
 }
 
-require_apt() {
+ensure_apt_exists() {
     if ! command -v apt-get >/dev/null 2>&1; then
         echo "This dependency bootstrap currently supports apt-based environments only." >&2
         exit 1
@@ -37,7 +37,7 @@ EOF
 }
 
 main() {
-    require_apt
+    ensure_apt_exists
 
     log "Updating package lists"
     apt-get update
