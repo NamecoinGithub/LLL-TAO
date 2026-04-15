@@ -45,7 +45,7 @@ TEST_CASE("Node Cache Configuration Tests", "[node_cache]")
 }
 
 
-TEST_CASE("Localhost Detection Tests", "[node_cache]")
+TEST_CASE("NodeCache Localhost Detection Tests", "[node_cache]")
 {
     SECTION("Detects IPv4 localhost")
     {
