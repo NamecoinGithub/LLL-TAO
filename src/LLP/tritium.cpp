@@ -1234,8 +1234,11 @@ namespace LLP
                 const uint32_t nBatchLimit =
                     config::GetArg("-batchlimit", 2500);
 
-                /* Set the block batch limits */
-                int32_t nLimits = nBatchLimit;
+                /* Track the number of blocks left to send in this response. */
+                int32_t nBlockBudget = static_cast<int32_t>(nBatchLimit);
+
+                /* Transaction/inventory reads can still use the configured batch size. */
+                const uint32_t nInventoryBatchSize = nBatchLimit;
 
                 /* Get the next type in stream. */
                 uint8_t nType = 0;
@@ -1351,8 +1354,9 @@ namespace LLP
 
                         /* Do a sequential read to obtain the list at our set limit. */
                         std::vector<TAO::Ledger::BlockState> vStates;
-                        while(!fBufferFull.load() && nLimits > 0 && hashStart != hashStop
-                            && LLD::Ledger->BatchRead(hashLastRead, "block", vStates, nBatchLimit, true))
+                        while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop
+                            && LLD::Ledger->BatchRead(hashLastRead, "block", vStates,
+                                static_cast<uint32_t>(std::min<int32_t>(nBlockBudget, static_cast<int32_t>(nBatchLimit))), true))
                         {
                             /* Loop through all available states. */
                             for(auto& state : vStates)
@@ -1399,7 +1403,7 @@ namespace LLP
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<TAO::Ledger::Transaction> vList;
-                                                        if(LLD::Ledger->BatchRead(proof.second, "tx", vList, nBatchLimit, false))
+                                                        if(LLD::Ledger->BatchRead(proof.second, "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
                                                             for(const auto& tBatch : vList)
@@ -1450,7 +1454,7 @@ namespace LLP
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<Legacy::Transaction> vList;
-                                                        if(LLD::Legacy->BatchRead(std::make_pair(std::string("tx"), proof.second), "tx", vList, nBatchLimit, false))
+                                                        if(LLD::Legacy->BatchRead(std::make_pair(std::string("tx"), proof.second), "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
                                                             for(const auto& tBatch : vList)
@@ -1514,7 +1518,7 @@ namespace LLP
                                 hashStart = hashLastRead;
 
                                 /* Check for stop hash. */
-                                if(--nLimits <= 0 || hashStart == hashStop || fBufferFull.load()) //1MB limit
+                                if(--nBlockBudget <= 0 || hashStart == hashStop || fBufferFull.load()) //1MB limit
                                 {
                                     /* Regular debug for normal limits */
                                     if(config::nVerbose >= 3)
@@ -1523,7 +1527,7 @@ namespace LLP
                                         if(fBufferFull.load())
                                             debug::log(3, FUNCTION, "Buffer is FULL ", Buffered(), " bytes");
 
-                                        debug::log(3, FUNCTION, "Limits ", nLimits, " Reached ", hashStart.SubString(), " == ", hashStop.SubString());
+                                        debug::log(3, FUNCTION, "Block budget ", nBlockBudget, " Reached ", hashStart.SubString(), " == ", hashStop.SubString());
                                     }
 
                                     break;
@@ -3931,61 +3935,80 @@ namespace LLP
     /* Helper function to switch the nodes on sync. */
     void TritiumNode::SwitchNode()
     {
-        /* Track our current sync sessions. */
-        std::pair<uint32_t, uint32_t> pairSession;
+        constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
+        constexpr uint32_t SWITCH_NODE_RETRY_DELAY_MS = 3000;
 
-        /* Only check our current sync session if it is active. */
-        if(TAO::Ledger::nSyncSession.load() != 0)
-        { LOCK(SESSIONS_MUTEX);
-
-            /* Check for session. */
-            if(!mapSessions.count(TAO::Ledger::nSyncSession.load()))
-                return;
-
-            /* Set the current session. */
-            pairSession = mapSessions[TAO::Ledger::nSyncSession.load()];
-        }
-
-        /* Normal case of asking for a getblocks inventory message. */
-        std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
-        if(pnode != nullptr)
+        for(uint32_t nAttempt = 0; nAttempt < SWITCH_NODE_MAX_RETRIES; ++nAttempt)
         {
-            /* Send out another getblocks request. */
+            /* Track our current sync session so we can exclude it when selecting
+             * the next peer. Use an impossible index pair to mean "exclude none". */
+            std::pair<uint32_t, uint32_t> pairSession(
+                std::numeric_limits<uint32_t>::max(),
+                std::numeric_limits<uint32_t>::max());
+
+            bool fHaveCurrentSession = false;
+            const uint64_t nSyncSession = TAO::Ledger::nSyncSession.load();
+
+            if(nSyncSession != 0)
+            { LOCK(SESSIONS_MUTEX);
+
+                const auto it = mapSessions.find(nSyncSession);
+                if(it != mapSessions.end())
+                {
+                    pairSession = it->second;
+                    fHaveCurrentSession = true;
+                }
+                else
+                {
+                    debug::warning(FUNCTION, "Sync session ", nSyncSession, " missing from session map; selecting a new peer");
+                    TAO::Ledger::nSyncSession.store(0);
+                }
+            }
+
+            /* Normal case of asking for a getblocks inventory message. */
+            std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
+            if(pnode == nullptr)
+                break;
+
             try
             {
-                /* Get the current sync node. */
-                std::shared_ptr<TritiumNode> pcurrent =
-                    TRITIUM_SERVER->GetConnection(pairSession.first, pairSession.second);
+                if(fHaveCurrentSession)
+                {
+                    /* Get the current sync node. */
+                    std::shared_ptr<TritiumNode> pcurrent =
+                        TRITIUM_SERVER->GetConnection(pairSession.first, pairSession.second);
 
-                /* Make sure this is an active connection. */
-                if(pcurrent)
-                    pcurrent->Unsubscribe(SUBSCRIPTION::LASTINDEX | SUBSCRIPTION::BESTCHAIN);
+                    /* Make sure this is an active connection. */
+                    if(pcurrent)
+                        pcurrent->Unsubscribe(SUBSCRIPTION::LASTINDEX | SUBSCRIPTION::BESTCHAIN);
+                }
 
                 /* Initiate the sync */
                 pnode->Sync();
+
+                return;
             }
             catch(const std::exception& e)
             {
-                /* Recurse on failure. */
                 debug::error(FUNCTION, e.what());
+                TAO::Ledger::nSyncSession.store(0);
 
-                SwitchNode();
+                if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
+                    runtime::sleep(SWITCH_NODE_RETRY_DELAY_MS);
             }
         }
-        else
-        {
-            /* Reset the current sync node. */
-            TAO::Ledger::nSyncSession.store(0);
 
-            /* Logging to verify (for debugging). */
-            debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 15 seconds...");
+        /* Reset the current sync node. */
+        TAO::Ledger::nSyncSession.store(0);
 
-            /* Wait for timeouts and then restart. */
-            runtime::sleep(15000);
+        /* Logging to verify (for debugging). */
+        debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 15 seconds...");
 
-            /* Reconnect to our seed nodes. */
-            LLP::MakeConnections(TRITIUM_SERVER);
-        }
+        /* Wait for timeouts and then restart. */
+        runtime::sleep(15000);
+
+        /* Reconnect to our seed nodes. */
+        LLP::MakeConnections(TRITIUM_SERVER);
     }
 
 
