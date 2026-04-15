@@ -988,9 +988,10 @@ namespace LLP
         /* Read-idle timeout.
          * Non-exempt connections use the DataThread TIMEOUT (server-configured).
          * Authenticated mining connections (IsTimeoutExempt == true) use the
-         * virtual GetReadTimeout() which returns a longer but finite value
-         * (default 600s / 10 minutes, configurable via -miningreadtimeout).
-         * This prevents a stalled read pipeline from persisting indefinitely
+         * virtual GetReadTimeout() which returns a longer but finite value from
+         * the shared MiningConstants helpers (default 86400s / 24 hours, with a
+         * floor applied to any runtime override).  This prevents a stalled
+         * read pipeline from persisting indefinitely
          * while server-initiated PUSH notifications continue to work
          * (the "shadow ban" scenario). */
         {

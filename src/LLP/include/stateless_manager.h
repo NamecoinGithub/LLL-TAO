@@ -15,6 +15,7 @@ ________________________________________________________________________________
 #ifndef NEXUS_LLP_INCLUDE_STATELESS_MANAGER_H
 #define NEXUS_LLP_INCLUDE_STATELESS_MANAGER_H
 
+#include <LLP/include/node_cache.h>
 #include <LLP/include/stateless_miner.h>
 #include <LLP/include/get_block_policy.h>
 #include <Util/templates/concurrent_hashmap.h>
@@ -84,6 +85,9 @@ namespace LLP
     class StatelessMinerManager
     {
     public:
+        /** Explicit inactive-cache budget for stale/disconnected address entries. */
+        static constexpr size_t DEFAULT_MAX_INACTIVE_CACHE_SIZE = NodeCache::DEFAULT_MAX_CACHE_SIZE;
+
         /** Get
          *
          *  Get the global manager instance.
@@ -378,15 +382,15 @@ namespace LLP
 
         /** EnforceCacheLimit
          *
-         *  Enforce the maximum cache size limit for DDOS protection.
-         *  Removes oldest miners when cache exceeds limit.
+         *  Enforce the inactive-cache budget for stale/disconnected miners.
+         *  Live runtime state is never evicted here.
          *
-         *  @param[in] nMaxSize Maximum cache size (default: 500)
+         *  @param[in] nMaxSize Maximum inactive cache size (default: 1000)
          *
          *  @return Number of miners removed
          *
          **/
-        uint32_t EnforceCacheLimit(size_t nMaxSize = 500);
+        uint32_t EnforceCacheLimit(size_t nMaxSize = DEFAULT_MAX_INACTIVE_CACHE_SIZE);
 
         /** CheckKeepaliveRequired
          *

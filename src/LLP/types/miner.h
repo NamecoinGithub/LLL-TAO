@@ -623,9 +623,10 @@ namespace LLP
 
         /** GetReadTimeout
          *
-         *  Authenticated legacy miners use a long but finite read-idle timeout
-         *  (default 600s / 10 minutes, configurable via -miningreadtimeout).
-         *  This prevents stalled read pipelines from persisting indefinitely.
+         *  Authenticated legacy miners use a long but finite read-idle timeout.
+         *  The effective value comes from the shared MiningConstants helpers so the
+         *  runtime override can never fall below the safety floor required for
+         *  the 24-hour mining liveness contract.
          *
          *  @return read-idle timeout in milliseconds, or 0 for default.
          *
@@ -633,7 +634,7 @@ namespace LLP
         uint32_t GetReadTimeout() const final
         {
             if(fMinerAuthenticated)
-                return config::GetArg("-miningreadtimeout", MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS);
+                return MiningConstants::GetConfiguredReadTimeoutMs();
 
             return 0;
         }

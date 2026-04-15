@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/stateless_manager.h>
 #include <LLP/include/genesis_constants.h>
+#include <LLP/include/mining_constants.h>
 #include <LLP/include/node_cache.h>
 #include <LLP/include/node_session_registry.h>
 #include <LLP/include/mining_timers.h>
@@ -108,17 +109,6 @@ namespace LLP
                     mapIPToAddress.CompareAndErase(strOldIP, existing.strAddress);
                 }
             }
-        }
-
-        /* Enforce cache limit before adding new miner (DDOS protection).
-         * Use atomic counter for cheap threshold check to avoid lock contention
-         * on the hot path — full enforcement only when 20% over limit. */
-        if(fNewMiner)
-        {
-            size_t nCurrent = nTotalMiners.load();
-            size_t nLimit = NodeCache::DEFAULT_MAX_CACHE_SIZE;
-            if(nCurrent > nLimit + nLimit / 5)
-                EnforceCacheLimit(nLimit);
         }
 
         /* Update main miner map */
@@ -345,7 +335,7 @@ namespace LLP
             }
         }
 
-        /* Cross-cache consistency: mark session as dead in NodeSessionRegistry.
+        /* Cross-cache consistency: mark only this lane as dead in NodeSessionRegistry.
          * Centralised here so that every removal path
          * (CleanupInactive, PurgeInactiveMiners, EnforceCacheLimit,
          * RemoveMinerByKeyID, direct disconnects) gets this automatically.
@@ -355,20 +345,16 @@ namespace LLP
         if(ctx.hashKeyID != 0)
         {
             try {
-                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ProtocolLane::STATELESS);
-                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ProtocolLane::LEGACY);
+                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ctx.nProtocolLane);
             }
             catch(const std::exception& e) {
                 debug::error(FUNCTION, "NodeSessionRegistry::MarkDisconnected failed: ", e.what());
             }
 
-            /* Dual-write: remove from unified SessionStore. */
-            try {
-                SessionStore::Get().Remove(ctx.hashKeyID);
-            }
-            catch(const std::exception& e) {
-                debug::error(FUNCTION, "SessionStore::Remove failed: ", e.what());
-            }
+            /* NodeSessionRegistry::MarkDisconnected already dual-writes the
+             * canonical store's lane liveness.  Do not remove the canonical
+             * session here — disconnected sessions now remain cacheable inactive
+             * entries until SweepExpired()/inactive-budget enforcement reaps them. */
         }
 
         return true;
@@ -831,42 +817,64 @@ namespace LLP
     }
 
 
-    /* Enforce cache size limit for DDOS protection */
+    /* Enforce inactive-cache budget for stale/disconnected miner entries. */
     uint32_t StatelessMinerManager::EnforceCacheLimit(size_t nMaxSize)
     {
-        size_t nCurrentSize = GetMinerCount();
-        
-        /* No action needed if under limit */
-        if(nCurrentSize <= nMaxSize)
+        const uint64_t nNow = runtime::unifiedtimestamp();
+
+        /* This runs only on the periodic cleanup path, not on share-submission
+         * or authentication hot paths, so per-entry registry revalidation is an
+         * acceptable trade-off for keeping active runtime state non-evictable. */
+        const auto fnIsInactiveCandidate =
+            [nNow](const MiningContext& ctx) -> bool
+            {
+                const uint64_t nInactiveTimeoutSec =
+                    MiningConstants::GetSessionLivenessTimeoutSec(ctx.strAddress);
+
+                if(!ctx.IsConsideredInactive(nNow, nInactiveTimeoutSec))
+                    return false;
+
+                /* hashKeyID==0 is the unauthenticated/pre-session sentinel, so
+                 * only canonical authenticated sessions can be revalidated
+                 * against NodeSessionRegistry. */
+                if(ctx.hashKeyID != 0)
+                {
+                    auto optEntry = NodeSessionRegistry::Get().LookupByKey(ctx.hashKeyID);
+                    if(optEntry.has_value() && optEntry->AnyPortLive())
+                        return false;
+                }
+
+                return true;
+            };
+
+        std::vector<std::pair<std::string, MiningContext>> vInactive;
+        vInactive.reserve(GetMinerCount());
+
+        mapMiners.ForEach([&](const std::string& strAddress, const MiningContext& ctx) {
+            if(fnIsInactiveCandidate(ctx))
+                vInactive.emplace_back(strAddress, ctx);
+        });
+
+        if(vInactive.size() <= nMaxSize)
             return 0;
 
-        uint32_t nToRemove = static_cast<uint32_t>(nCurrentSize - nMaxSize);
+        uint32_t nToRemove = static_cast<uint32_t>(vInactive.size() - nMaxSize);
         uint32_t nRemoved = 0;
 
-        debug::log(1, FUNCTION, "Cache limit exceeded (", nCurrentSize, "/", nMaxSize, 
-                  "), removing ", nToRemove, " least recently active entries");
+        debug::log(1, FUNCTION, "Inactive miner cache exceeded budget (", vInactive.size(), "/",
+                   nMaxSize, "), removing ", nToRemove, " oldest stale entries");
 
-        /* Get all miners sorted by last activity timestamp */
-        auto pairs = mapMiners.GetAllPairs();
-        std::vector<std::pair<std::string, MiningContext>> vMiners(pairs.begin(), pairs.end());
-
-        /* Sort by timestamp ascending (least recently active first) */
-        /* This purges inactive older miners to allow newer active miners */
-        std::sort(vMiners.begin(), vMiners.end(), 
+        std::sort(vInactive.begin(), vInactive.end(),
             [](const auto& a, const auto& b) {
                 return a.second.nTimestamp < b.second.nTimestamp;
             });
 
-        /* Helper: re-read live state to avoid removing a miner that was
-         * refreshed after the snapshot was taken. Returns nullopt if gone. */
-        auto fnGetLive = [this](const std::string& strAddr) -> std::optional<MiningContext>
+        const auto fnGetLive = [this](const std::string& strAddr) -> std::optional<MiningContext>
         {
             return mapMiners.Get(strAddr);
         };
 
-        /* Remove least recently active miners first, but prefer unauthenticated and localhost last.
-         * Re-read the live entry before removing to avoid stale-snapshot deletes. */
-        for(const auto& pair : vMiners)
+        for(const auto& pair : vInactive)
         {
             if(nRemoved >= nToRemove)
                 break;
@@ -876,63 +884,17 @@ namespace LLP
                 continue;
             const MiningContext& ctx = optLive.value();
 
-            /* Skip localhost miners in first pass */
-            if(NodeCache::IsLocalhost(ctx.strAddress))
+            if(!fnIsInactiveCandidate(ctx))
                 continue;
 
-            /* Remove unauthenticated miners first */
-            if(!ctx.fAuthenticated)
-            {
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
-            }
-        }
-
-        /* Second pass: remove authenticated remote miners if needed */
-        if(nRemoved < nToRemove)
-        {
-            for(const auto& pair : vMiners)
-            {
-                if(nRemoved >= nToRemove)
-                    break;
-
-                auto optLive = fnGetLive(pair.first);
-                if(!optLive.has_value())
-                    continue;
-                const MiningContext& ctx = optLive.value();
-
-                /* Skip localhost miners */
-                if(NodeCache::IsLocalhost(ctx.strAddress))
-                    continue;
-
-                if(ctx.fAuthenticated)
-                {
-                    if(RemoveMiner(pair.first))
-                        ++nRemoved;
-                }
-            }
-        }
-
-        /* Final pass: remove localhost miners if absolutely necessary */
-        if(nRemoved < nToRemove)
-        {
-            for(const auto& pair : vMiners)
-            {
-                if(nRemoved >= nToRemove)
-                    break;
-
-                if(!fnGetLive(pair.first).has_value())
-                    continue;
-
-                if(RemoveMiner(pair.first))
-                    ++nRemoved;
-            }
+            if(RemoveMiner(pair.first))
+                ++nRemoved;
         }
 
         if(nRemoved > 0)
         {
-            debug::log(1, FUNCTION, "Enforced cache limit: removed ", nRemoved, 
-                      " miners (cache now at ", GetMinerCount(), "/", nMaxSize, ")");
+            debug::log(1, FUNCTION, "Enforced inactive miner cache budget: removed ",
+                       nRemoved, " stale entries");
         }
 
         return nRemoved;

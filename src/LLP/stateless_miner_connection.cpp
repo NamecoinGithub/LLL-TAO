@@ -827,13 +827,12 @@ namespace LLP
                            " reason: ", strReason);
 
                 /* Remove from StatelessMinerManager tracking.
-                 * RemoveMiner() handles cross-cache cleanup (NodeSessionRegistry
-                 * MarkDisconnected) internally. */
+                 * Remove only THIS stateless-lane endpoint.  RemoveMiner() handles
+                 * cross-cache cleanup while CompareAndErase-protected indexes prevent
+                 * a stale disconnect from erasing a freshly reconnected endpoint. */
                 {
                     LOCK(MUTEX);
-                    if(context.hashKeyID != 0)
-                        StatelessMinerManager::Get().RemoveMinerByKeyID(context.hashKeyID);
-                    else if(!context.strAddress.empty())
+                    if(!context.strAddress.empty())
                         StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 
@@ -921,7 +920,13 @@ namespace LLP
                     return false;
                 }
 
-                context.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+                const std::string strConnectionAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                {
+                    LOCK(MUTEX);
+                    context.strAddress = strConnectionAddress;
+                }
 
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
@@ -955,7 +960,7 @@ namespace LLP
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
-                    TransformTrackedMiner(context,
+                    StatelessMinerManager::Get().TransformMiner(strConnectionAddress,
                         [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
@@ -964,7 +969,7 @@ namespace LLP
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
                             return updated;
-                        });
+                        }, 1);
                 }
                 
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
@@ -2735,9 +2740,11 @@ namespace LLP
                     debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication");
 
                     /* Build SESSION_START using shared utility.
-                     * The session liveness timeout is a node-wide constant from NodeCache,
-                     * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                    const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(context.strAddress);
+                     * The session liveness timeout is a shared mining-liveness
+                     * policy value, NOT a per-context field.  nSessionTimeout
+                     * was removed from MiningContext. */
+                    const uint64_t nLivenessTimeout =
+                        MiningConstants::GetSessionLivenessTimeoutSec(context.strAddress);
                     StatelessPacket sessionStart(StatelessOpcodes::SESSION_START);
                     sessionStart.DATA = SessionStartPacket::BuildPayload(
                         context.nSessionId, nLivenessTimeout, context.hashGenesis);
@@ -4187,14 +4194,12 @@ namespace LLP
 
 
     /* GetReadTimeout - authenticated miners use a long but finite read-idle
-     * timeout (default 600s / 10 minutes, configurable via -miningreadtimeout).
-     * This replaces the previous infinite exemption from read-idle timeout,
-     * ensuring that a stalled read pipeline is eventually cleaned up rather
-     * than persisting indefinitely while PUSH notifications continue to work. */
+     * timeout sourced from the shared MiningConstants helpers.  Runtime config
+     * is clamped to the shared 24-hour safety floor. */
     uint32_t StatelessMinerConnection::GetReadTimeout() const
     {
         if(fAuthenticatedAtomic.load(std::memory_order_relaxed))
-            return config::GetArg("-miningreadtimeout", MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS);
+            return MiningConstants::GetConfiguredReadTimeoutMs();
 
         return 0;  /* Use DataThread default TIMEOUT for unauthenticated connections */
     }

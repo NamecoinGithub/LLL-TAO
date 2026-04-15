@@ -290,11 +290,10 @@ TEST_CASE("Payout Verification - Cryptographic Integrity", "[rewards][payout][cr
         std::vector<uint8_t> serialized = wrapResult.submission.Serialize();
         std::vector<uint8_t> pubkey = pWrapper->GetSessionPubKey();
 
-        DisposableFalcon::WrapperResult unwrapResult = pWrapper->UnwrapWorkSubmission(serialized, pubkey);
-
-        REQUIRE(unwrapResult.fSuccess == true);
-        REQUIRE(unwrapResult.submission.hashMerkleRoot == merkleRoot);
-        REQUIRE(unwrapResult.submission.nNonce == nNonce);
+        DisposableFalcon::SignedWorkSubmission unwrapped;
+        REQUIRE(DisposableFalcon::VerifyWorkSubmission(serialized, pubkey, unwrapped));
+        REQUIRE(unwrapped.hashMerkleRoot == merkleRoot);
+        REQUIRE(unwrapped.nNonce == nNonce);
     }
 
     SECTION("Tampered submission fails verification")
@@ -320,10 +319,10 @@ TEST_CASE("Payout Verification - Cryptographic Integrity", "[rewards][payout][cr
 
         std::vector<uint8_t> pubkey = pWrapper->GetSessionPubKey();
 
-        DisposableFalcon::WrapperResult unwrapResult = pWrapper->UnwrapWorkSubmission(serialized, pubkey);
+        DisposableFalcon::SignedWorkSubmission unwrapped;
 
         /* Verification should fail */
-        REQUIRE(unwrapResult.fSuccess == false);
+        REQUIRE_FALSE(DisposableFalcon::VerifyWorkSubmission(serialized, pubkey, unwrapped));
     }
 
     SECTION("Wrong pubkey fails verification")
@@ -349,10 +348,10 @@ TEST_CASE("Payout Verification - Cryptographic Integrity", "[rewards][payout][cr
         std::vector<uint8_t> serialized = wrapResult.submission.Serialize();
         std::vector<uint8_t> wrongPubkey = pWrapper2->GetSessionPubKey();
 
-        DisposableFalcon::WrapperResult unwrapResult = pWrapper1->UnwrapWorkSubmission(serialized, wrongPubkey);
+        DisposableFalcon::SignedWorkSubmission unwrapped;
 
         /* Should fail - wrong key */
-        REQUIRE(unwrapResult.fSuccess == false);
+        REQUIRE_FALSE(DisposableFalcon::VerifyWorkSubmission(serialized, wrongPubkey, unwrapped));
     }
 
     FalconAuth::Shutdown();

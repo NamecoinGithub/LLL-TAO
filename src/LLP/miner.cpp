@@ -481,6 +481,32 @@ namespace LLP
                     debug::log(0, FUNCTION, "  Remote mining: ENABLED");
                 }
 
+                /* Track the exact legacy-lane endpoint immediately so later auth,
+                 * keepalive, and disconnect operations mutate/remove only this
+                 * connection's lane state.  Stateless lane already does this on
+                 * connect; legacy lane needs the same pre-auth seed entry so its
+                 * TransformMiner() calls do not become canonical-session-only
+                 * fallbacks. */
+                {
+                    const std::string strAddress =
+                        GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                    MiningContext context(
+                        nChannel,
+                        nBestHeight.load(std::memory_order_relaxed),
+                        runtime::unifiedtimestamp(),
+                        strAddress,
+                        1,
+                        false,
+                        0,
+                        uint256_t(0),
+                        uint256_t(0)
+                    );
+
+                    context = context.WithProtocolLane(ProtocolLane::LEGACY);
+                    StatelessMinerManager::Get().UpdateMiner(strAddress, context, 0);
+                }
+
                 return;
             }
 
@@ -548,21 +574,16 @@ namespace LLP
                 /* Interrupt any in-flight SendChannelNotification() path immediately. */
                 m_shutdownRequested.store(true, std::memory_order_release);
 
-                /* RemoveMiner handles local maps + cross-cache
-                 * propagation to NodeSessionRegistry.
-                 * Under single-lane policy, the miner may have a
-                 * StatelessMinerManager entry from prior stateless activity. */
-                if(fMinerAuthenticated)
+                /* Remove only THIS legacy-lane endpoint.  RemoveMiner() guards all
+                 * secondary indices with CompareAndErase so a reconnect that already
+                 * replaced the hashKeyID/session mapping on another endpoint will not
+                 * be clobbered by this stale disconnect. */
+                const std::string strMinerAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                if(!strMinerAddress.empty())
                 {
-                    if(hashKeyID != 0)
-                        StatelessMinerManager::Get().RemoveMinerByKeyID(hashKeyID);
-                    else
-                    {
-                        const std::string strMinerAddress =
-                            GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-                        if(!strMinerAddress.empty())
-                            StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
-                    }
+                    StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
                 }
 
                 /* Notify Colin agent on disconnect (only if genesis was known) */
@@ -1141,9 +1162,11 @@ namespace LLP
                         debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication (legacy lane)");
 
                         /* Build SESSION_START payload using shared utility.
-                         * The session liveness timeout is a node-wide constant from NodeCache,
-                         * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                        const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(updatedContext.strAddress);
+                         * The session liveness timeout is a shared mining
+                         * policy value, NOT a per-context field.  nSessionTimeout
+                         * was removed from MiningContext. */
+                        const uint64_t nLivenessTimeout =
+                            MiningConstants::GetSessionLivenessTimeoutSec(updatedContext.strAddress);
                         std::vector<uint8_t> vSessionStart = SessionStartPacket::BuildPayload(
                             nSessionId, nLivenessTimeout, hashGenesis);
 

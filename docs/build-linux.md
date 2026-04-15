@@ -6,9 +6,21 @@
 ### `Install Dependencies`       
 
 ```sh
-sudo apt-get install -y git make build-essential libssl-dev libdb-dev libdb++-dev
+sudo apt-get update
+sudo apt-get install -y git make build-essential libssl-dev libdb5.3-dev libdb5.3++-dev
 ```
 <br />
+
+For repeatable devcontainer and Copilot cloud-agent setup, the repository also
+ships a shared bootstrap script:
+
+```sh
+sudo bash contrib/devtools/install-build-deps.sh
+```
+
+That script installs the same Berkeley DB headers used by mining and unit-test
+builds, then fails fast if a minimal `#include <db_cxx.h>` compile still does
+not work.
 
 ### `Build Process`
 
