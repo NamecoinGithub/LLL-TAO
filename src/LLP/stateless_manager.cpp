@@ -335,7 +335,7 @@ namespace LLP
             }
         }
 
-        /* Cross-cache consistency: mark only THIS lane as dead in NodeSessionRegistry.
+        /* Cross-cache consistency: mark only this lane as dead in NodeSessionRegistry.
          * Centralised here so that every removal path
          * (CleanupInactive, PurgeInactiveMiners, EnforceCacheLimit,
          * RemoveMinerByKeyID, direct disconnects) gets this automatically.

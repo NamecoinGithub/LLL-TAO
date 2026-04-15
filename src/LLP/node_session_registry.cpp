@@ -312,9 +312,9 @@ namespace LLP
         /* Store in both maps.
          * OPT-4: Collision detection — if mapSessionToKey already holds a
          * *different* hashKeyID for this nSessionId, two distinct Falcon keys
-         * have collided in their lower 32 bits.  The displaced old entry in
-         * m_mapLiveByKey / m_mapInactiveByKey would become orphaned (unreachable via session ID lookup
-         * and never cleaned up by SweepExpired, which iterates the registry maps but
+         * have collided in their lower 32 bits.  The displaced old entry in either
+         * m_mapLiveByKey or m_mapInactiveByKey would become orphaned (unreachable via
+         * session ID lookup and never cleaned up by SweepExpired, which iterates the registry maps but
          * relies on m_mapSessionToKey for the reverse mapping).
          *
          * Fix: explicitly remove the displaced entry from both registry maps and
