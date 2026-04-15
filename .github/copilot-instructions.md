@@ -94,19 +94,19 @@ make VERBOSE=1 -j$(nproc)
 
 ### Run All Tests
 ```bash
-make test
+make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 ```
 
 ### Run Specific Test Suite
 ```bash
-# Unit tests only
-./build/tests/unit_tests
+# Build unit-test binary
+make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
-# LLP tests
-./build/tests/unit_tests --run_test=LLP/*
+# Run LLP-focused tests from the produced nexus binary
+./nexus "[llp]"
 
-# Ledger tests
-./build/tests/unit_tests --run_test=Ledger/*
+# Run ledger-focused tests
+./nexus "[ledger]"
 ```
 
 ## Common Build Issues
