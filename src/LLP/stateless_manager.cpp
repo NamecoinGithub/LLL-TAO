@@ -335,7 +335,7 @@ namespace LLP
             }
         }
 
-        /* Cross-cache consistency: mark session as dead in NodeSessionRegistry.
+        /* Cross-cache consistency: mark only THIS lane as dead in NodeSessionRegistry.
          * Centralised here so that every removal path
          * (CleanupInactive, PurgeInactiveMiners, EnforceCacheLimit,
          * RemoveMinerByKeyID, direct disconnects) gets this automatically.
@@ -345,20 +345,16 @@ namespace LLP
         if(ctx.hashKeyID != 0)
         {
             try {
-                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ProtocolLane::STATELESS);
-                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ProtocolLane::LEGACY);
+                NodeSessionRegistry::Get().MarkDisconnected(ctx.hashKeyID, ctx.nProtocolLane);
             }
             catch(const std::exception& e) {
                 debug::error(FUNCTION, "NodeSessionRegistry::MarkDisconnected failed: ", e.what());
             }
 
-            /* Dual-write: remove from unified SessionStore. */
-            try {
-                SessionStore::Get().Remove(ctx.hashKeyID);
-            }
-            catch(const std::exception& e) {
-                debug::error(FUNCTION, "SessionStore::Remove failed: ", e.what());
-            }
+            /* NodeSessionRegistry::MarkDisconnected already dual-writes the
+             * canonical store's lane liveness.  Do not remove the canonical
+             * session here — disconnected sessions now remain cacheable inactive
+             * entries until SweepExpired()/inactive-budget enforcement reaps them. */
         }
 
         return true;

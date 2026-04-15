@@ -827,13 +827,12 @@ namespace LLP
                            " reason: ", strReason);
 
                 /* Remove from StatelessMinerManager tracking.
-                 * RemoveMiner() handles cross-cache cleanup (NodeSessionRegistry
-                 * MarkDisconnected) internally. */
+                 * Remove only THIS stateless-lane endpoint.  RemoveMiner() handles
+                 * cross-cache cleanup while CompareAndErase-protected indexes prevent
+                 * a stale disconnect from erasing a freshly reconnected endpoint. */
                 {
                     LOCK(MUTEX);
-                    if(context.hashKeyID != 0)
-                        StatelessMinerManager::Get().RemoveMinerByKeyID(context.hashKeyID);
-                    else if(!context.strAddress.empty())
+                    if(!context.strAddress.empty())
                         StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 
