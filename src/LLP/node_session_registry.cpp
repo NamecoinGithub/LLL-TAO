@@ -333,6 +333,7 @@ namespace LLP
                 /* Remove displaced entry from both maps to prevent orphaning */
                 m_mapLiveByKey.Erase(*existingKey);
                 m_mapInactiveByKey.Erase(*existingKey);
+                m_mapSessionToKey.Erase(nSessionId);
                 SessionStore::Get().Remove(*existingKey);
             }
         }
@@ -471,6 +472,12 @@ namespace LLP
                 updated.nLastActivity = nNow;
                 return updated;
             });
+        }
+        else
+        {
+            debug::log(2, FUNCTION, "MarkDisconnected found no session for key=",
+                       hashKeyID.SubString(),
+                       " lane=", (lane == ProtocolLane::STATELESS ? "STATELESS" : "LEGACY"));
         }
 
         return fTransformed;

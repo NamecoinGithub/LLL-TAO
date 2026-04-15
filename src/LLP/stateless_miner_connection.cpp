@@ -920,7 +920,13 @@ namespace LLP
                     return false;
                 }
 
-                context.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+                const std::string strConnectionAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                {
+                    LOCK(MUTEX);
+                    context.strAddress = strConnectionAddress;
+                }
 
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
@@ -954,7 +960,7 @@ namespace LLP
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
-                    TransformTrackedMiner(context,
+                    StatelessMinerManager::Get().TransformMiner(strConnectionAddress,
                         [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
@@ -963,7 +969,7 @@ namespace LLP
                             if(fEncReady && !vKey.empty())
                                 updated = updated.WithChaChaKey(vKey);
                             return updated;
-                        });
+                        }, 1);
                 }
                 
                 debug::log(0, FUNCTION, "✓ Miner subscribed to ", 
