@@ -84,7 +84,7 @@ These should drive workflow design and refactoring order.
    - Risk: duplicated threads, lifecycle management, memory, and operational complexity
 
 5. **Onboarding / CI command drift**
-   - Some docs still referred to `make test`
+   - This PR fixes contributor-facing docs that previously referred to `make test`
    - This branch is built around `make -f makefile.cli ...`
    - Risk: new contributors use the wrong command path and misdiagnose the build
 
