@@ -58,7 +58,7 @@ TEST_CASE("NodeSessionRegistry - Basic Registration", "[llp]")
     REQUIRE(entry->AnyPortLive() == true);
 }
 
-TEST_CASE("NodeSessionRegistry - Cross-Port Session Recovery", "[llp]")
+TEST_CASE("NodeSessionRegistry - Cross-Port Session Recovery Reuses Canonical Session", "[llp]")
 {
     /* Clear registry for clean test */
     NodeSessionRegistry::Get().Clear();
@@ -96,11 +96,12 @@ TEST_CASE("NodeSessionRegistry - Cross-Port Session Recovery", "[llp]")
     REQUIRE(isNew2 == false);
     REQUIRE(sessionId2 == sessionId1);  // Same session ID across ports
     REQUIRE(NodeSessionRegistry::Get().Count() == 1);  // Only one entry
+    REQUIRE(NodeSessionRegistry::Get().CountLive() == 1);
 
-    /* Verify both ports are marked live */
+    /* New registry logic keeps one canonical live lane at a time. */
     auto entry = NodeSessionRegistry::Get().Lookup(sessionId1);
     REQUIRE(entry.has_value());
-    REQUIRE(entry->fStatelessLive == true);
+    REQUIRE(entry->fStatelessLive == false);
     REQUIRE(entry->fLegacyLive == true);
     REQUIRE(entry->AnyPortLive() == true);
 }
@@ -227,16 +228,21 @@ TEST_CASE("NodeSessionRegistry - Mark Disconnected", "[llp]")
     context = context.WithGenesis(hashGenesis);
     context = context.WithAuth(true);
 
-    /* Auth on both ports */
-    NodeSessionRegistry::Get().RegisterOrRefresh(hashKeyID, hashGenesis, context, ProtocolLane::STATELESS);
-    NodeSessionRegistry::Get().RegisterOrRefresh(hashKeyID, hashGenesis, context, ProtocolLane::LEGACY);
+    auto [sessionId, isNew] = NodeSessionRegistry::Get().RegisterOrRefresh(
+        hashKeyID, hashGenesis, context, ProtocolLane::STATELESS);
+    REQUIRE(isNew == true);
 
-    /* Verify both are live */
+    auto [sameSessionId, isNewLegacy] = NodeSessionRegistry::Get().RegisterOrRefresh(
+        hashKeyID, hashGenesis, context, ProtocolLane::LEGACY);
+    REQUIRE(isNewLegacy == false);
+    REQUIRE(sameSessionId == sessionId);
+
+    /* Legacy auth should demote the stale stateless live flag. */
     auto entry1 = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
-    REQUIRE(entry1->fStatelessLive == true);
+    REQUIRE(entry1->fStatelessLive == false);
     REQUIRE(entry1->fLegacyLive == true);
 
-    /* Disconnect stateless port */
+    /* Disconnecting the already-demoted stateless lane must not clobber legacy. */
     bool marked = NodeSessionRegistry::Get().MarkDisconnected(hashKeyID, ProtocolLane::STATELESS);
     REQUIRE(marked == true);
 
@@ -245,15 +251,59 @@ TEST_CASE("NodeSessionRegistry - Mark Disconnected", "[llp]")
     REQUIRE(entry2->fStatelessLive == false);
     REQUIRE(entry2->fLegacyLive == true);
     REQUIRE(entry2->AnyPortLive() == true);
+    REQUIRE(NodeSessionRegistry::Get().CountLive() == 1);
 
     /* Disconnect legacy port */
     NodeSessionRegistry::Get().MarkDisconnected(hashKeyID, ProtocolLane::LEGACY);
 
-    /* Verify both are dead */
+    /* Verify both are dead but the canonical session is still retained as inactive. */
     auto entry3 = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
     REQUIRE(entry3->fStatelessLive == false);
     REQUIRE(entry3->fLegacyLive == false);
     REQUIRE(entry3->AnyPortLive() == false);
+    REQUIRE(entry3->nSessionId == sessionId);
+    REQUIRE(NodeSessionRegistry::Get().Count() == 1);
+    REQUIRE(NodeSessionRegistry::Get().CountLive() == 0);
+}
+
+TEST_CASE("NodeSessionRegistry - Reactivates Inactive Session With Same Canonical ID", "[llp]")
+{
+    NodeSessionRegistry::Get().Clear();
+
+    uint256_t hashKeyID = LLC::GetRand256();
+    uint256_t hashGenesis = LLC::GetRand256();
+    MiningContext context;
+    context = context.WithKeyId(hashKeyID);
+    context = context.WithGenesis(hashGenesis);
+    context = context.WithAuth(true);
+
+    auto [sessionId, isNew] = NodeSessionRegistry::Get().RegisterOrRefresh(
+        hashKeyID, hashGenesis, context, ProtocolLane::STATELESS
+    );
+    REQUIRE(isNew == true);
+
+    REQUIRE(NodeSessionRegistry::Get().MarkDisconnected(hashKeyID, ProtocolLane::STATELESS) == true);
+    REQUIRE(NodeSessionRegistry::Get().Count() == 1);
+    REQUIRE(NodeSessionRegistry::Get().CountLive() == 0);
+
+    auto entryInactive = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
+    REQUIRE(entryInactive.has_value());
+    REQUIRE(entryInactive->AnyPortLive() == false);
+
+    auto [reactivatedSessionId, isReactivatedNew] = NodeSessionRegistry::Get().RegisterOrRefresh(
+        hashKeyID, hashGenesis, context, ProtocolLane::LEGACY
+    );
+    REQUIRE(isReactivatedNew == false);
+    REQUIRE(reactivatedSessionId == sessionId);
+
+    auto entryLive = NodeSessionRegistry::Get().LookupByKey(hashKeyID);
+    REQUIRE(entryLive.has_value());
+    REQUIRE(entryLive->nSessionId == sessionId);
+    REQUIRE(entryLive->fStatelessLive == false);
+    REQUIRE(entryLive->fLegacyLive == true);
+    REQUIRE(entryLive->AnyPortLive() == true);
+    REQUIRE(NodeSessionRegistry::Get().Count() == 1);
+    REQUIRE(NodeSessionRegistry::Get().CountLive() == 1);
 }
 
 TEST_CASE("NodeSessionRegistry - Sweep Expired", "[llp]")

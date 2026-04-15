@@ -10,6 +10,12 @@ We use a very strict branching logic for our development. The branch 'merging' i
 
 We use Make to build our project to multiple platforms. Please read out build documentation for instructions and options.
 
+For deterministic local/Codespaces/Copilot dependency bootstrap on Ubuntu, run:
+
+```sh
+sudo bash contrib/devtools/install-build-deps.sh
+```
+
 [Build Options](docs/build-params-reference.md)
 
 [Linux](docs/build-linux.md)
@@ -123,6 +129,7 @@ Architecture diagrams, protocol visualizations, and onboarding guides:
 - [Diagram Templates & Architecture Diagrams](docs/diagrams/README.md) - 15+ Mermaid and ASCII diagrams
 - [Linux Epoll Mining Architecture](docs/current/mining/linux-epoll-mining-architecture.md) - Why Linux-only epoll for mining I/O
 - [Recent Mining Changes (PRs #502–#545)](docs/current/mining/recent-changes-summary.md) - Change log for future developers
+- [Canonical Session Handling](docs/current/mining/canonical-session-handling.md) - Live vs inactive registry flow, lane handoff, and reactivation diagrams
 - [Known Risks & Limitations](docs/current/mining/known-risks-and-limitations.md) - Current risks and escalation triggers
 - [AI-Assisted Developer Onboarding](docs/onboarding/ai-assisted-onboarding.md) - Learning pathways with AI guidance
 - [AI-Human Advancement Thesis](docs/philosophy/ai-human-advancement.md) - Collaboration philosophy

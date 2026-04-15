@@ -185,6 +185,17 @@ re-read-before-delete guards in sweep functions.
 
 Files: `src/LLP/include/session_store.h`
 
+### Canonical Registry Live/Inactive Split (PR #546)
+
+`NodeSessionRegistry` now separates **live runtime sessions** from **inactive
+cache entries**.  Periodic maintenance enforces capacity only on the inactive
+cache, while active miners remain non-evictable runtime state.  Legacy and
+stateless disconnect paths now demote only their own exact endpoint/lane, and
+inactive canonical sessions are preserved for later re-authentication.
+
+Files: `src/LLP/node_session_registry.cpp`, `src/LLP/stateless_manager.cpp`,
+`src/LLP/miner.cpp`, `src/LLP/stateless_miner_connection.cpp`
+
 ---
 
 ## D. Protocol Hardening (PRs #502–#503, #515–#521)
