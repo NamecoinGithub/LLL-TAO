@@ -62,6 +62,7 @@ ________________________________________________________________________________
 #include <memory>
 #include <iomanip>
 #include <bitset>
+#include <optional>
 
 namespace LLP
 {
@@ -3942,21 +3943,18 @@ namespace LLP
     {
         constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
         constexpr uint32_t SWITCH_NODE_RETRY_DELAY_SECONDS = 3;
-        const std::pair<uint32_t, uint32_t> INVALID_SESSION_PAIR(
-            std::numeric_limits<uint32_t>::max(),
-            std::numeric_limits<uint32_t>::max());
 
-        const auto sleepBeforeRetry = [&](const uint32_t nAttempt)
+        const auto sleepBeforeRetry = [](const uint32_t nAttempt, const uint32_t nMaxRetries, const uint32_t nRetryDelaySeconds)
         {
-            if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
-                runtime::sleep(SWITCH_NODE_RETRY_DELAY_SECONDS * 1000);
+            if(nAttempt + 1 < nMaxRetries)
+                runtime::sleep(nRetryDelaySeconds * 1000);
         };
 
         for(uint32_t nAttempt = 0; nAttempt < SWITCH_NODE_MAX_RETRIES; ++nAttempt)
         {
             /* Track our current sync session so we can exclude it when selecting
-             * the next peer. Use an impossible index pair to mean "exclude none". */
-            std::pair<uint32_t, uint32_t> pairSession = INVALID_SESSION_PAIR;
+             * the next peer. */
+            std::optional<std::pair<uint32_t, uint32_t>> pairSession;
             const uint64_t nSyncSession = TAO::Ledger::nSyncSession.load();
 
             if(nSyncSession != 0)
@@ -3973,24 +3971,21 @@ namespace LLP
             }
 
             /* Normal case of asking for a getblocks inventory message. */
-            std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
+            std::shared_ptr<TritiumNode> pnode = pairSession ? TRITIUM_SERVER->GetConnection(*pairSession)
+                                                            : TRITIUM_SERVER->GetConnection();
             if(pnode == nullptr)
             {
-                sleepBeforeRetry(nAttempt);
-
-                if(nAttempt + 1 < SWITCH_NODE_MAX_RETRIES)
-                    continue;
-
-                break;
+                sleepBeforeRetry(nAttempt, SWITCH_NODE_MAX_RETRIES, SWITCH_NODE_RETRY_DELAY_SECONDS);
+                continue;
             }
 
             try
             {
-                if(pairSession != INVALID_SESSION_PAIR)
+                if(pairSession)
                 {
                     /* Get the current sync node. */
                     std::shared_ptr<TritiumNode> pcurrent =
-                        TRITIUM_SERVER->GetConnection(pairSession.first, pairSession.second);
+                        TRITIUM_SERVER->GetConnection(pairSession->first, pairSession->second);
 
                     /* Make sure this is an active connection. */
                     if(pcurrent)
@@ -4007,7 +4002,7 @@ namespace LLP
                 debug::error(FUNCTION, e.what());
                 TAO::Ledger::nSyncSession.store(0);
 
-                sleepBeforeRetry(nAttempt);
+                sleepBeforeRetry(nAttempt, SWITCH_NODE_MAX_RETRIES, SWITCH_NODE_RETRY_DELAY_SECONDS);
             }
         }
 
