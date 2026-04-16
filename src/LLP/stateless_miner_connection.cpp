@@ -4325,7 +4325,7 @@ namespace LLP
         }
 
         /* Get difficulty */
-        uint32_t nDifficulty = StatelessMinerConnection::GetCachedDifficulty(nChannel);
+        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
         
         /* Build notification using unified builder */
         StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
@@ -4551,7 +4551,7 @@ namespace LLP
         }
         
         /* Get difficulty */
-        uint32_t nDifficulty = StatelessMinerConnection::GetCachedDifficulty(nChannel);
+        uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
         
         /* Build canonical chain state snapshot for template serving (PR #316) */
         CanonicalChainState canonicalSnap = CanonicalChainState::from_chain_state(

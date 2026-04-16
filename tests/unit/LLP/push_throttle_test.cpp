@@ -24,7 +24,7 @@ ________________________________________________________________________________
  * StatelessMinerConnection::SendStatelessTemplate() / Miner::SendChannelNotification().
  *
      * The actual methods cannot be called in unit tests without a live socket, but the
-     * throttle decision is a pure function of three state variables:
+ * throttle decision is a pure function of four state variables:
      *   - m_last_template_push_time  (time_point, zero-initialised ≡ "never sent")
      *   - m_force_next_push          (bool, false by default)
      *   - m_hashLastPushedChain      (tip marker for hash-change bypass)
