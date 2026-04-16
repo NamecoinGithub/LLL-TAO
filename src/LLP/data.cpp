@@ -219,6 +219,7 @@ namespace LLP
 
             /* Register the socket fd with epoll for mining DataThreads on Linux. */
             epoll_register(pnode->fd, nSlot);
+            epoll_sync_write_interest(pnode->fd, nSlot, pnode->NeedsWriteService());
 
             /* Notify data thread to wake up. */
             CONDITION.notify_all();
@@ -695,6 +696,17 @@ namespace LLP
                         if(CONNECTION->HasQueuedPackets())
                             return true;
 
+                    #ifdef __linux__
+                        /* Linux mining DataThreads keep buffered socket drains on
+                         * the epoll write-service path rather than waking
+                         * FLUSH_THREAD solely for Buffered() state. */
+                        if constexpr (is_mining_data_thread_v<ProtocolType>)
+                        {
+                            if(m_nEpollFd >= 0)
+                                continue;
+                        }
+                    #endif
+
                         /* Check for buffered connection. */
                         if(CONNECTION->Buffered())
                             return true;
@@ -754,10 +766,10 @@ namespace LLP
                     /* Drain any queued outgoing packets first.
                      * These were enqueued by QueuePacket() from the notification
                      * thread (e.g., SendChannelNotification) to decouple template
-                     * building from SOCKET_MUTEX contention.  Draining happens
-                     * here on FLUSH_THREAD where WritePacket() + Flush() naturally
-                     * belong, keeping SOCKET_MUTEX contention away from the
-                     * DataThread's ReadPacket() path. */
+                     * building from SOCKET_MUTEX contention.  FLUSH_THREAD
+                     * materializes queued packets into the socket buffer; Linux
+                     * mining sockets then rely on the epoll write-service path
+                     * for kernel-facing drain so read-side work is not starved. */
                     CONNECTION->DrainOutgoingQueue();
 
                     /* Relay if there are active subscriptions. */
@@ -771,6 +783,21 @@ namespace LLP
                         /* Write packet to socket. */
                         CONNECTION->WritePacket(PACKET);
                     }
+
+                #ifdef __linux__
+                    /* Linux mining sockets use the epoll write-service path for
+                     * buffered socket drain.  FLUSH_THREAD still materializes
+                     * queued packets into the socket buffer, but EPOLLOUT
+                     * decides when the kernel is ready to accept more bytes. */
+                    if constexpr (is_mining_data_thread_v<ProtocolType>)
+                    {
+                        if(m_nEpollFd >= 0)
+                        {
+                            epoll_sync_write_interest(CONNECTION->fd, nIndex, CONNECTION->NeedsWriteService());
+                            continue;
+                        }
+                    }
+                #endif
 
                     /* Attempt to flush data when buffer is available. */
                     if(CONNECTION->Buffered() && CONNECTION->Flush() < 0)
@@ -1240,6 +1267,19 @@ namespace LLP
                             CONNECTION->ResetPacket();
                         }
                     }
+
+                    /* Handle EPOLLOUT: service pending outbound queue/buffer only
+                     * when the kernel says the socket can accept more bytes. */
+                    if(vEvents[i].events & EPOLLOUT)
+                    {
+                        if(CONNECTION->HasQueuedPackets())
+                            CONNECTION->DrainOutgoingQueue();
+
+                        if(CONNECTION->Buffered())
+                            CONNECTION->Flush();
+                    }
+
+                    epoll_sync_write_interest(CONNECTION->fd, nIndex, CONNECTION->NeedsWriteService());
                 }
                 catch(const std::exception& e)
                 {

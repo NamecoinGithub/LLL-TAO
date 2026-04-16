@@ -1493,13 +1493,11 @@ namespace LLP
 
         /* Write the packet to the socket send buffer.
          * WritePacket() may buffer data if the kernel send buffer is full.
-         * FLUSH_THREAD will drain the buffer asynchronously — we no longer
-         * call Flush() inline here because that would hold SOCKET_MUTEX on
-         * the notification thread, blocking the DataThread's ReadPacket()
-         * and causing reader-writer contention that starves inbound mining
-         * traffic.  The bounded Flush() in FLUSH_THREAD (max 4 chunks per
-         * call via -maxflushchunks) ensures timely delivery without
-         * monopolizing the mutex. */
+         * Linux mining sockets now use the write-service path: FLUSH_THREAD
+         * materializes queued packets and EPOLLOUT-assisted DataThread service
+         * drains buffered bytes when the kernel is writable.  We still avoid
+         * calling Flush() inline here because that would hold SOCKET_MUTEX on
+         * the notification thread and contend with inbound mining reads. */
         this->WritePacket(RESPONSE);
     }
 

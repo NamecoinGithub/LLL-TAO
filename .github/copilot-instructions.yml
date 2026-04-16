@@ -8,3 +8,12 @@ validation:
   require_tests: true
 
 dependencies:
+  - build-essential
+  - cmake
+  - libdb5.3-dev
+  - libdb5.3++-dev
+  - libssl-dev
+  - libboost-all-dev
+  - libminiupnpc-dev
+  - libevent-dev
+  - pkg-config

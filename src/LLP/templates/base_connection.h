@@ -204,14 +204,16 @@ namespace LLP
 
         /** QueuePacket
          *
-         *  Enqueues a pre-built packet for deferred sending by FLUSH_THREAD.
+         *  Enqueues a pre-built packet for deferred sending by the write-service
+         *  path.
          *  This decouples the caller (e.g., SendChannelNotification on the
          *  block-acceptance notification thread) from SOCKET_MUTEX contention.
          *  The caller builds the packet and enqueues it lock-free (relative to
          *  the socket); FLUSH_THREAD drains the queue on its next iteration,
-         *  performing the actual WritePacket() + Flush() under SOCKET_MUTEX
-         *  without blocking the notification thread or the DataThread's
-         *  ReadPacket() path.
+         *  performing the actual WritePacket() buffering without blocking the
+         *  notification thread or the DataThread's ReadPacket() path.  On
+         *  Linux mining connections, EPOLLOUT-assisted DataThread service then
+         *  handles kernel-facing drain of buffered bytes.
          *
          *  @param[in] PACKET The packet to enqueue for deferred sending.
          *
@@ -234,7 +236,8 @@ namespace LLP
 
         /** DrainOutgoingQueue
          *
-         *  Called by FLUSH_THREAD to drain all queued outgoing packets.
+         *  Called by FLUSH_THREAD to drain all queued outgoing packets into the
+         *  socket write path.
          *  Each packet is written via WritePacket() which serializes it
          *  and hands it to Socket::Write().
          *
@@ -289,6 +292,26 @@ namespace LLP
         bool HasQueuedPackets() const
         {
             return fHasOutgoing.load(std::memory_order_acquire);
+        }
+
+
+        /** NeedsWriteService
+         *
+         *  Semantic helper for pending outbound work on this connection.
+         *  True means the connection still needs write-side service from the
+         *  runtime, either because packets are still queued in memory or
+         *  because bytes are already buffered for socket delivery.
+         *
+         *  Linux mining DataThreads use this to decide when EPOLLOUT should be
+         *  armed without exposing the lower-level buffer and queue details to
+         *  the epoll coordination logic.
+         *
+         *  @return true if this connection still needs write-side service.
+         *
+         **/
+        bool NeedsWriteService() const
+        {
+            return HasQueuedPackets() || Buffered() > 0;
         }
 
 
