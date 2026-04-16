@@ -183,6 +183,10 @@ namespace LLP
                 case OpcodeUtility::Stateless::NEW_ROUND:
                 case OpcodeUtility::Stateless::OLD_ROUND:
                 case OpcodeUtility::Stateless::SESSION_EXPIRED:
+                case OpcodeUtility::Stateless::GOOD_BLOCK:
+                case OpcodeUtility::Stateless::ORPHAN_BLOCK:
+                case OpcodeUtility::Stateless::BLOCK_ACCEPTED:
+                case OpcodeUtility::Stateless::BLOCK_REJECTED:
                     return true;
 
                 default:
@@ -2860,13 +2864,14 @@ namespace LLP
     {
         /* Write the packet to the socket send buffer.
          * WritePacket() may buffer data if the kernel send buffer is full.
-         * FLUSH_THREAD will drain the buffer asynchronously — we no longer
-         * call Flush() inline here because that would hold SOCKET_MUTEX on
-         * the notification thread, blocking the DataThread's ReadPacket()
-         * and causing reader-writer contention that starves inbound mining
-         * traffic.  The bounded Flush() in FLUSH_THREAD (max 4 chunks per
-         * call via -maxflushchunks) ensures timely delivery without
-         * monopolizing the mutex. */
+         * Linux mining sockets now use the write-service path: FLUSH_THREAD
+         * materializes queued packets and EPOLLOUT-assisted DataThread service
+         * drains buffered bytes when the kernel is writable.  We still avoid
+         * calling Flush() inline here because that would hold SOCKET_MUTEX on
+         * the notification thread and contend with inbound mining reads.
+         *
+         * Control-path replies and submit-block results are flagged high
+         * priority so they can bypass buffered template/work traffic. */
         WritePacket(packet, IsPriorityStatelessOpcode(packet.HEADER));
     }
 

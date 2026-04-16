@@ -944,7 +944,10 @@ namespace LLP
             #endif
             }
 
-            /* Handle for error state. */
+            /* Handle for error state.  If the socket is only back-pressured
+             * (EWOULDBLOCK / WANT_WRITE), preserve the full payload in the
+             * overflow buffer so the write-service path can retry it later
+             * instead of dropping the packet. */
             if(nSent < 0)
             {
                 if(pSSL)
@@ -952,6 +955,22 @@ namespace LLP
                 else
                     nError = WSAGetLastError();
 
+                if(!Errors())
+                {
+                    std::vector<uint8_t>& vTarget = fPriority ? vPriorityBuffer : vBuffer;
+                    size_t& nTargetOffset = fPriority ? m_nPriorityFlushOffset : m_nFlushOffset;
+
+                    if(nTargetOffset == vTarget.size())
+                    {
+                        vTarget.clear();
+                        nTargetOffset = 0;
+                    }
+
+                    vTarget.insert(vTarget.end(), vData.begin(), vData.end());
+                    nBufferSize.store(bufferedBytes());
+
+                    return static_cast<int32_t>(nBytes);
+                }
                 return nSent;
             }
 
@@ -1101,9 +1120,9 @@ namespace LLP
             if(nSent < 0)
             {
                 if(pSSL)
-                    nError = SSL_get_error(pSSL, nSent);
+                    nError.store(SSL_get_error(pSSL, nSent));
                 else
-                    nError = WSAGetLastError();
+                    nError.store(WSAGetLastError());
 
                 ++nConsecutiveErrors;
 

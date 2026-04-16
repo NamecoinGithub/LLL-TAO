@@ -194,10 +194,11 @@ namespace LLP
                 else
                     CONNECTIONS->at(nSlot) = std::shared_ptr<ProtocolType>(pnode);
 
-                /* Register the socket fd with epoll for mining DataThreads on Linux.
-                 * epoll_ctl is thread-safe: ListeningThread calls AddConnection while
-                 * the DataThread is running epoll_wait concurrently. */
+                 /* Register the socket fd with epoll for mining DataThreads on Linux.
+                  * epoll_ctl is thread-safe: ListeningThread calls AddConnection while
+                  * the DataThread is running epoll_wait concurrently. */
                 epoll_register(pnode->fd, nSlot);
+                epoll_sync_write_interest(pnode->fd, nSlot, pnode->NeedsWriteService());
 
                 /* Notify data thread to wake up. */
                 CONDITION.notify_all();
@@ -264,6 +265,7 @@ namespace LLP
 
                 /* Register the socket fd with epoll for mining DataThreads on Linux. */
                 epoll_register(pnode->fd, nSlot);
+                epoll_sync_write_interest(pnode->fd, nSlot, pnode->NeedsWriteService());
 
                 /* Notify data thread to wake up. */
                 CONDITION.notify_all();
@@ -425,6 +427,46 @@ namespace LLP
         }
 
 
+        /** epoll_sync_write_interest
+         *
+         *  Update Linux mining epoll interest for a connection's write-service
+         *  state.  Read readiness is always armed; EPOLLOUT is toggled
+         *  dynamically based on whether the connection still has queued or
+         *  buffered outbound work.
+         *
+         *  @param[in] nFd                  The socket file descriptor.
+         *  @param[in] nSlot                The CONNECTIONS vector index.
+         *  @param[in] fNeedsWriteService   True when EPOLLOUT should stay armed.
+         *
+         **/
+        void epoll_sync_write_interest(SOCKET nFd, uint32_t nSlot, bool fNeedsWriteService)
+        {
+#ifdef __linux__
+            if constexpr (is_mining_data_thread_v<ProtocolType>)
+            {
+                if(m_nEpollFd >= 0 && nFd != static_cast<SOCKET>(INVALID_SOCKET))
+                {
+                    struct epoll_event ev;
+                    ev.events  = EPOLLIN | EPOLLHUP | EPOLLERR;
+                    if(fNeedsWriteService)
+                        ev.events |= EPOLLOUT;
+
+                    ev.data.u32 = nSlot;
+
+                    if(::epoll_ctl(m_nEpollFd, EPOLL_CTL_MOD, static_cast<int>(nFd), &ev) < 0 && errno != ENOENT)
+                        debug::error(FUNCTION, "epoll_ctl MOD failed for fd=", nFd,
+                                     " slot=", nSlot, " write_interest=", fNeedsWriteService,
+                                     " errno=", errno);
+                }
+            }
+#else
+            (void)nFd;
+            (void)nSlot;
+            (void)fNeedsWriteService;
+#endif
+        }
+
+
         /** epoll_deregister
          *
          *  Remove a socket fd from the epoll instance for mining DataThreads.
@@ -506,7 +548,7 @@ namespace LLP
          *
          *  Epoll-based I/O loop for mining DataThreads on Linux.
          *  Uses epoll_wait() with configurable timeout for maximum responsiveness.
-         *  Only processes connections with pending events (EPOLLIN/EPOLLERR/EPOLLHUP),
+         *  Only processes connections with pending events (EPOLLIN/EPOLLOUT/EPOLLERR/EPOLLHUP),
          *  with periodic health sweeps for timeout-based checks.
          *
          *  Called from Thread() via if-constexpr for mining protocols.

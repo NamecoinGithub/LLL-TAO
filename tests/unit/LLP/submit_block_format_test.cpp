@@ -61,25 +61,25 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
         for(size_t i = 0; i < FalconConstants::MERKLE_ROOT_SIZE; ++i)
             data.push_back(0xCC);
         
-        /* Additional fields to reach nonce at offset 200 */
+        /* Additional fields to reach nonce at the protocol-defined offset */
         size_t currentOffset = data.size();  // Should be 196
         REQUIRE(currentOffset == 196);
         
-        /* Fill to offset 200 (4 bytes) */
-        for(size_t i = currentOffset; i < 200; ++i)
+        /* Fill to the Tritium nonce offset */
+        for(size_t i = currentOffset; i < FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET; ++i)
             data.push_back(0xDD);
         
-        /* nNonce at offset 200 (8 bytes) */
-        REQUIRE(data.size() == 200);
+        /* nNonce at the Tritium nonce offset */
+        REQUIRE(data.size() == FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET);
         uint64_t nonce = 0xFEDCBA9876543210;
         std::vector<uint8_t> nonceBytes = convert::uint2bytes64(nonce);
         data.insert(data.end(), nonceBytes.begin(), nonceBytes.end());
         
-        /* Fill remaining to 216 bytes */
-        while(data.size() < 216)
+        /* Fill remaining to the Tritium full-block size */
+        while(data.size() < FalconConstants::FULL_BLOCK_TRITIUM_SIZE)
             data.push_back(0xEE);
         
-        REQUIRE(data.size() == 216);
+        REQUIRE(data.size() == FalconConstants::FULL_BLOCK_TRITIUM_SIZE);
         
         /* This should be detected as full block format */
         bool fFullBlockFormat = (data.size() >= FalconConstants::SUBMIT_BLOCK_FORMAT_DETECTION_THRESHOLD);
@@ -91,7 +91,7 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
             data.begin() + FalconConstants::FULL_BLOCK_MERKLE_OFFSET,
             data.begin() + FalconConstants::FULL_BLOCK_MERKLE_OFFSET + FalconConstants::MERKLE_ROOT_SIZE));
         
-        /* Verify nonce extraction at offset 200 */
+        /* Verify nonce extraction at the Tritium nonce offset */
         uint64_t extractedNonce = convert::bytes2uint64(std::vector<uint8_t>(
             data.begin() + FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET,
             data.begin() + FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET + FalconConstants::NONCE_SIZE));
@@ -117,31 +117,31 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
         for(size_t i = 0; i < FalconConstants::MERKLE_ROOT_SIZE; ++i)
             data.push_back(0xCC);
         
-        /* Additional fields to reach nonce at offset 204 */
+        /* Additional fields to reach nonce at the protocol-defined offset */
         size_t currentOffset = data.size();  // Should be 196
         REQUIRE(currentOffset == 196);
         
-        /* Fill to offset 204 (8 bytes) */
-        for(size_t i = currentOffset; i < 204; ++i)
+        /* Fill to the Legacy nonce offset */
+        for(size_t i = currentOffset; i < FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET; ++i)
             data.push_back(0xDD);
         
-        /* nNonce at offset 204 (8 bytes) */
-        REQUIRE(data.size() == 204);
+        /* nNonce at the Legacy nonce offset */
+        REQUIRE(data.size() == FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET);
         uint64_t nonce = 0x1122334455667788;
         std::vector<uint8_t> nonceBytes = convert::uint2bytes64(nonce);
         data.insert(data.end(), nonceBytes.begin(), nonceBytes.end());
         
-        /* Fill remaining to 220 bytes */
-        while(data.size() < 220)
+        /* Fill remaining to the Legacy full-block size */
+        while(data.size() < FalconConstants::FULL_BLOCK_LEGACY_SIZE)
             data.push_back(0xEE);
         
-        REQUIRE(data.size() == 220);
+        REQUIRE(data.size() == FalconConstants::FULL_BLOCK_LEGACY_SIZE);
         
         /* This should be detected as full block format */
         bool fFullBlockFormat = (data.size() >= FalconConstants::SUBMIT_BLOCK_FORMAT_DETECTION_THRESHOLD);
         REQUIRE(fFullBlockFormat == true);
         
-        /* Verify nonce extraction at offset 204 */
+        /* Verify nonce extraction at the Legacy nonce offset */
         uint64_t extractedNonce = convert::bytes2uint64(std::vector<uint8_t>(
             data.begin() + FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET,
             data.begin() + FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET + FalconConstants::NONCE_SIZE));
@@ -155,8 +155,8 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
         REQUIRE(FalconConstants::FULL_BLOCK_TRITIUM_SIZE == 216);
         REQUIRE(FalconConstants::FULL_BLOCK_LEGACY_SIZE == 220);
         REQUIRE(FalconConstants::FULL_BLOCK_MERKLE_OFFSET == 132);
-        REQUIRE(FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET == 200);
-        REQUIRE(FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET == 204);
+        REQUIRE(FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET == 208);
+        REQUIRE(FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET == 208);
         
         // Main wrapper constants:
         // SUBMIT_BLOCK_WRAPPER_MAX = legacy_header(220) + prime_offsets(256)
