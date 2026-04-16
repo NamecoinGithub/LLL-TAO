@@ -155,9 +155,9 @@ TEST_CASE("SUBMIT_BLOCK Full Block Format Detection", "[submit_block]")
         REQUIRE(FalconConstants::FULL_BLOCK_TRITIUM_SIZE == 216);
         REQUIRE(FalconConstants::FULL_BLOCK_LEGACY_SIZE == 220);
         REQUIRE(FalconConstants::FULL_BLOCK_MERKLE_OFFSET == 132);
-        /* Both full-block header layouts now place the nonce at byte 208:
-         * Tritium uses 12 bytes of post-merkle metadata before the nonce,
-         * while Legacy uses the same fixed header span in the wrapped format. */
+        /* Both wrapped full-block layouts now place the nonce at byte 208.
+         * The total packet sizes still differ (216 Tritium vs 220 Legacy)
+         * because Legacy carries 4 extra bytes after the shared nonce slot. */
         REQUIRE(FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET == 208);
         REQUIRE(FalconConstants::FULL_BLOCK_LEGACY_NONCE_OFFSET == 208);
         

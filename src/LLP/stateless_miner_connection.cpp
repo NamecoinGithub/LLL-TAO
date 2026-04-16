@@ -4260,8 +4260,12 @@ namespace LLP
             return;
         }
         
-        /* Snapshot the best tip before the throttle lock so the hash-change
-         * bypass can be evaluated consistently under MUTEX. */
+        /* Snapshot the best tip before taking MUTEX so the hash lookup work
+         * stays outside the lock; the comparison/update against push-throttle
+         * state still happens under MUTEX below. */
+        /* Snapshot the best tip before taking MUTEX so the hash lookup work
+         * stays outside the lock; the comparison/update against push-throttle
+         * state still happens under MUTEX below. */
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         const uint1024_t hashBestChain =
             PushNotificationBuilder::BestChainHashForNotification(stateBest);

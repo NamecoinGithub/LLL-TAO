@@ -881,6 +881,7 @@ namespace LLP
         {
             RECURSIVE(SOCKET_MUTEX);
 
+            /* Must be called only while holding SOCKET_MUTEX. */
             auto bufferedBytes = [this]() -> size_t
             {
                 return (vPriorityBuffer.size() - m_nPriorityFlushOffset)
