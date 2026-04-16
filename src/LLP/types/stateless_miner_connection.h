@@ -142,6 +142,11 @@ namespace LLP
          **/
         bool m_force_next_push{false};
 
+        /** Best-chain hash of the last tip delivered on the stateless push path.
+         *  Protected by MUTEX and used to bypass the time floor whenever the
+         *  chain tip changes, matching the legacy mining lane semantics. */
+        uint1024_t m_hashLastPushedChain;
+
         /** 1-second rate-limit floor for GET_BLOCK fallback polling.
          *
          *  With the event-driven push model the miner should almost never poll.

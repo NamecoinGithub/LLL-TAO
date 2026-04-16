@@ -68,7 +68,7 @@ namespace LLP
         std::atomic<int32_t> nError;
 
 
-        /** Oversize buffer for large packets. **/
+        /** Oversize buffer for low-priority packets (templates / pushes). **/
         std::vector<uint8_t> vBuffer;
 
 
@@ -83,8 +83,20 @@ namespace LLP
          *  Always satisfies: m_nFlushOffset <= vBuffer.size(). **/
         size_t m_nFlushOffset;
 
+        /** Oversize buffer for high-priority control packets (ACKs / round replies). **/
+        std::vector<uint8_t> vPriorityBuffer;
 
-        /** Keep track of the buffer with an atomic. */
+
+        /** Read offset into vPriorityBuffer.
+         *
+         *  Mirrors m_nFlushOffset for the high-priority control-plane buffer.
+         *  Protected by SOCKET_MUTEX and always satisfies:
+         *  m_nPriorityFlushOffset <= vPriorityBuffer.size().
+         **/
+        size_t m_nPriorityFlushOffset;
+
+
+        /** Keep track of total buffered bytes across both priority classes. */
         std::atomic<uint64_t> nBufferSize;
 
 
@@ -219,6 +231,8 @@ namespace LLP
          *
          **/
         int32_t Write(const std::vector<uint8_t>& vData, size_t nBytes);
+
+        int32_t Write(const std::vector<uint8_t>& vData, size_t nBytes, bool fPriority);
 
 
         /** Flush

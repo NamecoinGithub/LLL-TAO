@@ -231,6 +231,13 @@ namespace LLP
     template <class PacketType>
     void BaseConnection<PacketType>::WritePacket(const PacketType& PACKET)
     {
+        WritePacket(PACKET, false);
+    }
+
+
+    template <class PacketType>
+    void BaseConnection<PacketType>::WritePacket(const PacketType& PACKET, bool fPriority)
+    {
         /* Per-connection buffer limit — mining connections return a larger value
          * (15 MB) so push notifications are never dropped due to buffer pressure.
          * Virtual dispatch; no mutex, minimal overhead on the hot path. */
@@ -257,7 +264,7 @@ namespace LLP
                 PrintHex(vBytes);
 
             /* Write the packet to socket buffer. */
-            Write(vBytes, vBytes.size());
+            Write(vBytes, vBytes.size(), fPriority);
 
             /* Update packet count. */
             ++PACKETS;
