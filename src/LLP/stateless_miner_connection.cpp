@@ -174,6 +174,26 @@ namespace LLP
             }
         }
 
+        bool IsPriorityStatelessOpcode(const uint16_t nOpcode)
+        {
+            switch(nOpcode)
+            {
+                case OpcodeUtility::Stateless::SESSION_KEEPALIVE:
+                case OpcodeUtility::Stateless::SESSION_STATUS_ACK:
+                case OpcodeUtility::Stateless::NEW_ROUND:
+                case OpcodeUtility::Stateless::OLD_ROUND:
+                case OpcodeUtility::Stateless::SESSION_EXPIRED:
+                case OpcodeUtility::Stateless::GOOD_BLOCK:
+                case OpcodeUtility::Stateless::ORPHAN_BLOCK:
+                case OpcodeUtility::Stateless::BLOCK_ACCEPTED:
+                case OpcodeUtility::Stateless::BLOCK_REJECTED:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
         /** MinimumStateForStatelessOpcode
          *
          *  Returns the minimum MinerSessionState required for a given protected
@@ -2406,11 +2426,9 @@ namespace LLP
 
                 debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent (stateless lane)");
 
-                /* TWO-STEP RE-ARM INVARIANT (PR #375):
-                 * set → SendChannelNotification → re-set → SendStatelessTemplate
-                 *
-                 * No outer MUTEX held — SendChannelNotification() and
-                 * SendStatelessTemplate() each acquire MUTEX internally. */
+                /* Degraded recovery now sends a single fresh-work action.
+                 * Directly pushing the stateless template avoids competing
+                 * notification+template sends on the same connection. */
                 bool fAuth_snap;
                 uint32_t nChannel_snap;
                 {
@@ -2427,11 +2445,6 @@ namespace LLP
                         LOCK(MUTEX);
                         m_force_next_push = true;
                         m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                    }
-                    SendChannelNotification();
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
                     }
                     SendStatelessTemplate();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed — miner should exit DEGRADED");
@@ -2855,8 +2868,11 @@ namespace LLP
          * materializes queued packets and EPOLLOUT-assisted DataThread service
          * drains buffered bytes when the kernel is writable.  We still avoid
          * calling Flush() inline here because that would hold SOCKET_MUTEX on
-         * the notification thread and contend with inbound mining reads. */
-        WritePacket(packet);
+         * the notification thread and contend with inbound mining reads.
+         *
+         * Control-path replies and submit-block results are flagged high
+         * priority so they can bypass buffered template/work traffic. */
+        WritePacket(packet, IsPriorityStatelessOpcode(packet.HEADER));
     }
 
 
@@ -4244,6 +4260,13 @@ namespace LLP
             return;
         }
         
+        /* Snapshot the best tip before taking MUTEX so the hash lookup work
+         * stays outside the lock; the comparison/update against push-throttle
+         * state still happens under MUTEX below. */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashBestChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
         /* Thread-safe context access - use RAII lock guard */
         uint32_t nChannel;
         {
@@ -4251,7 +4274,9 @@ namespace LLP
 
             /* Push throttle — drop if a template was sent less than
              * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
-             * Re-subscription responses bypass via m_force_next_push. */
+             * Re-subscription responses bypass via m_force_next_push.
+             * Hash-change bypass matches the legacy mining lane so a new tip
+             * always gets through immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
@@ -4259,6 +4284,12 @@ namespace LLP
             {
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
+            }
+            else if (hashBestChain != m_hashLastPushedChain)
+            {
+                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                           hashBestChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
             }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
@@ -4269,6 +4300,7 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashBestChain;
 
             /* Validate subscription state */
             if (!context.fSubscribedToNotifications)
@@ -4285,9 +4317,6 @@ namespace LLP
             nChannel = context.nSubscribedChannel;
         }  // MUTEX automatically unlocked here
         
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nChannel))
@@ -4303,10 +4332,6 @@ namespace LLP
 
         /* Get difficulty */
         uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-
-        /* Keep the tip hash consistent with the loaded best-state snapshot. */
-        const uint1024_t hashBestChain =
-            PushNotificationBuilder::BestChainHashForNotification(stateBest);
         
         /* Build notification using unified builder */
         StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
@@ -4465,6 +4490,10 @@ namespace LLP
             debug::log(2, FUNCTION, "Shutdown in progress; skipping stateless template");
             return;
         }
+
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashCurrentChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
         
         /* Thread-safe context access */
         uint32_t nChannel;
@@ -4474,16 +4503,8 @@ namespace LLP
             /* Push throttle — drop if a template was sent less than
              * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
              * Re-subscription responses bypass via m_force_next_push.
-             *
-             * IMPORTANT — two-step re-arm when calling SendChannelNotification() then
-             * SendStatelessTemplate() in sequence (e.g. MINER_READY and SESSION_STATUS
-             * degraded-recovery handlers):
-             *   1. Set m_force_next_push = true
-             *   2. Call SendChannelNotification()   ← consumes flag, updates m_last_template_push_time
-             *   3. Set m_force_next_push = true     ← re-arm: without this, elapsed ~0 ms here → throttled
-             *   4. Call SendStatelessTemplate()
-             * Omitting step 3 causes the template to be dropped silently, leaving the miner
-             * in degraded mode with no work. */
+             * Hash-change bypass matches the legacy mining lane so a new tip
+             * always gets through immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
@@ -4491,6 +4512,12 @@ namespace LLP
             {
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
+            }
+            else if (hashCurrentChain != m_hashLastPushedChain)
+            {
+                debug::log(2, FUNCTION, "Stateless template throttle bypassed — new chain tip ",
+                           hashCurrentChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
             }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
@@ -4501,6 +4528,7 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel (1=Prime, 2=Hash only) */
             if (context.nChannel != 1 && context.nChannel != 2)
@@ -4518,9 +4546,6 @@ namespace LLP
         debug::log(2, "════════════════════════════════════════════════════════════");
         debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
         debug::log(2, "   Channel:        ", nChannel, " (", GetChannelName(nChannel), ")");
-        
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;

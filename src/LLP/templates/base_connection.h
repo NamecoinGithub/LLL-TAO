@@ -517,6 +517,8 @@ namespace LLP
          **/
         void WritePacket(const PacketType& PACKET);
 
+        void WritePacket(const PacketType& PACKET, bool fPriority);
+
 
         /** ReadPacket
          *

@@ -129,6 +129,45 @@ namespace LLP
             }
         }
 
+        bool IsPriorityLegacyOpcode(const uint8_t nHeader)
+        {
+            switch(nHeader)
+            {
+                case OpcodeUtility::Opcodes::SESSION_KEEPALIVE:
+                case OpcodeUtility::Opcodes::SESSION_STATUS_ACK:
+                case OpcodeUtility::Opcodes::NEW_ROUND:
+                case OpcodeUtility::Opcodes::OLD_ROUND:
+                case OpcodeUtility::Opcodes::GOOD_BLOCK:
+                case OpcodeUtility::Opcodes::ORPHAN_BLOCK:
+                case OpcodeUtility::Opcodes::BLOCK_ACCEPTED:
+                case OpcodeUtility::Opcodes::BLOCK_REJECTED:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        bool IsPriorityStatelessOpcode(const uint16_t nOpcode)
+        {
+            switch(nOpcode)
+            {
+                case OpcodeUtility::Stateless::SESSION_KEEPALIVE:
+                case OpcodeUtility::Stateless::SESSION_STATUS_ACK:
+                case OpcodeUtility::Stateless::NEW_ROUND:
+                case OpcodeUtility::Stateless::OLD_ROUND:
+                case OpcodeUtility::Stateless::SESSION_EXPIRED:
+                case OpcodeUtility::Stateless::GOOD_BLOCK:
+                case OpcodeUtility::Stateless::ORPHAN_BLOCK:
+                case OpcodeUtility::Stateless::BLOCK_ACCEPTED:
+                case OpcodeUtility::Stateless::BLOCK_REJECTED:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
         bool LegacyOpcodeRequiresChannel(const uint8_t nOpcode)
         {
             switch(nOpcode)
@@ -850,10 +889,9 @@ namespace LLP
 
                 debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent (legacy lane)");
 
-                /* TWO-STEP RE-ARM INVARIANT (PR #375):
-                 * BUG 1 FIX: Legacy lane was missing the re-arm + SendLegacyTemplate() step.
-                 * set → SendChannelNotification → re-set → SendLegacyTemplate.
-                 * Without this, degraded miners on legacy port never received recovery templates. */
+                /* Degraded recovery now sends a single fresh-work action.
+                 * Directly pushing BLOCK_DATA avoids competing notification+template
+                 * sends on the same connection during recovery. */
                 if(SessionStatusUtility::IsDegraded(req) &&
                     fSubscribedToNotifications && (nSubscribedChannel == 1 || nSubscribedChannel == 2))
                 {
@@ -862,11 +900,6 @@ namespace LLP
                         LOCK(MUTEX);
                         m_force_next_push = true;
                         m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                    }
-                    SendChannelNotification();
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
                     }
                     SendLegacyTemplate();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed on legacy lane — miner should exit DEGRADED");
@@ -1497,8 +1530,11 @@ namespace LLP
          * materializes queued packets and EPOLLOUT-assisted DataThread service
          * drains buffered bytes when the kernel is writable.  We still avoid
          * calling Flush() inline here because that would hold SOCKET_MUTEX on
-         * the notification thread and contend with inbound mining reads. */
-        this->WritePacket(RESPONSE);
+         * the notification thread and contend with inbound mining reads.
+         *
+         * Control-path replies and submit-block results are flagged high
+         * priority so they can bypass buffered template/work traffic. */
+        this->WritePacket(RESPONSE, IsPriorityLegacyOpcode(nHeader));
     }
 
 
@@ -2915,7 +2951,7 @@ namespace LLP
         vPacket.insert(vPacket.end(), vData.begin(), vData.end());
 
         /* Write raw bytes to connection */
-        Write(vPacket, vPacket.size());
+        Write(vPacket, vPacket.size(), IsPriorityStatelessOpcode(nOpcode));
 
         debug::log(3, FUNCTION, "Stateless response: opcode=0x", std::hex, nOpcode,
                    " length=", std::dec, nLength, " to ", GetAddress().ToStringIP());

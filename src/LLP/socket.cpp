@@ -45,6 +45,8 @@ namespace LLP
     , nError             (0)
     , vBuffer            ( )
     , m_nFlushOffset     (0)
+    , vPriorityBuffer    ( )
+    , m_nPriorityFlushOffset(0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -69,6 +71,8 @@ namespace LLP
     , nError             (socket.nError.load())
     , vBuffer            (socket.vBuffer)
     , m_nFlushOffset     (socket.m_nFlushOffset)
+    , vPriorityBuffer    (socket.vPriorityBuffer)
+    , m_nPriorityFlushOffset(socket.m_nPriorityFlushOffset)
     , nBufferSize        (socket.nBufferSize.load())
     , fBufferFull        (socket.fBufferFull.load())
     , nConsecutiveErrors (socket.nConsecutiveErrors.load())
@@ -105,6 +109,8 @@ namespace LLP
     , nError             (0)
     , vBuffer            ( )
     , m_nFlushOffset     (0)
+    , vPriorityBuffer    ( )
+    , m_nPriorityFlushOffset(0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -260,6 +266,8 @@ namespace LLP
     , nError             (0)
     , vBuffer            ( )
     , m_nFlushOffset     (0)
+    , vPriorityBuffer    ( )
+    , m_nPriorityFlushOffset(0)
     , nBufferSize        (0)
     , fBufferFull        (false)
     , nConsecutiveErrors (0)
@@ -853,6 +861,13 @@ namespace LLP
     /* Write data into the socket buffer non-blocking */
     int32_t Socket::Write(const std::vector<uint8_t>& vData, size_t nBytes)
     {
+        return Write(vData, nBytes, false);
+    }
+
+
+    /* Write data into the socket buffer non-blocking */
+    int32_t Socket::Write(const std::vector<uint8_t>& vData, size_t nBytes, bool fPriority)
+    {
         int32_t nSent = 0;
 
         /* Single critical section covering both the overflow-buffer check and
@@ -866,6 +881,28 @@ namespace LLP
         {
             RECURSIVE(SOCKET_MUTEX);
 
+            /* Must be called only while holding SOCKET_MUTEX. */
+            auto bufferedBytes = [this]() -> size_t
+            {
+                return (vPriorityBuffer.size() - m_nPriorityFlushOffset)
+                    + (vBuffer.size() - m_nFlushOffset);
+            };
+
+            auto clearStaleFullLatch = [this, &bufferedBytes]()
+            {
+                if(bufferedBytes() == 0 && fBufferFull.load())
+                {
+                    bool expected = true;
+                    fBufferFull.compare_exchange_strong(expected, false);
+                }
+            };
+
+            auto appendBuffered = [this, &vData, &bufferedBytes](std::vector<uint8_t>& vTarget)
+            {
+                vTarget.insert(vTarget.end(), vData.begin(), vData.end());
+                nBufferSize.store(bufferedBytes());
+            };
+
             /* Clear stale fBufferFull latch under the lock.  If the buffer
              * has drained to zero since the last Write() but fBufferFull is
              * still set (Flush() returned early on an empty buffer, or a race
@@ -873,22 +910,26 @@ namespace LLP
              * reset it now so subsequent Flush() calls don't spin unnecessarily.
              * Use compare_exchange to avoid clobbering a concurrent
              * fBufferFull.store(true) from WritePacket() on another thread. */
-            if(nBufferSize.load() == 0 && fBufferFull.load())
+            clearStaleFullLatch();
+
+            const size_t nPriorityUnsent = vPriorityBuffer.size() - m_nPriorityFlushOffset;
+            const size_t nUnsent = vBuffer.size() - m_nFlushOffset;
+
+            /* Priority writes join the control-plane buffer whenever any
+             * high-priority bytes are already pending, or when a low-priority
+             * backlog exists and we want to overtake it in user space. */
+            if(fPriority && (nPriorityUnsent > 0 || nUnsent > 0))
             {
-                bool expected = true;
-                fBufferFull.compare_exchange_strong(expected, false);
+                appendBuffered(vPriorityBuffer);
+                return static_cast<int32_t>(nBytes);
             }
 
-            /* If the overflow buffer still has unsent data, append the new
-             * payload to maintain ordering.  The data will be drained by
-             * FLUSH_THREAD via Flush().  We check the actual vector size minus
-             * the read-offset (unsent bytes) — an empty logical buffer means
-             * we can try a direct send instead. */
-            const size_t nUnsent = vBuffer.size() - m_nFlushOffset;
-            if(nUnsent > 0)
+            /* Low-priority writes append behind any existing buffered data to
+             * preserve in-class FIFO order and allow the flush path to drain
+             * control traffic first. */
+            if(!fPriority && (nPriorityUnsent > 0 || nUnsent > 0))
             {
-                vBuffer.insert(vBuffer.end(), vData.begin(), vData.end());
-                nBufferSize.store(vBuffer.size() - m_nFlushOffset);
+                appendBuffered(vBuffer);
                 return static_cast<int32_t>(nBytes);
             }
 
@@ -917,14 +958,17 @@ namespace LLP
 
                 if(!Errors())
                 {
-                    if(m_nFlushOffset == vBuffer.size())
+                    std::vector<uint8_t>& vTarget = fPriority ? vPriorityBuffer : vBuffer;
+                    size_t& nTargetOffset = fPriority ? m_nPriorityFlushOffset : m_nFlushOffset;
+
+                    if(nTargetOffset == vTarget.size())
                     {
-                        vBuffer.clear();
-                        m_nFlushOffset = 0;
+                        vTarget.clear();
+                        nTargetOffset = 0;
                     }
 
-                    vBuffer.insert(vBuffer.end(), vData.begin(), vData.end());
-                    nBufferSize.store(vBuffer.size() - m_nFlushOffset);
+                    vTarget.insert(vTarget.end(), vData.begin(), vData.end());
+                    nBufferSize.store(bufferedBytes());
 
                     return static_cast<int32_t>(nBytes);
                 }
@@ -937,13 +981,16 @@ namespace LLP
                 /* Insert remaining data into the buffer (after any existing bytes,
                  * but since nUnsent == 0 the vector may also be cleared first to
                  * reclaim the space consumed by m_nFlushOffset). */
-                if(m_nFlushOffset == vBuffer.size())
+                std::vector<uint8_t>& vTarget = fPriority ? vPriorityBuffer : vBuffer;
+                size_t& nTargetOffset = fPriority ? m_nPriorityFlushOffset : m_nFlushOffset;
+
+                if(nTargetOffset == vTarget.size())
                 {
-                    vBuffer.clear();
-                    m_nFlushOffset = 0;
+                    vTarget.clear();
+                    nTargetOffset = 0;
                 }
-                vBuffer.insert(vBuffer.end(), vData.begin() + nSent, vData.end());
-                nBufferSize.store(vBuffer.size() - m_nFlushOffset);
+                vTarget.insert(vTarget.end(), vData.begin() + nSent, vData.end());
+                nBufferSize.store(bufferedBytes());
 
                 /* Update last sent time — partial writes still represent forward
                  * progress.  Without this update, DISCONNECT::TIMEOUT_WRITE can
@@ -1030,21 +1077,42 @@ namespace LLP
         while(nBufferSize.load() > 0 && nChunksSent < MAX_FLUSH_CHUNKS)
         {
             int32_t  nSent  = 0;
-            uint32_t nSize  = static_cast<uint32_t>(nBufferSize.load());
-            uint32_t nBytes = std::min(nSize, nMaxChunk);
+            uint32_t nBytes = 0;
+            bool fPriorityChunk = false;
 
             /* Send one chunk starting from the current read offset. */
             {
                 RECURSIVE(SOCKET_MUTEX);
 
+                const size_t nPriorityUnsent = vPriorityBuffer.size() - m_nPriorityFlushOffset;
+                const size_t nLowUnsent      = vBuffer.size() - m_nFlushOffset;
+
+                if(nPriorityUnsent > 0)
+                {
+                    fPriorityChunk = true;
+                    nBytes = std::min<uint32_t>(static_cast<uint32_t>(nPriorityUnsent), nMaxChunk);
+                }
+                else if(nLowUnsent > 0)
+                {
+                    nBytes = std::min<uint32_t>(static_cast<uint32_t>(nLowUnsent), nMaxChunk);
+                }
+                else
+                {
+                    nBufferSize.store(0);
+                    break;
+                }
+
+                const std::vector<uint8_t>& vTarget = fPriorityChunk ? vPriorityBuffer : vBuffer;
+                const size_t nOffset = fPriorityChunk ? m_nPriorityFlushOffset : m_nFlushOffset;
+
                 if(pSSL)
-                    nSent = static_cast<int32_t>(SSL_write(pSSL, (int8_t *)&vBuffer[m_nFlushOffset], nBytes));
+                    nSent = static_cast<int32_t>(SSL_write(pSSL, (int8_t *)&vTarget[nOffset], nBytes));
                 else
                 {
                 #ifdef WIN32
-                    nSent = static_cast<int32_t>(send(fd, (char*)&vBuffer[m_nFlushOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
+                    nSent = static_cast<int32_t>(send(fd, (char*)&vTarget[nOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
                 #else
-                    nSent = static_cast<int32_t>(send(fd, (int8_t*)&vBuffer[m_nFlushOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
+                    nSent = static_cast<int32_t>(send(fd, (int8_t*)&vTarget[nOffset], nBytes, MSG_NOSIGNAL | MSG_DONTWAIT));
                 #endif
                 }
             }
@@ -1076,22 +1144,27 @@ namespace LLP
             {
                 RECURSIVE(SOCKET_MUTEX);
 
-                m_nFlushOffset += static_cast<size_t>(nSent);
+                std::vector<uint8_t>& vTarget = fPriorityChunk ? vPriorityBuffer : vBuffer;
+                size_t& nTargetOffset = fPriorityChunk ? m_nPriorityFlushOffset : m_nFlushOffset;
+                nTargetOffset += static_cast<size_t>(nSent);
 
-                if(m_nFlushOffset >= vBuffer.size())
+                if(nTargetOffset >= vTarget.size())
                 {
                     /* All bytes sent — compact the vector to reclaim memory. */
-                    vBuffer.clear();
-                    m_nFlushOffset = 0;
-                    nBufferSize.store(0);
+                    vTarget.clear();
+                    nTargetOffset = 0;
+                }
 
-                    /* Clear fBufferFull now that the buffer is fully drained. */
+                const size_t nBuffered =
+                    (vPriorityBuffer.size() - m_nPriorityFlushOffset)
+                    + (vBuffer.size() - m_nFlushOffset);
+                nBufferSize.store(nBuffered);
+
+                if(nBuffered == 0)
+                {
+                    /* Clear fBufferFull now that the buffers are fully drained. */
                     bool expected = true;
                     fBufferFull.compare_exchange_strong(expected, false);
-                }
-                else
-                {
-                    nBufferSize.store(vBuffer.size() - m_nFlushOffset);
                 }
             }
 

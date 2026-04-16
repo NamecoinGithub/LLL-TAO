@@ -98,6 +98,24 @@ static size_t DrainReadEnd(int fdRead, size_t nMax = 1024 * 1024)
     return nTotal;
 }
 
+/* Helper: drain available data and return the bytes. */
+static std::vector<uint8_t> DrainReadEndBytes(int fdRead, size_t nMax = 1024 * 1024)
+{
+    std::vector<uint8_t> vOut;
+    std::vector<uint8_t> buf(65536);
+
+    while(vOut.size() < nMax)
+    {
+        ssize_t n = recv(fdRead, buf.data(), buf.size(), MSG_DONTWAIT);
+        if(n <= 0)
+            break;
+
+        vOut.insert(vOut.end(), buf.begin(), buf.begin() + n);
+    }
+
+    return vOut;
+}
+
 
 /* Helper: set the kernel send-buffer size on a socket fd. */
 static void SetSendBufferSize(int fd, int nSize)
@@ -220,6 +238,40 @@ TEST_CASE("Socket::Write transient backpressure — empty-buffer write is retain
     REQUIRE(sock.Buffered() <= payload.size());
 }
 
+TEST_CASE("Socket::Write transient backpressure preserves priority ordering", "[socket][write][priority]")
+{
+    TestSocket sock;
+    int fdRead = MakeTestSocket(sock);
+    FdGuard guard(fdRead);
+
+    SetSendBufferSize(sock.fd, 4096);
+
+    std::vector<uint8_t> fill(4096, 0xA5);
+    while(true)
+    {
+        const ssize_t nRaw = send(sock.fd, fill.data(), fill.size(), MSG_DONTWAIT);
+        if(nRaw >= 0)
+            continue;
+
+        REQUIRE((errno == EWOULDBLOCK || errno == EAGAIN));
+        break;
+    }
+
+    const std::vector<uint8_t> control(32, 0x3C);
+    const std::vector<uint8_t> work(64, 0x4D);
+
+    REQUIRE(sock.Write(control, control.size(), true) == static_cast<int32_t>(control.size()));
+    REQUIRE(sock.Write(work, work.size(), false) == static_cast<int32_t>(work.size()));
+    REQUIRE(sock.Buffered() == control.size() + work.size());
+
+    DrainReadEnd(fdRead);
+    REQUIRE(sock.Flush() > 0);
+
+    const std::vector<uint8_t> flushed = DrainReadEndBytes(fdRead);
+    REQUIRE(flushed.size() >= control.size());
+    REQUIRE(std::equal(control.begin(), control.end(), flushed.begin()));
+}
+
 
 /* ===========================================================================
  *  Section 3: Write() buffer-append path
@@ -247,6 +299,35 @@ TEST_CASE("Socket::Write appends to buffer when buffer has data", "[socket][writ
         REQUIRE(nSent == static_cast<int32_t>(small.size()));
         REQUIRE(sock.Buffered() == nBufferedBefore + small.size());
     }
+}
+
+TEST_CASE("Socket::Flush prioritizes control bytes ahead of buffered work bytes", "[socket][write][priority]")
+{
+    TestSocket sock;
+    int fdRead = MakeTestSocket(sock);
+    FdGuard guard(fdRead);
+
+    SetSendBufferSize(sock.fd, 4096);
+
+    std::vector<uint8_t> low(512 * 1024, 0x11);
+    sock.Write(low, low.size(), false);
+
+    REQUIRE(sock.Buffered() > 0);
+
+    /* Drain kernel-resident bytes so the next Flush() starts from the user-space buffers. */
+    DrainReadEnd(fdRead);
+
+    const std::vector<uint8_t> control(32, 0xAA);
+    const std::vector<uint8_t> lowTail(64, 0x22);
+
+    REQUIRE(sock.Write(control, control.size(), true) == static_cast<int32_t>(control.size()));
+    REQUIRE(sock.Write(lowTail, lowTail.size(), false) == static_cast<int32_t>(lowTail.size()));
+
+    REQUIRE(sock.Flush() > 0);
+
+    const std::vector<uint8_t> flushed = DrainReadEndBytes(fdRead);
+    REQUIRE(flushed.size() >= control.size());
+    REQUIRE(std::equal(control.begin(), control.end(), flushed.begin()));
 }
 
 
