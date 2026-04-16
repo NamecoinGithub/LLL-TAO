@@ -928,7 +928,6 @@ namespace LLP
 
                     return static_cast<int32_t>(nBytes);
                 }
-
                 return nSent;
             }
 
