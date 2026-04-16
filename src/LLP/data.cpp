@@ -122,7 +122,7 @@ namespace LLP
                              " — falling back to poll()");
             }
             else
-                debug::log(0, FUNCTION, "Mining DataThread ", nID, " using epoll fd=", m_nEpollFd);
+                debug::log(1, FUNCTION, "Mining DataThread ", nID, " using epoll fd=", m_nEpollFd);
         }
 #endif
     }
@@ -138,66 +138,29 @@ namespace LLP
         CONDITION.notify_all();
         FLUSH_CONDITION.notify_all();
 
-        /* ── Timeout-guarded join ─────────────────────────────────────────────
-         * Use a timed join instead of a blocking join() to prevent infinite
-         * stall when a connected miner's socket is stuck in OS-level cleanup
-         * (TCP TIME_WAIT). poll() has a 100ms timeout per iteration, but with
-         * multiple connections and slow kernel teardown, join() can block for
-         * seconds or indefinitely.
-         *
-         * If the thread does not exit within SHUTDOWN_JOIN_TIMEOUT_MS, we
-         * detach it and let the OS clean up on process exit. The hard-exit
-         * watchdog in signals.cpp provides the final safety net.
-         */
-        constexpr uint32_t SHUTDOWN_JOIN_TIMEOUT_MS = 500;
+        /* Release any blocking waits and cooperatively close active
+         * connections before joining the worker threads so shutdown keeps
+         * ownership local to this object and does not rely on detached waiters. */
+        NotifyTriggers();
+        DisconnectAll();
 
-        auto join_with_timeout = [&](std::thread& t, const char* name)
+        /* Notify both conditions again after releasing triggers and closing
+         * connections so DATA_THREAD / FLUSH_THREAD wake even if they went
+         * back to sleep between the earlier shutdown signal and cleanup. */
+        CONDITION.notify_all();
+        FLUSH_CONDITION.notify_all();
+
+        auto join_thread = [&](std::thread& t, const char* name)
         {
             if(!t.joinable())
                 return;
 
-            /* Move the thread handle and joined flag into shared_ptrs so the
-             * waiter thread holds shared ownership — no dangling references if
-             * join_with_timeout returns before the waiter finishes. */
-            auto sp_thread = std::make_shared<std::thread>(std::move(t));
-            auto sp_joined = std::make_shared<std::atomic<bool>>(false);
-
-            /* Spawn a waiter thread to perform the actual join. */
-            std::thread waiter([sp_thread, sp_joined]()
-            {
-                if(sp_thread->joinable())
-                    sp_thread->join();
-                sp_joined->store(true);
-            });
-
-            /* Poll until joined or deadline reached. */
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(SHUTDOWN_JOIN_TIMEOUT_MS);
-
-            while(!sp_joined->load() && std::chrono::steady_clock::now() < deadline)
-                runtime::sleep(10);
-
-            if(sp_joined->load())
-            {
-                waiter.join();
-                debug::log(2, FUNCTION, "  ", name, " joined cleanly for thread ", ID);
-            }
-            else
-            {
-                /* Thread did not exit in time — detach the waiter and let it
-                 * run to completion independently. The shared_ptrs keep the
-                 * thread handle and flag alive until the waiter exits.
-                 * The hard-exit watchdog in signals.cpp will force-terminate
-                 * the process if graceful shutdown does not complete within
-                 * 8 seconds. */
-                debug::error(FUNCTION, "  ", name, " (thread ", ID, ") did not exit within ",
-                             SHUTDOWN_JOIN_TIMEOUT_MS, "ms — detaching (watchdog will force exit)");
-                waiter.detach();
-            }
+            t.join();
+            debug::log(2, FUNCTION, "  ", name, " joined cleanly for thread ", ID);
         };
 
-        join_with_timeout(DATA_THREAD,  "DATA_THREAD");
-        join_with_timeout(FLUSH_THREAD, "FLUSH_THREAD");
+        join_thread(DATA_THREAD,  "DATA_THREAD");
+        join_thread(FLUSH_THREAD, "FLUSH_THREAD");
 
 #ifdef __linux__
         /* Close the epoll file descriptor for mining DataThreads. */
@@ -324,12 +287,12 @@ namespace LLP
         {
             if(m_nEpollFd >= 0)
             {
-                debug::log(0, FUNCTION, "Mining DataThread ", ID, " entering epoll loop (fd=", m_nEpollFd, ")");
+                debug::log(1, FUNCTION, "Mining DataThread ", ID, " entering epoll loop (fd=", m_nEpollFd, ")");
                 ThreadEpoll();
                 return;
             }
             /* If epoll_create1 failed, fall through to the poll() path as a fallback. */
-            debug::log(0, FUNCTION, "Mining DataThread ", ID, " falling back to poll() (epoll unavailable)");
+            debug::log(1, FUNCTION, "Mining DataThread ", ID, " falling back to poll() (epoll unavailable)");
         }
 #endif
 
@@ -540,7 +503,7 @@ namespace LLP
                             /* Log near-miss for authenticated miners — this would have killed
                              * the connection prior to the IsTimeoutExempt() bypass.  Useful
                              * for diagnosing spurious POLLIN events from TCP keepalive, etc. */
-                            debug::log(0, FUNCTION, "DataThread[", ID, "]: POLL_EMPTY near-miss for authenticated ",
+                            debug::log(3, FUNCTION, "DataThread[", ID, "]: POLL_EMPTY near-miss for authenticated ",
                                 ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
                                 " revents=", POLLFDS.at(nIndex).revents,
                                 " Available()=0 timeout=", nPollEmptyTimeout,
@@ -838,7 +801,7 @@ namespace LLP
 
                     /* Attempt to flush data when buffer is available. */
                     if(CONNECTION->Buffered() && CONNECTION->Flush() < 0)
-                        runtime::sleep(std::min(5u, CONNECTION->nConsecutiveErrors.load() / 1000)); //we want to sleep when we have periodic failures
+                        runtime::sleep(std::min(1u, CONNECTION->nConsecutiveErrors.load() / 1000)); //we want to sleep when we have periodic failures
                 }
                 catch(const std::exception& e)
                 {
@@ -941,7 +904,7 @@ namespace LLP
                 case DISCONNECT::PARTIAL_STALL: pReason = "PARTIAL_STALL (incomplete frame)"; break;
             }
 
-            debug::log(0, FUNCTION, "DataThread[", ID, "]: Removing AUTHENTICATED mining connection ",
+            debug::log(1, FUNCTION, "DataThread[", ID, "]: Removing AUTHENTICATED mining connection ",
                        CONNECTIONS->at(nIndex)->GetAddress().ToStringIP(),
                        " reason=", pReason,
                        " buffered=", CONNECTIONS->at(nIndex)->Buffered());
@@ -1015,9 +978,10 @@ namespace LLP
         /* Read-idle timeout.
          * Non-exempt connections use the DataThread TIMEOUT (server-configured).
          * Authenticated mining connections (IsTimeoutExempt == true) use the
-         * virtual GetReadTimeout() which returns a longer but finite value
-         * (default 600s / 10 minutes, configurable via -miningreadtimeout).
-         * This prevents a stalled read pipeline from persisting indefinitely
+         * virtual GetReadTimeout() which returns a longer but finite value from
+         * the shared MiningConstants helpers (default 86400s / 24 hours, with a
+         * floor applied to any runtime override).  This prevents a stalled
+         * read pipeline from persisting indefinitely
          * while server-initiated PUSH notifications continue to work
          * (the "shadow ban" scenario). */
         {
@@ -1043,7 +1007,7 @@ namespace LLP
         {
             if(CONNECTION->IsTimeoutExempt())
             {
-                debug::log(0, FUNCTION, "DataThread[", ID, "]: TIMEOUT_WRITE near-miss for authenticated ",
+                debug::log(3, FUNCTION, "DataThread[", ID, "]: TIMEOUT_WRITE near-miss for authenticated ",
                     ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
                     " Buffered()=", CONNECTION->Buffered(),
                     " WriteTimeout=", CONNECTION->GetWriteTimeout(), "ms",

@@ -394,7 +394,7 @@ TEST_CASE("Handshake Validation Tests", "[falcon_handshake]")
 }
 
 
-TEST_CASE("Localhost Detection Tests", "[falcon_handshake]")
+TEST_CASE("Falcon Handshake Localhost Detection Tests", "[falcon_handshake]")
 {
     SECTION("Localhost addresses detected correctly")
     {

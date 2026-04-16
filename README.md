@@ -10,6 +10,12 @@ We use a very strict branching logic for our development. The branch 'merging' i
 
 We use Make to build our project to multiple platforms. Please read out build documentation for instructions and options.
 
+For deterministic local/Codespaces/Copilot dependency bootstrap on Ubuntu, run:
+
+```sh
+sudo bash contrib/devtools/install-build-deps.sh
+```
+
 [Build Options](docs/build-params-reference.md)
 
 [Linux](docs/build-linux.md)
@@ -111,9 +117,35 @@ For a complete reference see [nexus.conf Reference](docs/reference/nexus.conf.md
 
 Developing on Nexus has been designed to be powerful, yet simple to use. Tritium++ packages features from SQL Queries, filters, sorting, statistical operators, functions, variables, and much more. The API uses a RESTFul HTTP-JSON protocol, so that you can access the power of Smart Contracts on Nexus from very basic web experience to advanced capabilities. The API is always expanding, so if you find any bugs or wish to suggest improvements, please use the Issues tracker and submit your feedback.
 
+### New Contributor Orientation
+
+If you are new to this repository, start with the codebase shape rather than the project story:
+
+- `src/LLP/` - networking, mining, session management, sync edge handling
+- `src/TAO/` - ledger, consensus, contracts, registers, and API logic
+- `src/LLD/` - storage and database access
+- `src/Legacy/` - backward-compatible legacy wallet and RPC surface
+- `tests/{unit,smoke,live,bench}` - validation layers for different development stages
+- `makefile.cli` - the active build entrypoint used in this branch
+
+For local onboarding, use the deterministic bootstrap path already wired into the repo:
+
+```sh
+sudo bash contrib/devtools/install-build-deps.sh
+make -f makefile.cli -j"$(nproc)"
+make -f makefile.cli UNIT_TESTS=1 -j"$(nproc)"
+```
+
+The highest-value reading path for a new coder is:
+
+1. `README.md`
+2. `docs/onboarding/ai-assisted-onboarding.md`
+3. `src/LLP/` mining/session code
+4. `src/TAO/Ledger/` consensus/sync code
+
 ## License
 
-Nexus is released under the terms of the MIT license. See [COPYING](COPYING.MD) for more
+Nexus is released under the terms of the MIT license. See [LICENSE](LICENSE) for more
 information or see https://opensource.org/licenses/MIT.
 
 ## Documentation & Diagrams
@@ -123,8 +155,10 @@ Architecture diagrams, protocol visualizations, and onboarding guides:
 - [Diagram Templates & Architecture Diagrams](docs/diagrams/README.md) - 15+ Mermaid and ASCII diagrams
 - [Linux Epoll Mining Architecture](docs/current/mining/linux-epoll-mining-architecture.md) - Why Linux-only epoll for mining I/O
 - [Recent Mining Changes (PRs #502–#545)](docs/current/mining/recent-changes-summary.md) - Change log for future developers
+- [Canonical Session Handling](docs/current/mining/canonical-session-handling.md) - Live vs inactive registry flow, lane handoff, and reactivation diagrams
 - [Known Risks & Limitations](docs/current/mining/known-risks-and-limitations.md) - Current risks and escalation triggers
 - [AI-Assisted Developer Onboarding](docs/onboarding/ai-assisted-onboarding.md) - Learning pathways with AI guidance
+- [New Coder Repo Guide](docs/onboarding/new-coder-repo-guide.md) - Repo shape, architectural risks, workflow guidance, and AEP/dynAEP assessment
 - [AI-Human Advancement Thesis](docs/philosophy/ai-human-advancement.md) - Collaboration philosophy
 - [Mining Debug Cheat Sheet](docs/onboarding/cheat-sheets/mining-debug.md)
 - [Consensus Debug Cheat Sheet](docs/onboarding/cheat-sheets/consensus-debug.md)

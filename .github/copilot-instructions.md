@@ -99,13 +99,13 @@ make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
 ### Run Specific Test Suite
 ```bash
-# Build unit-test-enabled binary
+# Build unit-test binary
 make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
-# LLP tests
+# Run LLP-focused tests from the produced nexus binary
 ./nexus "[llp]"
 
-# Ledger tests
+# Run ledger-focused tests
 ./nexus "[ledger]"
 ```
 

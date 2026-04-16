@@ -15,11 +15,13 @@ ________________________________________________________________________________
 #ifndef NEXUS_LLP_INCLUDE_NODE_SESSION_REGISTRY_H
 #define NEXUS_LLP_INCLUDE_NODE_SESSION_REGISTRY_H
 
+#include <LLP/include/node_cache.h>
 #include <LLP/include/stateless_miner.h>
 #include <Util/templates/concurrent_hashmap.h>
 #include <LLC/types/uint1024.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <optional>
 #include <atomic>
@@ -351,8 +353,9 @@ namespace LLP
      *
      *  CAPACITY LIMIT:
      *  ===============
-     *  EnforceCacheLimit() prevents unbounded growth from auth floods.
-     *  Called automatically from RegisterOrRefresh() when 20% over limit.
+     *  Live sessions are authoritative runtime state and are stored separately
+     *  from inactive cache entries.  EnforceCacheLimit() applies only to the
+     *  inactive cache budget and never evicts live sessions.
      *
      *  THREAD SAFETY:
      *  ==============
@@ -363,8 +366,11 @@ namespace LLP
     class NodeSessionRegistry
     {
     public:
-        /** Default maximum registry entries before eviction kicks in (BUG-5 fix). */
-        static constexpr size_t DEFAULT_MAX_REGISTRY_SIZE = 1000;
+        /** Explicit inactive-cache budget for disconnected sessions. */
+        static constexpr size_t DEFAULT_MAX_INACTIVE_REGISTRY_SIZE = NodeCache::DEFAULT_MAX_CACHE_SIZE;
+
+        /** Backward-compatible alias for existing callers/logs. */
+        static constexpr size_t DEFAULT_MAX_REGISTRY_SIZE = DEFAULT_MAX_INACTIVE_REGISTRY_SIZE;
 
         /** Get
          *
@@ -467,6 +473,7 @@ namespace LLP
         /** Count
          *
          *  Get the total number of registered sessions.
+         *  Includes both live runtime sessions and inactive cache entries.
          *
          *  @return Session count
          *
@@ -485,15 +492,17 @@ namespace LLP
         /** EnforceCacheLimit
          *
          *  Enforce maximum capacity on the registry to prevent unbounded growth
-         *  from auth floods (BUG-5 fix).  Evicts the oldest expired sessions
-         *  first, then the oldest disconnected sessions if still over limit.
+         *  in the inactive-session cache.  Live sessions are authoritative
+         *  runtime state and are never killed to satisfy cache pressure.
+         *  Dead entries removed here are also deleted from SessionStore to keep
+         *  the canonical store and registry indexes consistent.
          *
-         *  @param[in] nMaxSize Maximum allowed entries (default: 1000)
+         *  @param[in] nMaxSize Maximum allowed inactive entries (default: 1000)
          *
          *  @return Number of entries evicted
          *
          **/
-        uint32_t EnforceCacheLimit(size_t nMaxSize = DEFAULT_MAX_REGISTRY_SIZE);
+        uint32_t EnforceCacheLimit(size_t nMaxSize = DEFAULT_MAX_INACTIVE_REGISTRY_SIZE);
 
         /** Clear
          *
@@ -506,11 +515,17 @@ namespace LLP
         /** Private constructor for singleton **/
         NodeSessionRegistry();
 
-        /** Primary storage: hashKeyID → NodeSessionEntry **/
-        util::ConcurrentHashMap<uint256_t, NodeSessionEntry, Uint256Hash> m_mapByKey;
+        /** Live runtime sessions: hashKeyID → NodeSessionEntry **/
+        util::ConcurrentHashMap<uint256_t, NodeSessionEntry, Uint256Hash> m_mapLiveByKey;
+
+        /** Inactive cache entries: hashKeyID → NodeSessionEntry **/
+        util::ConcurrentHashMap<uint256_t, NodeSessionEntry, Uint256Hash> m_mapInactiveByKey;
 
         /** Reverse lookup: nSessionId → hashKeyID **/
         util::ConcurrentHashMap<uint32_t, uint256_t> m_mapSessionToKey;
+
+        /** Serializes live↔inactive map transitions to avoid split-map races. **/
+        mutable std::mutex m_transitionMutex;
     };
 
 } // namespace LLP

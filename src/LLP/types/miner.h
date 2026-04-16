@@ -477,8 +477,16 @@ namespace LLP
          * Tracks the unified height at which the last BLOCK_DATA was sent.
          * Used by GET_ROUND auto-send to send templates whenever ANY channel mines
          * a block, because every unified tip move changes hashPrevBlock and ALL
-         * channels need fresh templates (multi-channel mining requirement). */
-        uint32_t             nLastTemplateUnifiedHeight;
+         * channels need fresh templates (multi-channel mining requirement).
+         *
+         * Made atomic to eliminate the data race between the DataThread
+         * (ProcessPacket → handle_get_round) and the notification thread
+         * (SetBest → SendChannelNotification → SendLegacyTemplate).  Both
+         * threads read and write this field without holding MUTEX, so a
+         * plain uint32_t is a C++ data race (UB).  std::atomic<uint32_t>
+         * makes every access safe with relaxed ordering — a slightly stale
+         * value is acceptable since it is only used as a freshness hint. */
+        std::atomic<uint32_t> nLastTemplateUnifiedHeight;
 
         /* KEEPALIVE telemetry fields.
          * nMinerPrevblockSuffix: raw bytes [4..7] of keepalive payload (hashPrevBlock_lo32 as-sent). */
@@ -498,6 +506,21 @@ namespace LLP
          *  push was sent.  Protected by MUTEX.
          **/
         bool m_force_next_push{false};
+
+        /** Best-chain hash of the last template that was delivered to this miner
+         *  (via SendChannelNotification or SendLegacyTemplate).  Protected by MUTEX.
+         *
+         *  Purpose: allow the push throttle to distinguish a genuinely new chain
+         *  tip (different hashPrevBlock → always deliver) from a duplicate push
+         *  for the same tip (same hash → apply the 1-second time floor).
+         *
+         *  Without this, a rapid fork-resolution burst (multiple SetBest() events
+         *  in < 1 s) throttles all but the first notification, leaving miners on
+         *  a stale template for up to 1 second even though a new best block exists.
+         *
+         *  Zero-initialized (default uint1024_t{}) so the first push is always
+         *  delivered regardless of the time floor. */
+        uint1024_t m_hashLastPushedChain;
 
         /** 1-second rate-limit floor for GET_BLOCK fallback polling.
          *
@@ -600,9 +623,10 @@ namespace LLP
 
         /** GetReadTimeout
          *
-         *  Authenticated legacy miners use a long but finite read-idle timeout
-         *  (default 600s / 10 minutes, configurable via -miningreadtimeout).
-         *  This prevents stalled read pipelines from persisting indefinitely.
+         *  Authenticated legacy miners use a long but finite read-idle timeout.
+         *  The effective value comes from the shared MiningConstants helpers so the
+         *  runtime override can never fall below the safety floor required for
+         *  the 24-hour mining liveness contract.
          *
          *  @return read-idle timeout in milliseconds, or 0 for default.
          *
@@ -610,7 +634,7 @@ namespace LLP
         uint32_t GetReadTimeout() const final
         {
             if(fMinerAuthenticated)
-                return config::GetArg("-miningreadtimeout", MiningConstants::DEFAULT_MINING_READ_TIMEOUT_MS);
+                return MiningConstants::GetConfiguredReadTimeoutMs();
 
             return 0;
         }

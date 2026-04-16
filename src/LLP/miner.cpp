@@ -481,6 +481,32 @@ namespace LLP
                     debug::log(0, FUNCTION, "  Remote mining: ENABLED");
                 }
 
+                /* Track the exact legacy-lane endpoint immediately so later auth,
+                 * keepalive, and disconnect operations mutate/remove only this
+                 * connection's lane state.  Stateless lane already does this on
+                 * connect; legacy lane needs the same pre-auth seed entry so its
+                 * TransformMiner() calls do not become canonical-session-only
+                 * fallbacks. */
+                {
+                    const std::string strAddress =
+                        GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                    MiningContext context(
+                        nChannel,
+                        nBestHeight.load(std::memory_order_relaxed),
+                        runtime::unifiedtimestamp(),
+                        strAddress,
+                        1,
+                        false,
+                        0,
+                        uint256_t(0),
+                        uint256_t(0)
+                    );
+
+                    context = context.WithProtocolLane(ProtocolLane::LEGACY);
+                    StatelessMinerManager::Get().UpdateMiner(strAddress, context, 0);
+                }
+
                 return;
             }
 
@@ -548,15 +574,16 @@ namespace LLP
                 /* Interrupt any in-flight SendChannelNotification() path immediately. */
                 m_shutdownRequested.store(true, std::memory_order_release);
 
-                /* RemoveMiner handles local maps + cross-cache
-                 * propagation to NodeSessionRegistry.
-                 * Under single-lane policy, the miner may have a
-                 * StatelessMinerManager entry from prior stateless activity. */
-                if(fMinerAuthenticated)
+                /* Remove only THIS legacy-lane endpoint.  RemoveMiner() guards all
+                 * secondary indices with CompareAndErase so a reconnect that already
+                 * replaced the hashKeyID/session mapping on another endpoint will not
+                 * be clobbered by this stale disconnect. */
+                const std::string strMinerAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                if(!strMinerAddress.empty())
                 {
-                    const std::string strMinerAddress = GetAddress().ToStringIP();
-                    if(!strMinerAddress.empty())
-                        StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
                 }
 
                 /* Notify Colin agent on disconnect (only if genesis was known) */
@@ -664,25 +691,36 @@ namespace LLP
                     return true;
                 }
 
-                /* Capture address before atomic transform for session recovery */
-                std::string strSessionAddress = optContext.value().strAddress;
+                const auto& address = GetAddress();
+                const std::string strConnectionAddress =
+                    address.ToStringIP() + ":" + std::to_string(address.GetPort());
 
                 /* Atomic transform: update timestamp, keepalive count, and prevblock suffix
                  * directly on the CURRENT value in mapMiners, avoiding TOCTOU race where
                  * NotifyNewRound could overwrite connection-specific fields. */
-                MiningContext transformedCtx;
+                MiningContext transformedCtx = optContext.value();
                 std::array<uint8_t, 4> prevSuffix = nMinerPrevblockSuffix;
-                StatelessMinerManager::Get().TransformMinerBySession(nKeepaliveSession,
-                    [prevSuffix, &transformedCtx](const MiningContext& current) {
-                        uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
-                        transformedCtx = current
-                            .WithTimestamp(nKeepaliveTimestamp)
-                            .WithKeepaliveCount(current.nKeepaliveCount + 1)
-                            .WithKeepaliveSent(current.nKeepaliveSent + 1)
-                            .WithLastKeepaliveTime(nKeepaliveTimestamp)
-                            .WithMinerPrevblockSuffix(prevSuffix);
-                        return transformedCtx;
-                    });
+                const auto applyKeepaliveRefresh = [prevSuffix, &transformedCtx](const MiningContext& current) {
+                    const uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
+                    transformedCtx = current
+                        .WithTimestamp(nKeepaliveTimestamp)
+                        .WithKeepaliveCount(current.nKeepaliveCount + 1)
+                        .WithKeepaliveSent(current.nKeepaliveSent + 1)
+                        .WithLastKeepaliveTime(nKeepaliveTimestamp)
+                        .WithMinerPrevblockSuffix(prevSuffix);
+                    return transformedCtx;
+                };
+                const bool fUpdatedLaneContext = StatelessMinerManager::Get().TransformMiner(
+                    strConnectionAddress,
+                    applyKeepaliveRefresh, 0);
+
+                if(!fUpdatedLaneContext)
+                {
+                    transformedCtx = applyKeepaliveRefresh(transformedCtx);
+
+                    debug::log(1, FUNCTION, "SESSION_KEEPALIVE: no exact legacy-lane manager entry for ",
+                               strConnectionAddress, " - refreshed canonical session only");
+                }
 
                 /* CRITICAL FIX: Refresh the canonical session identity in NodeSessionRegistry.
                  * Previously, keepalive updated MiningContext.nTimestamp but never touched
@@ -788,9 +826,22 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext currentContext(
+                    nSubscribedChannel,
+                    nBestHeight.load(std::memory_order_relaxed),
+                    runtime::unifiedtimestamp(),
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort()),
+                    0,
+                    fMinerAuthenticated.load(std::memory_order_relaxed),
+                    nSessionId,
+                    hashKeyID,
+                    hashGenesis
+                );
+                currentContext = currentContext.WithProtocolLane(ProtocolLane::LEGACY);
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_SECONDARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_SECONDARY_ALIVE, &currentContext, fSessionValid);
 
                 respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
 
@@ -1111,9 +1162,11 @@ namespace LLP
                         debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication (legacy lane)");
 
                         /* Build SESSION_START payload using shared utility.
-                         * The session liveness timeout is a node-wide constant from NodeCache,
-                         * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                        const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(updatedContext.strAddress);
+                         * The session liveness timeout is a shared mining
+                         * policy value, NOT a per-context field.  nSessionTimeout
+                         * was removed from MiningContext. */
+                        const uint64_t nLivenessTimeout =
+                            MiningConstants::GetSessionLivenessTimeoutSec(updatedContext.strAddress);
                         std::vector<uint8_t> vSessionStart = SessionStartPacket::BuildPayload(
                             nSessionId, nLivenessTimeout, hashGenesis);
 
@@ -1477,14 +1530,11 @@ namespace LLP
             return false;
         }
 
-        /* Consult the authoritative StatelessMinerManager context when available.
-         * Primary: GetMinerContextByAddressOrIP() handles ephemeral port changes (GAP 3).
-         * Fallback: construct from per-connection member variables (pre-manager state).
-         * Third parameter (fMigrateAddress=false): read-only lookup, do not re-key the
-         * context address in the manager — migration is reserved for SUBMIT_BLOCK. */
+        /* Consult only the current legacy-lane manager entry when available.
+         * Same-node cross-lane recovery is no longer valid; protected legacy opcodes
+         * must stay bound to their own lane state. */
         const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-        auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-            strLookupAddr, nSessionId, /* fMigrateAddress= */ false);
+        std::optional<MiningContext> optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
 
         MiningContext ctx = [&]() -> MiningContext
         {
@@ -1669,11 +1719,6 @@ namespace LLP
 
         /* Clear the parallel hash-snapshot map. */
         mapBlockHashes.clear();
-
-        /* Clear the cross-connection SUBMIT_BLOCK deduplication cache on new round.
-         * Same block solutions submitted on both SIM Link lanes after the round
-         * ends would be expired anyway, but clearing eagerly avoids false positives. */
-        ColinMiningAgent::Get().clear_dedup_cache();
 
         /* Reset the coinbase transaction. */
         tCoinbaseTx.SetNull();
@@ -2017,7 +2062,7 @@ namespace LLP
         ctx.nChannel = nChannel;
         ctx.fSubscribedToNotifications = fSubscribedToNotifications;
         ctx.nSubscribedChannel = nSubscribedChannel;
-        ctx.strAddress = GetAddress().ToStringIP();
+        ctx.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
         ctx.nProtocolLane = ProtocolLane::LEGACY;  // Legacy Miner uses 8-bit opcodes
         return ctx;
     }
@@ -2042,9 +2087,24 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock.
+         * The hash is needed inside the lock to implement the hash-based
+         * bypass: a new hashPrevBlock always bypasses the 1-second floor
+         * so miners receive fresh work after every fork step. */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashBestChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
         /* Push throttle — drop if a template was sent less than
-         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
-         * Re-subscription responses bypass via m_force_next_push. */
+         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago AND the chain tip has not changed
+         * (same hashPrevBlock).  Re-subscription responses bypass via
+         * m_force_next_push.
+         *
+         * Hash-change bypass: a fork step produces a new hashBestChain
+         * within the 1-second window.  Without the hash check, all but the
+         * first SetBest() notification in a burst are dropped, leaving miners
+         * on a stale template for up to 1 second.  With it, each distinct tip
+         * is delivered immediately regardless of timing. */
         {
             LOCK(MUTEX);
             if(shouldAbortNotification())
@@ -2062,20 +2122,25 @@ namespace LLP
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
             }
+            else if (hashBestChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                           hashBestChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
+            }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
                 debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
-                           GetAddress().ToStringIP(), " — work delivery delayed");
+                           GetAddress().ToStringIP(), " — same tip, work delivery delayed");
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashBestChain;
         }
 
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nSubscribedChannel))
@@ -2086,10 +2151,6 @@ namespace LLP
         
         /* Get difficulty */
         uint32_t nDifficulty = LLP::StatelessMinerConnection::GetCachedDifficulty(nSubscribedChannel);
-
-        /* Keep the tip hash consistent with the loaded best-state snapshot. */
-        const uint1024_t hashBestChain =
-            PushNotificationBuilder::BestChainHashForNotification(stateBest);
 
         if(shouldAbortNotification())
         {
@@ -2143,20 +2204,37 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock (same
+         * pattern as SendChannelNotification) so the hash-based bypass can
+         * be evaluated while holding MUTEX without a blocking load inside. */
+        TAO::Ledger::BlockState stateBestForHash = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashCurrentChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBestForHash);
+
         /* Thread-safe context access and push throttle */
         uint32_t nChannelCopy;
         {
             LOCK(MUTEX);
 
-            /* Push throttle — same pattern as SendStatelessTemplate().
+            /* Push throttle — same pattern as SendChannelNotification().
              * TWO-STEP RE-ARM INVARIANT: caller must re-arm m_force_next_push
-             * after SendChannelNotification() before calling this method. */
+             * after SendChannelNotification() before calling this method.
+             *
+             * Hash-change bypass: if the chain tip advanced since the last push,
+             * skip the time floor so miners receive the new template immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
             if(m_force_next_push)
             {
                 m_force_next_push = false;
+            }
+            else if(hashCurrentChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Legacy template throttle bypassed — new chain tip ",
+                           hashCurrentChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
             }
             else if(m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
@@ -2166,6 +2244,7 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel */
             nChannelCopy = nChannel.load();
@@ -2219,8 +2298,8 @@ namespace LLP
 
         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-        /* Update last template unified height */
-        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+        /* Update last template unified height (atomic store — see nLastTemplateUnifiedHeight comment). */
+        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
     }
 
 
@@ -2330,10 +2409,11 @@ namespace LLP
 
         /* Update last template unified height after sending template.
          * Uses UNIFIED height — every tip move changes hashPrevBlock,
-         * so ALL channels need fresh templates regardless of which channel mined. */
+         * so ALL channels need fresh templates regardless of which channel mined.
+         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
         {
             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-            nLastTemplateUnifiedHeight = stateBest.nHeight;
+            nLastTemplateUnifiedHeight.store(stateBest.nHeight, std::memory_order_relaxed);
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
@@ -2396,27 +2476,13 @@ namespace LLP
     /* Stateless handler for SUBMIT_BLOCK - validates and processes a block submission */
     bool Miner::handle_submit_block_stateless(const Packet& PACKET)
     {
-        /* R-02: Session consistency gate — validate the authoritative session context
-         * persisted in StatelessMinerManager before proceeding with block processing.
-         * The live connection context has hashKeyID=0 for legacy-lane miners; the
-         * StatelessMinerManager carries the full context populated during auth.
-         *
-         * Also resolves nCrossLaneSessionId for the cross-lane SUBMIT_BLOCK fallback
-         * path (GAP 3 hardening: IP-only lookup if IP:port misses on reconnect). */
-        uint32_t nCrossLaneSessionId = nSessionId;   /* default: per-connection session */
+        /* R-02: Lane-local session consistency gate — legacy SUBMIT_BLOCK must rely
+         * only on this connection's own lane state, not on any other-lane alias. */
         {
             const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-            const auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-                strLookupAddr, nSessionId, true);
+            const auto optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
             if(optCtx.has_value())
             {
-                nCrossLaneSessionId = optCtx->nSessionId;
-                if(optCtx->strAddress != strLookupAddr)
-                {
-                    debug::log(1, FUNCTION, "Legacy lane: resolved session via IP-only fallback from ",
-                               optCtx->strAddress, " to ", strLookupAddr,
-                               ", session=", nCrossLaneSessionId);
-                }
                 const SessionConsistencyResult consistency = optCtx->ValidateConsistency();
                 if(consistency != SessionConsistencyResult::Ok)
                 {
@@ -2428,7 +2494,8 @@ namespace LLP
             }
             else
             {
-                debug::log(2, FUNCTION, "Legacy lane: no session context found, cross-lane resolution unavailable");
+                debug::log(2, FUNCTION, "Legacy lane: no exact-address session context found for ",
+                           strLookupAddr, " - relying on local connection state");
             }
         }
 
@@ -2625,30 +2692,6 @@ namespace LLP
             return true;
         }
 
-        /* ── SIM Link deduplication check ─────────────────────────────────────
-         *  When a miner runs two simultaneous connections (NexusMiner SIM Link:
-         *  one on legacy port 8323, one on stateless port 9323) both lanes may
-         *  submit the same solution within milliseconds of each other.  Deduplicate
-         *  by caching a hash of (nHeight, nNonce, hashMerkleRoot) for 10 seconds.
-         *  Only the first submission is forwarded to ValidateMinedBlock / AcceptMinedBlock.
-         *  The second is silently rejected with BLOCK_REJECTED.
-         */
-        if(ColinMiningAgent::Get().check_and_record_submission(
-                pTritium->nHeight, nonce, hashMerkle.GetHex()))
-        {
-            debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                       "(height=", pTritium->nHeight, " nonce=", nonce,
-                       ") — second connection submission ignored (SIM Link dedup)");
-            if(hashGenesis != 0)
-            {
-                ColinMiningAgent::Get().on_block_submitted(
-                    hashGenesis.SubString(8), pTritium->nChannel,
-                    false, "DUPLICATE_SUBMISSION");
-            }
-            respond_auto(BLOCK_REJECTED);
-            return true;
-        }
-
         /* ── Merkle root immutability anchor ──
          * After sign_block() the hashMerkleRoot is frozen: it was part of the
          * ProofHash the miner solved against.  No pre-validation step may
@@ -2791,16 +2834,11 @@ namespace LLP
          * CRITICAL: Use UNIFIED height — every tip move (any channel) changes
          * hashPrevBlock, requiring ALL channels to get fresh templates.
          *
-         * FIX: Re-read nLastTemplateUnifiedHeight under MUTEX to avoid a data race
-         * with SendLegacyTemplate() which writes nLastTemplateUnifiedHeight from the
-         * FLUSH_THREAD.  Using the live value prevents a false-positive "height changed"
-         * that would trigger a redundant new_block() call. */
+         * nLastTemplateUnifiedHeight is now std::atomic<uint32_t>, so we can
+         * read it safely without holding MUTEX. */
         uint32_t nCurrentChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannel);
-        uint32_t nLiveLastTemplateHeight;
-        {
-            LOCK(MUTEX);
-            nLiveLastTemplateHeight = nLastTemplateUnifiedHeight;
-        }
+        const uint32_t nLiveLastTemplateHeight =
+            nLastTemplateUnifiedHeight.load(std::memory_order_relaxed);
         bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
             nLiveLastTemplateHeight, snap);
 
@@ -2840,8 +2878,9 @@ namespace LLP
 
                         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-                        /* Update last template unified height only after successful send */
-                        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+                        /* Update last template unified height only after successful send.
+                         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
+                        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
                     }
                 }
                 catch(const std::exception& e) {

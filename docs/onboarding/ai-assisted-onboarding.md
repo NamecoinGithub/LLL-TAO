@@ -1,5 +1,34 @@
 # AI-Assisted Developer Onboarding
 
+## Start Here: The Real Shape of the Repo
+
+For new contributors, the fastest way to get oriented is to treat the repository as
+four major systems with one real build entrypoint:
+
+- `src/LLP/` - networking, mining, sync, sessions, shutdown paths
+- `src/TAO/` - ledger, consensus, contracts, registers, API behavior
+- `src/LLD/` - database and storage infrastructure
+- `src/Legacy/` - backward-compatibility and wallet-era code
+- `tests/{unit,smoke,live,bench}` - validation layers
+- `makefile.cli` - the branch's active build entrypoint
+
+For local setup, use:
+
+```bash
+sudo bash contrib/devtools/install-build-deps.sh
+make -f makefile.cli -j$(nproc)
+make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
+```
+
+Current automation is intentionally narrow:
+
+- `.devcontainer/devcontainer.json` bootstraps the development environment
+- `.devcontainer/setup.sh` installs dependencies through the shared bootstrap script
+- `.github/workflows/copilot-setup-steps.yml` validates setup/install only
+
+This means workflow orchestration ideas should wrap the repo rather than become
+hard runtime dependencies unless they are proven safe and maintainable.
+
 ## Why This Codebase is the APEX for AI-Human Collaboration
 
 ### The Nexus Architecture Advantage
@@ -14,6 +43,22 @@
 - **Together:** 10x development velocity with higher quality
 
 ---
+
+## The Most Important Architectural Truth
+
+The hardest problems in this codebase are not isolated C++ syntax problems. They
+show up at the seams between networking, mining, sync, and shutdown behavior.
+When reading code, prefer end-to-end state flow over local implementation detail.
+
+Recommended reading order:
+
+1. `README.md`
+2. This onboarding guide
+3. `src/LLP/` mining/session management
+4. `src/TAO/Ledger/` consensus and sync handling
+
+Before making large design changes, review the verified risk areas in
+`docs/onboarding/new-coder-repo-guide.md`.
 
 ## Learning Pathways
 
