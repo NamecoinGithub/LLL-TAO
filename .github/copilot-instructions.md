@@ -57,20 +57,20 @@ brew install berkeley-db@5 openssl@1.1 boost miniupnpc libevent
 ### Standard Build
 ```bash
 # Clean previous builds
-make clean
+make -f makefile.cli clean
 
 # Build with all CPU cores
-make -j$(nproc)
+make -f makefile.cli -j$(nproc)
 ```
 
 ### Debug Build
 ```bash
-make DEBUG=1 -j$(nproc)
+make -f makefile.cli DEBUG=1 -j$(nproc)
 ```
 
 ### Verbose Build (see all commands)
 ```bash
-make VERBOSE=1 -j$(nproc)
+make -f makefile.cli VERBOSE=1 -j$(nproc)
 ```
 
 ## Project Structure
@@ -94,19 +94,19 @@ make VERBOSE=1 -j$(nproc)
 
 ### Run All Tests
 ```bash
-make test
+make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 ```
 
 ### Run Specific Test Suite
 ```bash
-# Unit tests only
-./build/tests/unit_tests
+# Build unit-test-enabled binary
+make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
 # LLP tests
-./build/tests/unit_tests --run_test=LLP/*
+./nexus "[llp]"
 
 # Ledger tests
-./build/tests/unit_tests --run_test=Ledger/*
+./nexus "[ledger]"
 ```
 
 ## Common Build Issues
@@ -117,7 +117,8 @@ make test
 **Solution:**
 ```bash
 sudo apt-get install libdb5.3++-dev
-# Or specify DB location in Makefile
+# Or run the repo bootstrap:
+bash .devcontainer/setup.sh
 ```
 
 ### Boost Version Mismatch
@@ -161,7 +162,7 @@ Build and test workflows run automatically on:
 - Pull request updates
 
 ### DevContainer Testing
-Copilot Coding Agent uses the DevContainer configuration to:
+Copilot Coding Agent uses the Copilot setup workflow plus the shared devcontainer bootstrap to:
 - Verify PRs compile successfully
 - Run automated tests
 - Check for dependency issues
