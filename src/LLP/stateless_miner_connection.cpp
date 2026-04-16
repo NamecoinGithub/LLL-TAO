@@ -4263,9 +4263,6 @@ namespace LLP
         /* Snapshot the best tip before taking MUTEX so the hash lookup work
          * stays outside the lock; the comparison/update against push-throttle
          * state still happens under MUTEX below. */
-        /* Snapshot the best tip before taking MUTEX so the hash lookup work
-         * stays outside the lock; the comparison/update against push-throttle
-         * state still happens under MUTEX below. */
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         const uint1024_t hashBestChain =
             PushNotificationBuilder::BestChainHashForNotification(stateBest);
