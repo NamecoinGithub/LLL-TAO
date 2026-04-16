@@ -903,13 +903,28 @@ namespace LLP
         }
 
 
-        /* Handle for error state. */
+        /* Handle error state.
+         * If the socket is only back-pressured (EWOULDBLOCK / WANT_WRITE),
+         * keep the full payload in the overflow buffer so the write-service
+         * path can retry it later instead of dropping the packet. */
         if(nSent < 0)
         {
             if(pSSL)
-                nError = SSL_get_error(pSSL, nSent);
+                nError.store(SSL_get_error(pSSL, nSent));
             else
-                nError = WSAGetLastError();
+                nError.store(WSAGetLastError());
+
+            /* Transient backpressure is not a fatal socket error.  Buffer the
+             * whole payload and let EPOLLOUT / Flush() drain it later. */
+            if(!Errors())
+            {
+                RECURSIVE(SOCKET_MUTEX);
+
+                vBuffer.insert(vBuffer.end(), vData.begin(), vData.end());
+                nBufferSize.store(vBuffer.size());
+
+                return static_cast<int32_t>(nBytes);
+            }
         }
 
         /* If not all data was sent non-blocking, buffer the remainder. */
@@ -1021,9 +1036,9 @@ namespace LLP
             if(nSent < 0)
             {
                 if(pSSL)
-                    nError = SSL_get_error(pSSL, nSent);
+                    nError.store(SSL_get_error(pSSL, nSent));
                 else
-                    nError = WSAGetLastError();
+                    nError.store(WSAGetLastError());
 
                 ++nConsecutiveErrors;
 

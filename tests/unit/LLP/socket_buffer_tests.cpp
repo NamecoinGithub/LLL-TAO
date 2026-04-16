@@ -21,6 +21,7 @@ ________________________________________________________________________________
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <thread>
 #include <atomic>
 
@@ -182,6 +183,41 @@ TEST_CASE("Socket::Write partial send — remainder goes to buffer", "[socket][w
     {
         REQUIRE(sock.Buffered() == 0);
     }
+}
+
+
+TEST_CASE("Socket::Write transient backpressure — empty-buffer write is retained for later service", "[socket][write]")
+{
+    TestSocket sock;
+    int fdRead = MakeTestSocket(sock);
+    FdGuard guard(fdRead);
+
+    SetSendBufferSize(sock.fd, 4096);
+
+    /* Saturate the kernel send buffer first so the next Write() hits
+     * EWOULDBLOCK while Socket::Buffered() is still zero. */
+    std::vector<uint8_t> fill(4096, 0xA5);
+    while(true)
+    {
+        const ssize_t nRaw = send(sock.fd, fill.data(), fill.size(), MSG_DONTWAIT);
+        if(nRaw >= 0)
+            continue;
+
+        REQUIRE((errno == EWOULDBLOCK || errno == EAGAIN));
+        break;
+    }
+
+    std::vector<uint8_t> payload(256, 0x5A);
+    const int32_t nAccepted = sock.Write(payload, payload.size());
+
+    REQUIRE(nAccepted == static_cast<int32_t>(payload.size()));
+    REQUIRE(sock.Buffered() == payload.size());
+
+    /* Once the peer drains, Flush() should deliver the deferred payload. */
+    DrainReadEnd(fdRead);
+    int32_t nFlushed = sock.Flush();
+    REQUIRE(nFlushed >= 0);
+    REQUIRE(sock.Buffered() <= payload.size());
 }
 
 
