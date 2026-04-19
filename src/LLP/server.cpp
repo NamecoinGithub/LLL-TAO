@@ -1282,6 +1282,19 @@ namespace LLP
 
                         if(pConn->Timeout(nStaleMs, Socket::READ))
                         {
+                            const int32_t nSocketError = pConn->RefreshSocketError();
+                            if(nSocketError != 0)
+                            {
+                                debug::log(0, FUNCTION, "Health probe: miner ",
+                                           pConn->GetAddress().ToStringIP(),
+                                           " recv idle > ", nStaleMs / 1000, "s",
+                                           " so_error=", nSocketError,
+                                           " — flagged for disconnect");
+
+                                ++nProbed;
+                                continue;
+                            }
+
                             debug::log(0, FUNCTION, "Health probe: miner ",
                                        pConn->GetAddress().ToStringIP(),
                                        " recv idle > ", nStaleMs / 1000, "s",

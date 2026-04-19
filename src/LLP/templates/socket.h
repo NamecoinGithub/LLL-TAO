@@ -247,11 +247,23 @@ namespace LLP
 
 
         /** Errors
+          *
+          *  Checks for any flags in the Error Handle.
+          *
+          **/
+        bool Errors() const;
+
+
+        /** RefreshSocketError
          *
-         *  Checks for any flags in the Error Handle.
+         *  Query the kernel's pending SO_ERROR state for this socket and cache
+         *  any non-zero result into nError so the DataThread can remove the
+         *  connection on its next pass.
+         *
+         *  @return the pending socket error code, or 0 if none is pending.
          *
          **/
-        bool Errors() const;
+        int32_t RefreshSocketError();
 
 
         /** Error
