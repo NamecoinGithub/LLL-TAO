@@ -30,6 +30,7 @@ ________________________________________________________________________________
 #include <mutex>
 #include <map>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace LLP
@@ -389,11 +390,12 @@ namespace LLP
 
         /** SendStatelessTemplate
          *
-         *  Send a complete mining template using 16-bit opcode 0xD008 (STATELESS_GET_BLOCK).
+         *  Send a complete mining template using mirrored GET_BLOCK opcode 0xD081
+         *  (Mirror(0x81) / STATELESS_GET_BLOCK).
          *  This is used by the stateless mining protocol for NexusMiner.
          *
          *  Packet format (228 bytes total):
-         *  - Opcode: 0xD008 (2 bytes, big-endian)
+         *  - Opcode: 0xD081 (2 bytes, big-endian)
          *  - Metadata (12 bytes, big-endian):
          *    - Unified height (4 bytes)
          *    - Channel height (4 bytes)

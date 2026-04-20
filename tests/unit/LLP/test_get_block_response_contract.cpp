@@ -15,7 +15,10 @@ ________________________________________________________________________________
 
 #include <LLP/include/get_block_policy.h>
 #include <LLP/include/mining_constants.h>
+#include <LLP/include/opcode_utility.h>
+#include <LLP/packets/packet.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -182,6 +185,25 @@ TEST_CASE("GET_BLOCK response contract: no silent drops possible", "[get_block][
         REQUIRE(std::string(GetBlockPolicyReasonCode(GetBlockPolicyReason::TEMPLATE_SOURCE_UNAVAILABLE)) != "NONE");
         REQUIRE(std::string(GetBlockPolicyReasonCode(GetBlockPolicyReason::CHANNEL_NOT_SET)) != "NONE");
     }
+}
+
+TEST_CASE("GET_BLOCK control payload survives legacy BLOCK_REJECTED framing", "[get_block][response_contract][wire]")
+{
+    const auto payload = BuildGetBlockControlPayload(GetBlockPolicyReason::TEMPLATE_NOT_READY, 0u);
+
+    Packet packet(OpcodeUtility::Opcodes::BLOCK_REJECTED);
+    packet.DATA = payload;
+    packet.LENGTH = static_cast<uint32_t>(payload.size());
+
+    const std::vector<uint8_t> bytes = packet.GetBytes();
+
+    REQUIRE(bytes.size() == 13u);
+    REQUIRE(bytes[0] == OpcodeUtility::Opcodes::BLOCK_REJECTED);
+    REQUIRE(bytes[1] == 0x00);
+    REQUIRE(bytes[2] == 0x00);
+    REQUIRE(bytes[3] == 0x00);
+    REQUIRE(bytes[4] == 0x08);
+    REQUIRE(std::equal(payload.begin(), payload.end(), bytes.begin() + 5));
 }
 
 TEST_CASE("GET_BLOCK throttle constants are bounded", "[get_block][response_contract][timeout]")

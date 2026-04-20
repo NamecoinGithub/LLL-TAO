@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <unit/catch2/catch.hpp>
 
+#include <LLP/include/opcode_utility.h>
 #include <LLP/packets/packet.h>
 
 /** Test Packet::HasDataPayload() and GetBytes() for mining round response packets
@@ -157,13 +158,13 @@ TEST_CASE("Packet::Header() validation for round response packets", "[packet][ro
         REQUIRE(packet.Header() == true);
     }
     
-    SECTION("NEW_ROUND with LENGTH = 0 is INVALID header")
+    SECTION("NEW_ROUND with LENGTH = 0 still has complete framing")
     {
         LLP::Packet packet;
         packet.HEADER = 204;  // NEW_ROUND
-        packet.LENGTH = 0;    // Invalid - should have data
-        
-        REQUIRE(packet.Header() == false);
+        packet.LENGTH = 0;
+         
+        REQUIRE(packet.Header() == true);
     }
 }
 

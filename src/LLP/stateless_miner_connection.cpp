@@ -598,10 +598,7 @@ namespace LLP
             strAddress = context.strAddress;
         }
 
-        const char* pReason =
-            (eReason == TemplateWorkReason::GET_ROUND_RECOVERY)
-                ? "get_round_recovery"
-                : "push_notification";
+        const char* pReason = TemplateWorkReasonString(eReason);
 
         TAO::Ledger::Block* pBlock = new_block();
         if(!pBlock)

@@ -460,6 +460,10 @@ namespace OpcodeUtility
         /* Traditional data packets (0-127) carry payload */
         if(nOpcode < 128)
             return true;
+
+        /* BLOCK_REJECTED may carry rejection/control payload bytes */
+        if(nOpcode == Opcodes::BLOCK_REJECTED)
+            return true;
         
         /* Mining round response packets carry height data (204-205) */
         if(nOpcode >= Opcodes::NEW_ROUND && nOpcode <= Opcodes::OLD_ROUND)
@@ -483,6 +487,10 @@ namespace OpcodeUtility
         
         /* Session status query packets (219-220) carry payload */
         if(nOpcode == Opcodes::SESSION_STATUS || nOpcode == Opcodes::SESSION_STATUS_ACK)
+            return true;
+
+        /* Session expiry responses carry session_id + reason */
+        if(nOpcode == Opcodes::SESSION_EXPIRED)
             return true;
         
         /* NOTE: Legacy PING (0xFD = 253) is header-only — no payload.

@@ -430,15 +430,15 @@ namespace OpcodeUtility
 
     /** HasDataPayload
      *
-     *  Check if an opcode carries a data payload in the packet body.
+     *  Check if an opcode may carry a data payload in the packet body.
      *  
      *  This replaces hardcoded range constants previously scattered in
      *  packet.h and other files. Provides a centralized classification
-     *  of which opcodes carry payload data vs header-only packets.
+     *  of which opcodes may carry payload data vs header-only requests.
      *
      *  @param[in] nOpcode The opcode to check
      *
-     *  @return true if opcode carries data payload, false for header-only
+     *  @return true if opcode may carry payload data, false for header-only
      *
      **/
     bool HasDataPayload(uint8_t nOpcode);
@@ -446,7 +446,7 @@ namespace OpcodeUtility
 
     /** HasDataPayload16
      *
-     *  Check if a 16-bit stateless opcode carries a data payload.
+     *  Check if a 16-bit stateless opcode may carry a data payload.
      *
      *  Covers both mirrored opcodes (0xD0xx) and un-mirrored stateless-only
      *  opcodes. Un-mirrored data-bearing opcodes:
@@ -455,7 +455,7 @@ namespace OpcodeUtility
      *
      *  @param[in] nOpcode  The 16-bit stateless opcode to check
      *
-     *  @return true if opcode carries data payload, false for header-only
+     *  @return true if opcode may carry payload data, false for header-only
      *
      **/
     bool HasDataPayload16(uint16_t nOpcode);
