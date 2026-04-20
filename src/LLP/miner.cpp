@@ -462,9 +462,6 @@ namespace LLP
                             return;
                         }
 
-                        /* Store the new block in the memory map of recent blocks being worked on. */
-                        mapBlocks[pBlock->hashMerkleRoot] = pBlock;
-
                         /* Serialize the block vData */
                         vData = pBlock->Serialize();
 
@@ -1781,8 +1778,7 @@ namespace LLP
     /*  Determines if the block exists. */
     bool Miner::find_block(const uint512_t& hashMerkleRoot)
     {
-        /* Check that the block exists. */
-        if(!mapBlocks.count(hashMerkleRoot))
+        if(lookup_block(hashMerkleRoot) == nullptr)
         {
             debug::log(2, FUNCTION, "Block Not Found ", hashMerkleRoot.SubString());
 
@@ -1790,6 +1786,62 @@ namespace LLP
         }
 
         return true;
+    }
+
+
+    /*  Non-mutating lookup of the cached block template. */
+    TAO::Ledger::Block* Miner::lookup_block(const uint512_t& hashMerkleRoot) const
+    {
+        const auto it = mapBlocks.find(hashMerkleRoot);
+        if(it == mapBlocks.end())
+            return nullptr;
+
+        return it->second;
+    }
+
+
+    /*  Register a block template and its best-chain snapshot together. */
+    TAO::Ledger::Block* Miner::register_block_template(TAO::Ledger::Block* pBlock)
+    {
+        if(pBlock == nullptr)
+            return nullptr;
+
+        if(pBlock->hashMerkleRoot == 0)
+        {
+            debug::error(FUNCTION, "Refusing to cache template with null merkle root");
+            delete pBlock;
+            return nullptr;
+        }
+
+        const uint512_t hashMerkleRoot = pBlock->hashMerkleRoot;
+        const uint1024_t hashCurrentBest = TAO::Ledger::ChainState::hashBestChain.load();
+
+        auto itExisting = mapBlocks.find(hashMerkleRoot);
+        if(itExisting != mapBlocks.end() && itExisting->second != pBlock)
+        {
+            delete itExisting->second;
+            itExisting->second = pBlock;
+        }
+        else
+            mapBlocks[hashMerkleRoot] = pBlock;
+
+        mapBlockHashes[hashMerkleRoot] = hashCurrentBest;
+
+        return pBlock;
+    }
+
+
+    /*  Remove a cached block template and its corresponding reorg snapshot. */
+    void Miner::erase_block_template(const uint512_t& hashMerkleRoot)
+    {
+        const auto it = mapBlocks.find(hashMerkleRoot);
+        if(it != mapBlocks.end())
+        {
+            delete it->second;
+            mapBlocks.erase(it);
+        }
+
+        mapBlockHashes.erase(hashMerkleRoot);
     }
 
 
@@ -1870,14 +1922,14 @@ namespace LLP
         }
         
         debug::log(2, FUNCTION, "Created block ", pBlock->ProofHash().SubString());
-        return pBlock;
+        return register_block_template(pBlock);
     }
 
 
     /*  signs the block. */
     bool Miner::sign_block(uint64_t nNonce, const uint512_t& hashMerkleRoot, const std::vector<uint8_t>& vOffsets)
     {
-        TAO::Ledger::Block *pBaseBlock = mapBlocks[hashMerkleRoot];
+        TAO::Ledger::Block *pBaseBlock = lookup_block(hashMerkleRoot);
 
         /* Update block with the nonce and time. */
         if(pBaseBlock)
@@ -1990,7 +2042,7 @@ namespace LLP
     {
         /* If the block dynamically casts to a legacy block, validate the legacy block. */
         {
-            Legacy::LegacyBlock *pBlock = dynamic_cast<Legacy::LegacyBlock *>(mapBlocks[hashMerkleRoot]);
+            Legacy::LegacyBlock *pBlock = dynamic_cast<Legacy::LegacyBlock *>(lookup_block(hashMerkleRoot));
 
             if(pBlock)
             {
@@ -2010,7 +2062,7 @@ namespace LLP
         }
 
         /* If the block dynamically casts to a tritium block, validate the tritium block. */
-        TAO::Ledger::TritiumBlock *pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(mapBlocks[hashMerkleRoot]);
+        TAO::Ledger::TritiumBlock *pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(lookup_block(hashMerkleRoot));
         if(pBlock)
         {
             debug::log(2, FUNCTION, "Tritium");
@@ -2043,12 +2095,11 @@ namespace LLP
                 /* Invalidate the failed template from the cache so the miner's
                  * next new_block() receives a fresh template rather than the
                  * stale one that failed to land. */
-                auto itFailed = mapBlocks.find(hashMerkleRoot);
-                if(itFailed != mapBlocks.end())
+                if(lookup_block(hashMerkleRoot) != nullptr)
                 {
                     debug::log(0, FUNCTION, "Invalidating failed template ",
                         hashMerkleRoot.SubString(), " from cache — next new_block() will regenerate");
-                    mapBlocks.erase(itFailed);
+                    erase_block_template(hashMerkleRoot);
                 }
 
                 return false;
@@ -2695,7 +2746,7 @@ namespace LLP
                 return true;
             }
 
-            pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(mapBlocks[hashMerkle]);
+            pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(lookup_block(hashMerkle));
         }
 
         if(!pTritium)
