@@ -47,12 +47,12 @@ namespace LLP
      *    // Stateless lane
      *    LLP::Config CONFIG = MiningServerFactory::BuildConfig(
      *        MiningServerFactory::Lane::STATELESS);
-     *    STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(CONFIG);
+     *    auto stateless_server = std::make_unique<Server<StatelessMinerConnection>>(CONFIG);
      *
      *    // Legacy lane
      *    LLP::Config LEGACY_CONFIG = MiningServerFactory::BuildConfig(
      *        MiningServerFactory::Lane::LEGACY);
-     *    MINING_SERVER = new Server<Miner>(LEGACY_CONFIG);
+     *    auto legacy_server = std::make_unique<Server<Miner>>(LEGACY_CONFIG);
      *
      *  USAGE (SSL-enabled):
      *  ====================
@@ -62,12 +62,12 @@ namespace LLP
      *    // Stateless SSL lane (port 9325)
      *    LLP::Config cfg = MiningServerFactory::BuildSSLConfig(
      *        MiningServerFactory::Lane::STATELESS);
-     *    STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(cfg);
+     *    auto stateless_ssl_server = std::make_unique<Server<StatelessMinerConnection>>(cfg);
      *
      *    // Legacy SSL lane (port 8325) — guaranteed clean reconnect
      *    LLP::Config legacy_cfg = MiningServerFactory::BuildSSLConfig(
      *        MiningServerFactory::Lane::LEGACY);
-     *    MINING_SERVER = new Server<Miner>(legacy_cfg);
+     *    auto legacy_ssl_server = std::make_unique<Server<Miner>>(legacy_cfg);
      *
      *  LANE DIFFERENCES:
      *  =================
@@ -197,12 +197,12 @@ namespace LLP
          *  // Stateless mining server
          *  LLP::Config cfg = MiningServerFactory::BuildConfig(
          *      MiningServerFactory::Lane::STATELESS);
-         *  STATELESS_MINER_SERVER = new Server<StatelessMinerConnection>(cfg);
+         *  auto stateless_server = std::make_unique<Server<StatelessMinerConnection>>(cfg);
          *
          *  // Legacy mining server
          *  LLP::Config legacy_cfg = MiningServerFactory::BuildConfig(
          *      MiningServerFactory::Lane::LEGACY);
-         *  MINING_SERVER = new Server<Miner>(legacy_cfg);
+         *  auto legacy_server = std::make_unique<Server<Miner>>(legacy_cfg);
          *
          **/
         static LLP::Config BuildConfig(Lane lane)
