@@ -973,6 +973,11 @@ namespace LLP
         }
 
 #ifdef UNIT_TESTS
+        bool CheckBestHeightForTests()
+        {
+            return check_best_height();
+        }
+
         TAO::Ledger::Block* RegisterTemplateForTests(TAO::Ledger::Block* pBlock)
         {
             return register_block_template(pBlock);
@@ -981,6 +986,21 @@ namespace LLP
         TAO::Ledger::Block* LookupTemplateForTests(const uint512_t& hashMerkleRoot) const
         {
             return lookup_block(hashMerkleRoot);
+        }
+
+        bool FindTemplateForTests(const uint512_t& hashMerkleRoot)
+        {
+            return find_block(hashMerkleRoot);
+        }
+
+        bool SignBlockForTests(uint64_t nNonce, const uint512_t& hashMerkleRoot)
+        {
+            return sign_block(nNonce, hashMerkleRoot);
+        }
+
+        bool ValidateBlockForTests(const uint512_t& hashMerkleRoot)
+        {
+            return validate_block(hashMerkleRoot);
         }
 #endif
 

@@ -53,7 +53,7 @@ TEST_CASE("Legacy template registry tracks same-height reorg anchors", "[llp][mi
     TAO::Ledger::ChainState::nBestHeight.store(77);
     TAO::Ledger::ChainState::hashBestChain.store(uint1024_t(111));
 
-    REQUIRE(miner.check_best_height());
+    REQUIRE(miner.CheckBestHeightForTests());
 
     auto* pBlock = new TAO::Ledger::TritiumBlock();
     pBlock->hashMerkleRoot = uint512_t(222);
@@ -62,12 +62,12 @@ TEST_CASE("Legacy template registry tracks same-height reorg anchors", "[llp][mi
 
     REQUIRE(miner.RegisterTemplateForTests(pBlock) == pBlock);
     REQUIRE(miner.LookupTemplateForTests(pBlock->hashMerkleRoot) == pBlock);
-    REQUIRE(miner.find_block(pBlock->hashMerkleRoot));
+    REQUIRE(miner.FindTemplateForTests(pBlock->hashMerkleRoot));
 
     TAO::Ledger::ChainState::hashBestChain.store(uint1024_t(333));
 
-    REQUIRE(miner.check_best_height());
-    REQUIRE_FALSE(miner.find_block(uint512_t(222)));
+    REQUIRE(miner.CheckBestHeightForTests());
+    REQUIRE_FALSE(miner.FindTemplateForTests(uint512_t(222)));
     REQUIRE(miner.LookupTemplateForTests(uint512_t(222)) == nullptr);
 }
 
@@ -77,14 +77,14 @@ TEST_CASE("Legacy template lookups do not mutate cache on misses", "[llp][miner]
     LLP::Miner miner;
     const uint512_t hashMissing(444);
 
-    REQUIRE_FALSE(miner.find_block(hashMissing));
+    REQUIRE_FALSE(miner.FindTemplateForTests(hashMissing));
     REQUIRE(miner.LookupTemplateForTests(hashMissing) == nullptr);
 
-    REQUIRE_FALSE(miner.sign_block(123, hashMissing));
-    REQUIRE_FALSE(miner.find_block(hashMissing));
+    REQUIRE_FALSE(miner.SignBlockForTests(123, hashMissing));
+    REQUIRE_FALSE(miner.FindTemplateForTests(hashMissing));
     REQUIRE(miner.LookupTemplateForTests(hashMissing) == nullptr);
 
-    REQUIRE_FALSE(miner.validate_block(hashMissing));
-    REQUIRE_FALSE(miner.find_block(hashMissing));
+    REQUIRE_FALSE(miner.ValidateBlockForTests(hashMissing));
+    REQUIRE_FALSE(miner.FindTemplateForTests(hashMissing));
     REQUIRE(miner.LookupTemplateForTests(hashMissing) == nullptr);
 }
