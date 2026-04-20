@@ -75,6 +75,8 @@ namespace LLP
                 Event(EVENTS::HEADER);
                 nAvailable -= 4;
 
+                /* Skip reserve for oversized declarations; validation disconnects them later
+                 * without trusting the wire length enough to allocate here. */
                 if(INCOMING.LENGTH > 0 && INCOMING.LENGTH <= OpcodeUtility::MAX_ANY_PACKET_LENGTH)
                     INCOMING.DATA.reserve(INCOMING.LENGTH);
             }

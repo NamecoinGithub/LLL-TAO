@@ -390,7 +390,8 @@ namespace LLP
 
         /** SendStatelessTemplate
          *
-         *  Send a complete mining template using 16-bit opcode 0xD081 (STATELESS_GET_BLOCK).
+         *  Send a complete mining template using mirrored GET_BLOCK opcode 0xD081
+         *  (Mirror(0x81) / STATELESS_GET_BLOCK).
          *  This is used by the stateless mining protocol for NexusMiner.
          *
          *  Packet format (228 bytes total):

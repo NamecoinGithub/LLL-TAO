@@ -297,9 +297,7 @@ namespace LLP
             BYTES.reserve(5 + DATA.size());
             BYTES.push_back(HEADER);
 
-            /* Log packet header info */
-            std::string strLog = strContext.empty() ? "Packet::GetBytes" : strContext;
-            (void)strLog;
+            (void)strContext;
 
             /* Legacy framing always includes the 4-byte length field. */
             BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
