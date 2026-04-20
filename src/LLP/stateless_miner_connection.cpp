@@ -32,6 +32,7 @@ ________________________________________________________________________________
 #include <LLP/include/session_status_utility.h>
 #include <LLP/include/session_start_packet.h>
 #include <LLP/include/round_state_utility.h>
+#include <LLP/include/mining_template_payload.h>
 
 #include <LLP/include/stateless_get_block_handler.h>
 #include <LLP/templates/events.h>
@@ -3238,21 +3239,25 @@ namespace LLP
             return nullptr;
         }
 
-        debug::log(0, FUNCTION, "REWARD BINDING DIAGNOSTIC");
-        debug::log(0, FUNCTION, "- miner reward string: NOT AVAILABLE (node does not receive miner reward string during template creation)");
-        debug::log(0, FUNCTION, "- decoded reward register/account hash: ", fRewardBound_snap ? hashRewardAddress_snap.GetHex() : "NOT AVAILABLE");
-        debug::log(0, FUNCTION, "- bound reward hash from cache/session: ", FullHexOrUnset(hashRewardAddress_snap));
-        debug::log(0, FUNCTION, "- bound reward source: ", strRewardSource);
-        debug::log(0, FUNCTION, "- session genesis used for ChaCha20 KDF: ", FullHexOrUnset(hashGenesis_snap));
-        debug::log(0, FUNCTION, "- reward hash == bound reward hash: ",
-                   YesNo(!fRewardBound_snap || hashReward == hashRewardAddress_snap));
-        debug::log(0, FUNCTION, "- consistency result: ",
-                   PassFail(!fRewardBound_snap || hashReward == hashRewardAddress_snap));
-        
-        debug::log(0, "   Block parameters:");
-        debug::log(0, "      Channel: ", nChannel_snap);
-        debug::log(0, "      Session ID: ", nSessionId_snap);
-        debug::log(0, "      Falcon authenticated: ", fAuthenticated_snap ? "Yes" : "No");
+        const bool fVerboseTemplateDiagnostics = (config::nVerbose >= 3);
+        if(fVerboseTemplateDiagnostics)
+        {
+            debug::log(2, FUNCTION, "REWARD BINDING DIAGNOSTIC");
+            debug::log(2, FUNCTION, "- miner reward string: NOT AVAILABLE (node does not receive miner reward string during template creation)");
+            debug::log(2, FUNCTION, "- decoded reward register/account hash: ", fRewardBound_snap ? hashRewardAddress_snap.GetHex() : "NOT AVAILABLE");
+            debug::log(2, FUNCTION, "- bound reward hash from cache/session: ", FullHexOrUnset(hashRewardAddress_snap));
+            debug::log(2, FUNCTION, "- bound reward source: ", strRewardSource);
+            debug::log(2, FUNCTION, "- session genesis used for ChaCha20 KDF: ", FullHexOrUnset(hashGenesis_snap));
+            debug::log(2, FUNCTION, "- reward hash == bound reward hash: ",
+                       YesNo(!fRewardBound_snap || hashReward == hashRewardAddress_snap));
+            debug::log(2, FUNCTION, "- consistency result: ",
+                       PassFail(!fRewardBound_snap || hashReward == hashRewardAddress_snap));
+
+            debug::log(2, "   Block parameters:");
+            debug::log(2, "      Channel: ", nChannel_snap);
+            debug::log(2, "      Session ID: ", nSessionId_snap);
+            debug::log(2, "      Falcon authenticated: ", fAuthenticated_snap ? "Yes" : "No");
+        }
 
         /* SESSION::DEFAULT health pre-check: fail fast before calling
          * CreateBlockForStatelessMining() which requires the wallet session.
@@ -3276,7 +3281,7 @@ namespace LLP
             {
                 SecureString strPIN;
                 RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
-                debug::log(0, FUNCTION, "Wallet auto-unlocked for mining");
+                debug::log(2, FUNCTION, "Wallet auto-unlocked for mining");
             }
             catch(const std::exception& e)
             {
@@ -3291,7 +3296,6 @@ namespace LLP
         TAO::Ledger::TritiumBlock* pBlock = nullptr;
         
         /* Use simplified utility function */
-        debug::log(0, "   Calling CreateBlockForStatelessMining...");
         uint32_t nAttempts = 0;
         while(true) {
             /* Check for shutdown during template creation loop */
@@ -3311,12 +3315,12 @@ namespace LLP
             );
             
             if(!pBlock) {
-                debug::log(0, ANSI_COLOR_BRIGHT_RED, "   FAILED: CreateBlockForStatelessMining returned nullptr", ANSI_COLOR_RESET);
+                debug::log(2, FUNCTION, "CreateBlockForStatelessMining returned nullptr");
                 return nullptr;
             }
             
             if(is_prime_mod(nBitMask, pBlock)) {
-                debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   SUCCESS: Block created (attempts: ", nAttempts, ")", ANSI_COLOR_RESET);
+                debug::log(3, FUNCTION, "Block created after ", nAttempts, " attempt(s)");
                 break;
             }
             
@@ -3337,7 +3341,6 @@ namespace LLP
         }
         
         /* Sync with blockchain (detects forks automatically) */
-        debug::log(0, "   📡 Syncing channel manager with blockchain...");
         if(!pChannelMgr->SyncWithBlockchain())
         {
             debug::error(FUNCTION, "Failed to sync channel manager with blockchain");
@@ -3366,33 +3369,30 @@ namespace LLP
         /* Get comprehensive height info from manager */
         HeightInfo info = pChannelMgr->GetHeightInfo();
         
-        /* Log comprehensive state (PR #136: Enhanced diagnostics) */
-        debug::log(0, "   ✓ Channel state synchronized:");
-        debug::log(0, "      Channel: ", pChannelMgr->GetChannelName());
-        debug::log(0, "      Unified blockchain height: ", info.nUnifiedHeight, " (current)");
-        debug::log(0, "      ", pChannelMgr->GetChannelName(), " channel height: ", info.nChannelHeight, " (last block in channel)");
-        debug::log(0, "      Template mining for unified height: ", info.nNextUnifiedHeight);
-        debug::log(0, "      Template mining for ", pChannelMgr->GetChannelName(), " height: ", info.nNextChannelHeight);
-        
-        if(info.fForkDetected)
+        if(fVerboseTemplateDiagnostics)
         {
-            debug::log(0, "      ⚠ Fork recently detected (", info.nBlocksRolledBack, " blocks rolled back)");
+            debug::log(2, "   ✓ Channel state synchronized:");
+            debug::log(2, "      Channel: ", pChannelMgr->GetChannelName());
+            debug::log(2, "      Unified blockchain height: ", info.nUnifiedHeight, " (current)");
+            debug::log(2, "      ", pChannelMgr->GetChannelName(), " channel height: ", info.nChannelHeight, " (last block in channel)");
+            debug::log(2, "      Template mining for unified height: ", info.nNextUnifiedHeight);
+            debug::log(2, "      Template mining for ", pChannelMgr->GetChannelName(), " height: ", info.nNextChannelHeight);
+
+            if(info.fForkDetected)
+                debug::log(2, "      ⚠ Fork recently detected (", info.nBlocksRolledBack, " blocks rolled back)");
+
+            debug::log(2, "   Creating template metadata:");
+            debug::log(2, "      unified_current (ChainState best):  ", info.nUnifiedHeight);
+            debug::log(2, "      unified_next    (best + 1):         ", info.nNextUnifiedHeight);
+            debug::log(2, "      channel_current (last in channel):  ", info.nChannelHeight);
+            debug::log(2, "      channel_target  (next in channel):  ", info.nNextChannelHeight, " = pBlock->nHeight=", pBlock->nHeight);
+            debug::log(2, "      prev_hash       (template anchor):  ", pBlock->hashPrevBlock.SubString());
+            debug::log(2, "      best_hash       (current tip):      ", info.hashCurrentBlock.SubString());
+            debug::log(2, FUNCTION, "hashPrevBlock FULL (MSB-first): ", pBlock->hashPrevBlock.GetHex());
+            debug::log(2, FUNCTION, "hashPrevBlock SubString (LSB, legacy display): ", pBlock->hashPrevBlock.SubString());
+            debug::log(2, FUNCTION, "hashBestChain SubString (current tip):         ", TAO::Ledger::ChainState::hashBestChain.load().SubString());
+            debug::log(2, FUNCTION, "hashPrevBlock == hashBestChain: ", (pBlock->hashPrevBlock == TAO::Ledger::ChainState::hashBestChain.load()));
         }
-        
-        /* Create metadata with heights from manager (PR #136) */
-        /* Use nNextChannelHeight because template is mining for NEXT block in channel */
-        debug::log(0, "   Creating template metadata:");
-        debug::log(0, "      unified_current (ChainState best):  ", info.nUnifiedHeight);
-        debug::log(0, "      unified_next    (best + 1):         ", info.nNextUnifiedHeight);
-        debug::log(0, "      channel_current (last in channel):  ", info.nChannelHeight);
-        debug::log(0, "      channel_target  (next in channel):  ", info.nNextChannelHeight, " = pBlock->nHeight=", pBlock->nHeight);
-        debug::log(0, "      prev_hash       (template anchor):  ", pBlock->hashPrevBlock.SubString());
-        debug::log(0, "      best_hash       (current tip):      ", info.hashCurrentBlock.SubString());
-        /* Full hashPrevBlock hex (MSB-first via GetHex()) for cross-verification with miner's GetBytes()[0..7] log. */
-        debug::log(2, FUNCTION, "hashPrevBlock FULL (MSB-first): ", pBlock->hashPrevBlock.GetHex());
-        debug::log(2, FUNCTION, "hashPrevBlock SubString (LSB, legacy display): ", pBlock->hashPrevBlock.SubString());
-        debug::log(2, FUNCTION, "hashBestChain SubString (current tip):         ", TAO::Ledger::ChainState::hashBestChain.load().SubString());
-        debug::log(2, FUNCTION, "hashPrevBlock == hashBestChain: ", (pBlock->hashPrevBlock == TAO::Ledger::ChainState::hashBestChain.load()));
         
         /* Capture the merkle root key before the move — pBlock may be invalid after emplace */
         const uint512_t hashMerkleKey = pBlock->hashMerkleRoot;
@@ -3407,13 +3407,16 @@ namespace LLP
             std::lock_guard<std::mutex> map_lk(MUTEX);
             auto result = mapBlocks.emplace(hashMerkleKey, std::move(meta));
 
-            debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "   ✓ Template stored in map with metadata", ANSI_COLOR_RESET);
-            debug::log(0, "      Merkle root: ", hashMerkleKey.SubString());
-            debug::log(0, "      Unified height (current):  ", info.nUnifiedHeight);
-            debug::log(0, "      Channel height (target):   ", info.nNextChannelHeight, " (mining for next ", pChannelMgr->GetChannelName(), " block)");
-            debug::log(0, "      Channel: ", pChannelMgr->GetChannelName());
-            debug::log(0, "      Creation time: ", nCreationTime);
-            debug::log(0, "      Templates in map: ", mapBlocks.size());
+            if(fVerboseTemplateDiagnostics)
+            {
+                debug::log(2, "   ✓ Template stored in map with metadata");
+                debug::log(2, "      Merkle root: ", hashMerkleKey.SubString());
+                debug::log(2, "      Unified height (current):  ", info.nUnifiedHeight);
+                debug::log(2, "      Channel height (target):   ", info.nNextChannelHeight, " (mining for next ", pChannelMgr->GetChannelName(), " block)");
+                debug::log(2, "      Channel: ", pChannelMgr->GetChannelName());
+                debug::log(2, "      Creation time: ", nCreationTime);
+                debug::log(2, "      Templates in map: ", mapBlocks.size());
+            }
 
             /* ✅ ADD: Verify stored value matches what we intended */
             if(result.second)  // Successfully inserted
@@ -3426,7 +3429,7 @@ namespace LLP
                 }
                 else
                 {
-                    debug::log(0, "   ✓ Verified: Template has correct nChannelHeight=", info.nNextChannelHeight);
+                    debug::log(3, FUNCTION, "Verified template nChannelHeight=", info.nNextChannelHeight);
                 }
             }
             else
@@ -4196,21 +4199,28 @@ namespace LLP
                         debug::log(1, FUNCTION, "   This may indicate system clock was adjusted backwards");
                     }
                     
-                    debug::log(2, "");
-                    debug::log(2, "   ✅ NOTIFICATION FLOW DETECTED:");
-                    debug::log(2, "      Time since last notification: ", nTimeSinceNotification, " seconds");
-                    debug::log(2, "      This appears to be a response to:");
-                    debug::log(2, "         ", (context.nChannel == 1 ? "PRIME_BLOCK_AVAILABLE" : "HASH_BLOCK_AVAILABLE"));
-                    debug::log(2, "         (NEW_", (context.nChannel == 1 ? "PRIME" : "HASH"), "_AVAILABLE)");
+                    if(config::nVerbose >= 3)
+                    {
+                        debug::log(2, "");
+                        debug::log(2, "   ✅ NOTIFICATION FLOW DETECTED:");
+                        debug::log(2, "      Time since last notification: ", nTimeSinceNotification, " seconds");
+                        debug::log(2, "      This appears to be a response to:");
+                        debug::log(2, "         ", (context.nChannel == 1 ? "PRIME_BLOCK_AVAILABLE" : "HASH_BLOCK_AVAILABLE"));
+                        debug::log(2, "         (NEW_", (context.nChannel == 1 ? "PRIME" : "HASH"), "_AVAILABLE)");
+                    }
                 }
                 else
                 {
-                    debug::log(2, "");
-                    debug::log(2, "   ℹ️  POLLING MODE:");
-                    debug::log(2, "      This request is NOT following a notification.");
-                    debug::log(2, "      Client may be using legacy polling flow.");
+                    if(config::nVerbose >= 3)
+                    {
+                        debug::log(2, "");
+                        debug::log(2, "   ℹ️  POLLING MODE:");
+                        debug::log(2, "      This request is NOT following a notification.");
+                        debug::log(2, "      Client may be using legacy polling flow.");
+                    }
                 }
-                debug::log(2, "════════════════════════════════════════════════════════════");
+                if(config::nVerbose >= 3)
+                    debug::log(2, "════════════════════════════════════════════════════════════");
 
                 /* Stateless lane per-connection rate limiter for GET_BLOCK.
                  *
@@ -4240,7 +4250,7 @@ namespace LLP
                 }
 
                 m_rateLimit.tLastGetBlock = now;
-                debug::log(3, FUNCTION, "GET_BLOCK rate budget: key=", strRateKey,
+                debug::log(4, FUNCTION, "GET_BLOCK rate budget: key=", strRateKey,
                     " count=", nCurrentInWindow, "/", RateLimitConfig::MAX_GET_BLOCK_PER_MINUTE);
                 return true;
             }
@@ -4418,14 +4428,14 @@ namespace LLP
             }
             else if (hashBestChain != m_hashLastPushedChain)
             {
-                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                debug::log(3, FUNCTION, "Push throttle bypassed — new chain tip ",
                            hashBestChain.SubString(), " (was ",
                            m_hashLastPushedChain.SubString(), ")");
             }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
@@ -4469,38 +4479,39 @@ namespace LLP
             nChannel, ProtocolLane::STATELESS, stateBest, stateChannel, nDifficulty,
             hashBestChain);
         
-        /* Log the notification details BEFORE sending for diagnostics */
-        const std::string strOpcodeName = (nChannel == 1) ? 
-            "PRIME_BLOCK_AVAILABLE (NEW_PRIME_AVAILABLE)" : 
-            "HASH_BLOCK_AVAILABLE (NEW_HASH_AVAILABLE)";
-        
-        uint32_t nChannelHeight = stateChannel.nChannelHeight;
-        
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "📢 SENDING PUSH NOTIFICATION TO MINER");
-        debug::log(2, "════════════════════════════════════════════════════════════");
-        debug::log(2, "   Opcode:         ", strOpcodeName);
-        debug::log(2, "   Opcode Value:   0x", std::hex, static_cast<uint32_t>(notification.HEADER), std::dec, " (", static_cast<uint32_t>(notification.HEADER), ")");
-        debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
-        debug::log(2, "   Channel:        ", nChannel, " (", GetChannelName(nChannel), ")");
-        debug::log(2, "   Payload:");
-        debug::log(2, "      Unified Height:  ", stateBest.nHeight);
-        debug::log(2, "      Channel Height:  ", nChannelHeight);
-        debug::log(2, "      Difficulty (nBits): 0x", std::hex, nDifficulty, std::dec);
-        debug::log(2, "      Difficulty (calc):  ", std::fixed, std::setprecision(6), 
-                   TAO::Ledger::GetDifficulty(nDifficulty, nChannel));
-        debug::log(2, "   Packet Size:    ", notification.LENGTH, " bytes");
-        debug::log(0, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", hashBestChain.SubString(),
-                   " (template anchor embedded in push notification, unified height ", stateBest.nHeight + 1, ")");
-        debug::log(2, "");
-        debug::log(2, "   ⚠️  EXPECTED CLIENT ACTION:");
-        debug::log(2, "      Client should respond with GET_BLOCK (129/0x81)");
-        debug::log(2, "      to fetch new mining template for this channel.");
-        debug::log(2, "");
-        debug::log(2, "   🔄 FALLBACK BEHAVIOR:");
-        debug::log(2, "      If client times out or doesn't receive this,");
-        debug::log(2, "      client may fall back to polling GET_ROUND (133/0x85).");
-        debug::log(2, "════════════════════════════════════════════════════════════");
+        if(config::nVerbose >= 3)
+        {
+            const std::string strOpcodeName = (nChannel == 1) ?
+                "PRIME_BLOCK_AVAILABLE (NEW_PRIME_AVAILABLE)" :
+                "HASH_BLOCK_AVAILABLE (NEW_HASH_AVAILABLE)";
+            const uint32_t nChannelHeight = stateChannel.nChannelHeight;
+
+            debug::log(2, "════════════════════════════════════════════════════════════");
+            debug::log(2, "📢 SENDING PUSH NOTIFICATION TO MINER");
+            debug::log(2, "════════════════════════════════════════════════════════════");
+            debug::log(2, "   Opcode:         ", strOpcodeName);
+            debug::log(2, "   Opcode Value:   0x", std::hex, static_cast<uint32_t>(notification.HEADER), std::dec, " (", static_cast<uint32_t>(notification.HEADER), ")");
+            debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
+            debug::log(2, "   Channel:        ", nChannel, " (", GetChannelName(nChannel), ")");
+            debug::log(2, "   Payload:");
+            debug::log(2, "      Unified Height:  ", stateBest.nHeight);
+            debug::log(2, "      Channel Height:  ", nChannelHeight);
+            debug::log(2, "      Difficulty (nBits): 0x", std::hex, nDifficulty, std::dec);
+            debug::log(2, "      Difficulty (calc):  ", std::fixed, std::setprecision(6),
+                       TAO::Ledger::GetDifficulty(nDifficulty, nChannel));
+            debug::log(2, "   Packet Size:    ", notification.LENGTH, " bytes");
+            debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", hashBestChain.SubString(),
+                       " (template anchor embedded in push notification, unified height ", stateBest.nHeight + 1, ")");
+            debug::log(2, "");
+            debug::log(2, "   ⚠️  EXPECTED CLIENT ACTION:");
+            debug::log(2, "      Client should respond with GET_BLOCK (129/0x81)");
+            debug::log(2, "      to fetch new mining template for this channel.");
+            debug::log(2, "");
+            debug::log(2, "   🔄 FALLBACK BEHAVIOR:");
+            debug::log(2, "      If client times out or doesn't receive this,");
+            debug::log(2, "      client may fall back to polling GET_ROUND (133/0x85).");
+            debug::log(2, "════════════════════════════════════════════════════════════");
+        }
 
         /* Enqueue for deferred sending by FLUSH_THREAD.
          * This decouples the block-acceptance notification thread from
@@ -4586,14 +4597,14 @@ namespace LLP
             }
             else if (hashCurrentChain != m_hashLastPushedChain)
             {
-                debug::log(2, FUNCTION, "Stateless template throttle bypassed — new chain tip ",
+                debug::log(3, FUNCTION, "Stateless template throttle bypassed — new chain tip ",
                            hashCurrentChain.SubString(), " (was ",
                            m_hashLastPushedChain.SubString(), ")");
             }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
@@ -4634,10 +4645,13 @@ namespace LLP
         CanonicalChainState canonicalSnap = CanonicalChainState::from_chain_state(
             stateBest, stateChannel, nDifficulty);
         
-        debug::log(2, FUNCTION, "Canonical snapshot: unified=", canonicalSnap.canonical_unified_height,
-                   " channel=", canonicalSnap.canonical_channel_height,
-                   " nBits=0x", std::hex, canonicalSnap.canonical_difficulty_nbits, std::dec,
-                   " stale=", canonicalSnap.is_canonically_stale() ? "yes" : "no");
+        if(config::nVerbose >= 3)
+        {
+            debug::log(2, FUNCTION, "Canonical snapshot: unified=", canonicalSnap.canonical_unified_height,
+                       " channel=", canonicalSnap.canonical_channel_height,
+                       " nBits=0x", std::hex, canonicalSnap.canonical_difficulty_nbits, std::dec,
+                       " stale=", canonicalSnap.is_canonically_stale() ? "yes" : "no");
+        }
         
         /* Create new block template - note: new_block() stores in mapBlocks, so we don't own the pointer */
         TAO::Ledger::Block* pBlock = new_block();
@@ -4653,30 +4667,22 @@ namespace LLP
             return;
         }
         
-        /* Serialize block template (expected: 216 bytes for Tritium) */
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if (vBlockData.empty() || vBlockData.size() != TRITIUM_BLOCK_SIZE)
+        const SharedTemplatePayloadResult sharedTemplate =
+            BuildSharedTemplatePayload(pBlock, "Stateless push");
+        if(!sharedTemplate.fSuccess)
         {
-            debug::error(FUNCTION, "Invalid block serialization: ", vBlockData.size(), 
-                        " bytes (expected ", TRITIUM_BLOCK_SIZE, ")");
-            debug::log(2, "════════════════════════════════════════════════════════════");
             return;
         }
-        
-        /* Build 16-bit opcode packet (228 bytes total: 12 metadata + 216 template)
-         * Uses RoundStateUtility::SerializeTemplateMetadata() for consistent big-endian
-         * serialization across all template-sending paths. */
-        uint32_t nChannelHeight = stateChannel.nChannelHeight;
 
-        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-            static_cast<uint32_t>(stateBest.nHeight), nChannelHeight, nDifficulty);
+        if(sharedTemplate.vPayload.size() != (METADATA_SIZE + TRITIUM_BLOCK_SIZE))
+        {
+            debug::error(FUNCTION, "Invalid block serialization: ", sharedTemplate.vPayload.size(),
+                        " bytes (expected ", (METADATA_SIZE + TRITIUM_BLOCK_SIZE), ")");
+            return;
+        }
 
         StatelessPacket notification(StatelessOpcodes::STATELESS_GET_BLOCK);  // 16-bit constructor
-        notification.DATA.reserve(vMetadata.size() + vBlockData.size());
-        notification.DATA.insert(notification.DATA.end(), vMetadata.begin(), vMetadata.end());
-        
-        /* Add 216-byte block template [12-227] */
-        notification.DATA.insert(notification.DATA.end(), vBlockData.begin(), vBlockData.end());
+        notification.DATA = sharedTemplate.vPayload;
         
         /* Set LENGTH field to match DATA size before serialization.
          * CRITICAL: Unlike error responses (which always have 1 byte of data),
@@ -4684,24 +4690,28 @@ namespace LLP
          * Must use DATA.size() instead of hardcoded value to ensure correct framing. */
         notification.LENGTH = static_cast<uint32_t>(notification.DATA.size());
         
-        debug::log(2, "   Payload:");
-        debug::log(2, "      Unified Height:  ", stateBest.nHeight);
-        debug::log(2, "      Channel Height:  ", nChannelHeight);
-        debug::log(2, "      Difficulty (nBits): 0x", std::hex, nDifficulty, std::dec);
-        debug::log(2, "      Difficulty (calc):  ", std::fixed, std::setprecision(6), 
-                   TAO::Ledger::GetDifficulty(nDifficulty, nChannel));
-        debug::log(2, "      Block Hash:      ", pBlock->GetHash().SubString());
-        debug::log(2, "      Merkle Root:     ", pBlock->hashMerkleRoot.SubString());
-        debug::log(0, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", pBlock->hashPrevBlock.SubString(),
-                   " (template anchor baked in, unified height ", pBlock->nHeight, ")");
-        debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock FULL (MSB-first): ", pBlock->hashPrevBlock.GetHex());
-        debug::log(2, "   Total Size:     ", notification.DATA.size(), " bytes (", 
-                   METADATA_SIZE, " meta + ", TRITIUM_BLOCK_SIZE, " template)");
-        debug::log(2, "");
-        debug::log(2, "   ⚡ STATELESS PROTOCOL:");
-        debug::log(2, "      Miner can begin hashing immediately (no GET_BLOCK needed)");
-        debug::log(2, "      Template pushed automatically on new blocks");
-        debug::log(2, "════════════════════════════════════════════════════════════");
+        if(config::nVerbose >= 3)
+        {
+            const uint32_t nChannelHeight = stateChannel.nChannelHeight;
+            debug::log(2, "   Payload:");
+            debug::log(2, "      Unified Height:  ", stateBest.nHeight);
+            debug::log(2, "      Channel Height:  ", nChannelHeight);
+            debug::log(2, "      Difficulty (nBits): 0x", std::hex, nDifficulty, std::dec);
+            debug::log(2, "      Difficulty (calc):  ", std::fixed, std::setprecision(6),
+                       TAO::Ledger::GetDifficulty(nDifficulty, nChannel));
+            debug::log(2, "      Block Hash:      ", pBlock->GetHash().SubString());
+            debug::log(2, "      Merkle Root:     ", pBlock->hashMerkleRoot.SubString());
+            debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", pBlock->hashPrevBlock.SubString(),
+                       " (template anchor baked in, unified height ", pBlock->nHeight, ")");
+            debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock FULL (MSB-first): ", pBlock->hashPrevBlock.GetHex());
+            debug::log(2, "   Total Size:     ", notification.DATA.size(), " bytes (",
+                       METADATA_SIZE, " meta + ", TRITIUM_BLOCK_SIZE, " template)");
+            debug::log(2, "");
+            debug::log(2, "   ⚡ STATELESS PROTOCOL:");
+            debug::log(2, "      Miner can begin hashing immediately (no GET_BLOCK needed)");
+            debug::log(2, "      Template pushed automatically on new blocks");
+            debug::log(2, "════════════════════════════════════════════════════════════");
+        }
         
         /* Enqueue for deferred sending by FLUSH_THREAD.
          * Consistent with SendChannelNotification() — avoids SOCKET_MUTEX

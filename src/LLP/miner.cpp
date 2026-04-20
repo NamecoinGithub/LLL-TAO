@@ -1873,11 +1873,11 @@ namespace LLP
         
         if(fRewardBound && hashRewardAddress != 0) {
             hashReward = hashRewardAddress;
-            debug::log(2, FUNCTION, "Reward: explicit address");
+            debug::log(3, FUNCTION, "Reward: explicit address");
         }
         else if(hashGenesis != 0) {
             hashReward = hashGenesis;
-            debug::log(2, FUNCTION, "Reward: genesis fallback");
+            debug::log(3, FUNCTION, "Reward: genesis fallback");
         }
         else {
             // Wallet mode fallback (legacy)
@@ -1886,7 +1886,7 @@ namespace LLP
                 RECURSIVE(TAO::API::Authentication::Unlock(strPIN, TAO::Ledger::PinUnlock::MINING));
                 const auto& pCredentials = TAO::API::Authentication::Credentials();
                 hashReward = pCredentials->Genesis();
-                debug::log(2, FUNCTION, "Reward: wallet genesis");
+                debug::log(3, FUNCTION, "Reward: wallet genesis");
             }
             catch(const std::exception& e) {
                 debug::error(FUNCTION, "No reward address available: ", e.what());
@@ -1925,7 +1925,7 @@ namespace LLP
             pBlock = nullptr;
         }
         
-        debug::log(2, FUNCTION, "Created block ", pBlock->ProofHash().SubString());
+        debug::log(3, FUNCTION, "Created block ", pBlock->ProofHash().SubString());
         return register_block_template(pBlock);
     }
 
@@ -2216,14 +2216,14 @@ namespace LLP
             else if (hashBestChain != m_hashLastPushedChain)
             {
                 /* Hash-change bypass: chain tip advanced — always deliver. */
-                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                debug::log(3, FUNCTION, "Push throttle bypassed — new chain tip ",
                            hashBestChain.SubString(), " (was ",
                            m_hashLastPushedChain.SubString(), ")");
             }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — same tip, work delivery delayed");
                 return;
@@ -2264,7 +2264,7 @@ namespace LLP
          * path and the DataThread's ReadPacket() loop. */
         QueuePacket(notification);
         
-        debug::log(0, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", hashBestChain.SubString(),
+        debug::log(3, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", hashBestChain.SubString(),
                    " (template anchor embedded in push notification, unified height ", stateBest.nHeight + 1, ")");
         debug::log(2, FUNCTION, "Sent ", GetChannelName(nSubscribedChannel), 
                    " notification to ", GetAddress().ToStringIP(),
@@ -2416,87 +2416,81 @@ namespace LLP
          * performs per-connection rate limiting (25/60s), calls new_block(),
          * and serialises the 228-byte BLOCK_DATA payload.
          * No cross-lane state sharing. */
+        uint32_t nSessionIdSnapshot = 0;
+        uint256_t hashGenesisSnapshot = 0;
+        std::string strPeer;
         {
             LOCK(MUTEX);
+            nSessionIdSnapshot = nSessionId;
+            hashGenesisSnapshot = hashGenesis;
+            strPeer = GetAddress().ToStringIP();
+        }
 
-            /* BUG #4 fix: Validate nSessionId is non-zero before rate-limit lookups.
-             * If nSessionId is 0 (uninitialized), all such connections would share a
-             * single rate limiter bucket, allowing one miner to exhaust the budget for others. */
-            if(nSessionId == 0)
+        /* BUG #4 fix: Validate nSessionId is non-zero before rate-limit lookups.
+         * If nSessionId is 0 (uninitialized), all such connections would share a
+         * single rate limiter bucket, allowing one miner to exhaust the budget for others. */
+        if(nSessionIdSnapshot == 0)
+        {
+            debug::error(FUNCTION, "GET_BLOCK rejected: nSessionId is 0 (uninitialized) from ", strPeer);
+            respond_auto(BLOCK_REJECTED,
+                BuildGetBlockControlPayload(GetBlockPolicyReason::SESSION_INVALID, 0));
+            return true;
+        }
+
+        LegacyGetBlockRequest req;
+        req.nSessionId = nSessionIdSnapshot;
+        req.pRateLimiter = &m_getBlockRateLimiter;
+        req.fnCreateBlock = [this]() -> TAO::Ledger::Block*
+        {
+            return new_block();
+        };
+
+        LegacyGetBlockResult result = LegacyGetBlockHandler(req);
+
+        if(!result.fSuccess)
+        {
+            respond_auto(BLOCK_REJECTED,
+                BuildGetBlockControlPayload(result.eReason, result.nRetryAfterMs));
+
+            if(result.eReason == GetBlockPolicyReason::RATE_LIMIT_EXCEEDED)
             {
-                debug::error(FUNCTION, "GET_BLOCK rejected: nSessionId is 0 (uninitialized) from ",
-                             GetAddress().ToStringIP());
-                respond_auto(BLOCK_REJECTED,
-                    BuildGetBlockControlPayload(GetBlockPolicyReason::SESSION_INVALID, 0));
-                return true;
-            }
-
-            LegacyGetBlockRequest req;
-            req.nSessionId = nSessionId;
-            req.pRateLimiter = &m_getBlockRateLimiter;
-            req.fnCreateBlock = [this]() -> TAO::Ledger::Block*
-            {
-                return new_block();
-            };
-
-            LegacyGetBlockResult result = LegacyGetBlockHandler(req);
-
-            if(!result.fSuccess)
-            {
-                respond_auto(BLOCK_REJECTED,
-                    BuildGetBlockControlPayload(result.eReason, result.nRetryAfterMs));
-
-                if(result.eReason == GetBlockPolicyReason::RATE_LIMIT_EXCEEDED)
+                bool fDisconnect = false;
+                uint32_t nStrikes = 0;
                 {
-                    /* Track consecutive rate-limit violations (legacy lane). */
-                    const uint32_t nStrikes = ++m_nConsecutiveRateLimitStrikes;
+                    LOCK(MUTEX);
+                    nStrikes = ++m_nConsecutiveRateLimitStrikes;
+                    fDisconnect = (nStrikes >= MiningConstants::RATE_LIMIT_STRIKE_THRESHOLD);
+                }
 
-                    if(nStrikes >= MiningConstants::RATE_LIMIT_STRIKE_THRESHOLD)
-                    {
-                        debug::error(FUNCTION,
-                            "Closing miner connection (legacy lane) — ", nStrikes,
-                            " consecutive GET_BLOCK rate-limit violations without a"
-                            " successful request (tight-loop self-DDoS prevention)"
-                            " peer=", GetAddress().ToStringIP());
-
-                        /* SAFETY: lk is std::unique_lock (from LOCK(MUTEX) macro).
-                         * Explicit unlock before Disconnect() avoids holding the lock
-                         * during socket teardown.  The unique_lock destructor is a
-                         * no-op on an already-unlocked lock (owns_lock() == false). */
-                        lk.unlock();
-                        Disconnect();
-                        return true;
-                    }
-
-                    /* Suspend reads for retry_after_ms (floor: 1 second). */
-                    const uint32_t nSleepMs = std::max(result.nRetryAfterMs, 1000u);
-
-                    /* SAFETY: same pattern — release the lock before sleeping so
-                     * other threads (e.g. push notifications) can progress. */
-                    lk.unlock();
-                    runtime::sleep(nSleepMs);
+                if(fDisconnect)
+                {
+                    debug::error(FUNCTION,
+                        "Closing miner connection (legacy lane) — ", nStrikes,
+                        " consecutive GET_BLOCK rate-limit violations without a"
+                        " successful request (tight-loop self-DDoS prevention)"
+                        " peer=", strPeer);
+                    Disconnect();
                     return true;
                 }
 
-                return true;
+                runtime::sleep(std::max(result.nRetryAfterMs, 1000u));
             }
 
-            /* Successful GET_BLOCK — reset the consecutive rate-limit strike counter. */
-            m_nConsecutiveRateLimitStrikes = 0;
-
-            /* Invariant: authenticated + in-budget → non-empty BLOCK_DATA */
-            assert(!result.vPayload.empty());
-
-            /* BLOCK_DATA (0xD000) is the request-response path: miner explicitly
-             * requested a template via GET_BLOCK.  This is distinct from the push
-             * path (0xD081 GET_BLOCK) used by SendStatelessTemplate() which proactively
-             * delivers templates on chain-tip advance.  Logging this distinction helps
-             * miner developers trace latency between the two delivery mechanisms. */
-            debug::log(2, FUNCTION, "BLOCK_DATA (request-response) → ", GetAddress().ToStringIP(),
-                       " session=", nSessionId, " payload=", result.vPayload.size(), " bytes");
-
-            respond_auto(BLOCK_DATA, result.vPayload);
+            return true;
         }
+
+        {
+            LOCK(MUTEX);
+            m_nConsecutiveRateLimitStrikes = 0;
+        }
+
+        /* Invariant: authenticated + in-budget → non-empty BLOCK_DATA */
+        assert(!result.vPayload.empty());
+
+        debug::log(3, FUNCTION, "BLOCK_DATA (request-response) → ", strPeer,
+                   " session=", nSessionIdSnapshot, " payload=", result.vPayload.size(), " bytes");
+
+        respond_auto(BLOCK_DATA, result.vPayload);
 
         /* Update last template unified height after sending template.
          * Uses UNIFIED height — every tip move changes hashPrevBlock,
@@ -2508,9 +2502,9 @@ namespace LLP
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
-        if(hashGenesis != 0)
+        if(hashGenesisSnapshot != 0)
         {
-            ColinMiningAgent::Get().on_get_block_received(hashGenesis.SubString(8), false);
+            ColinMiningAgent::Get().on_get_block_received(hashGenesisSnapshot.SubString(8), false);
         }
 
         return true;
