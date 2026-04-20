@@ -4540,7 +4540,7 @@ namespace LLP
                    " notification to ", GetAddress().ToStringIP(),
                    " session=", nSessionId_snap,
                    " (unified=", stateBest.nHeight, 
-                   ", channelHeight=", nChannelHeight,
+                   ", channelHeight=", stateChannel.nChannelHeight,
                    ", diff=", std::hex, nDifficulty, std::dec, ")");
 
         /* Work Item 6: Attach block template to PUSH notification.
@@ -4732,7 +4732,7 @@ namespace LLP
         debug::log(2, FUNCTION, "Sent stateless template (0xD081) to ", GetAddress().ToStringIP(),
                    " session=", nSessionId_snap,
                    " (unified=", stateBest.nHeight, 
-                   ", channel=", nChannelHeight,
+                   ", channel=", stateChannel.nChannelHeight,
                    ", diff=", std::hex, nDifficulty, std::dec, ")");
     }
 
