@@ -94,6 +94,7 @@ namespace LLP
          *  etc.) while still detecting genuinely dead sockets within seconds.
          */
         static constexpr uint32_t MINING_POLL_EMPTY_TIMEOUT_MS = 5000;
+        static constexpr uint32_t MINING_POLL_EMPTY_MAX_STRIKES = 3;
 
         /** Default poll() timeout for non-mining DataThreads (milliseconds).
          *  Mining DataThreads use a shorter timeout configured via
@@ -540,10 +541,38 @@ namespace LLP
                         (POLLFDS.at(nIndex).revents & POLLIN)
                         && CONNECTION->Timeout(nPollEmptyTimeout, Socket::READ)
                         && CONNECTION->Available() == 0;
+                    if(!fPollEmptyCandidate || fHasPartialPacket)
+                        CONNECTION->nConsecutivePollEmptyStrikes = 0;
+
                     if(fPollEmptyCandidate && !fHasPartialPacket)
                     {
                         if(fTimeoutExempt)
                         {
+                            const int32_t nSocketError = CONNECTION->RefreshSocketError();
+                            if(nSocketError != 0)
+                            {
+                                debug::log(0, FUNCTION, "DataThread[", ID, "]: POLL_EMPTY detected pending SO_ERROR for authenticated ",
+                                    ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
+                                    " so_error=", nSocketError, " — disconnecting");
+
+                                remove_connection_with_event(nIndex, DISCONNECT::ERRORS);
+                                continue;
+                            }
+
+                            const uint32_t nStrike = ++CONNECTION->nConsecutivePollEmptyStrikes;
+                            if(nStrike >= MINING_POLL_EMPTY_MAX_STRIKES)
+                            {
+                                debug::log(0, FUNCTION, "DataThread[", ID, "]: POLL_EMPTY strike limit reached for authenticated ",
+                                    ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
+                                    " strike=", nStrike, "/", MINING_POLL_EMPTY_MAX_STRIKES,
+                                    " revents=", POLLFDS.at(nIndex).revents,
+                                    " Available()=0 timeout=", nPollEmptyTimeout,
+                                    "ms — disconnecting");
+
+                                remove_connection_with_event(nIndex, DISCONNECT::POLL_EMPTY);
+                                continue;
+                            }
+
                             /* Log near-miss for authenticated miners — this would have killed
                              * the connection prior to the IsTimeoutExempt() bypass.  Useful
                              * for diagnosing spurious POLLIN events from TCP keepalive, etc. */
@@ -551,7 +580,8 @@ namespace LLP
                                 ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
                                 " revents=", POLLFDS.at(nIndex).revents,
                                 " Available()=0 timeout=", nPollEmptyTimeout,
-                                "ms — bypassed via IsTimeoutExempt()");
+                                "ms strike=", nStrike, "/", MINING_POLL_EMPTY_MAX_STRIKES,
+                                " — bypassed via IsTimeoutExempt()");
                         }
                         else
                         {

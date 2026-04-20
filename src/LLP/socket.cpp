@@ -1216,6 +1216,35 @@ namespace LLP
     }
 
 
+    /* Query the kernel for any pending socket error and cache it locally. */
+    int32_t Socket::RefreshSocketError()
+    {
+        RECURSIVE(SOCKET_MUTEX);
+
+        if(fd == INVALID_SOCKET)
+            return 0;
+
+        int32_t nPendingError = 0;
+        socklen_t nLength = sizeof(nPendingError);
+
+    #ifdef WIN32
+        if(getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&nPendingError), &nLength) != 0)
+    #else
+        if(getsockopt(fd, SOL_SOCKET, SO_ERROR, &nPendingError, &nLength) != 0)
+    #endif
+        {
+            const int32_t nGetsockoptError = WSAGetLastError();
+            nError = nGetsockoptError;
+            return nGetsockoptError;
+        }
+
+        if(nPendingError != 0)
+            nError = nPendingError;
+
+        return nPendingError;
+    }
+
+
     /*  Give the message (c-string) of the error in the socket. */
     const char *Socket::Error() const
     {
