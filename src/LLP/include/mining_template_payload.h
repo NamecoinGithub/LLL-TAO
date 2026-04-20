@@ -97,6 +97,13 @@ namespace LLP
     }
 
 
+    /** BuildSharedTemplatePayloadWithRetry
+     *
+     *  Invoke the supplied block factory, retry once on nullptr, then build the
+     *  canonical shared BLOCK_DATA payload from the resulting template. The
+     *  callable must return TAO::Ledger::Block* and leave ownership semantics to
+     *  the lane-local creator (e.g. per-connection mapBlocks storage).
+     */
     template <typename CreateBlockFn>
     inline SharedTemplatePayloadResult BuildSharedTemplatePayloadWithRetry(
         CreateBlockFn&& fnCreateBlock, std::string_view strLaneLabel)

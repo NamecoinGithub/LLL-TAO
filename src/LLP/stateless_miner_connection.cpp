@@ -585,6 +585,8 @@ namespace LLP
 
     bool StatelessMinerConnection::QueueCurrentBlockDataTemplate(TemplateWorkReason eReason)
     {
+        static constexpr std::size_t TEMPLATE_METADATA_SIZE = 12;
+
         if(config::fShutdown.load() || !Connected())
             return false;
 
@@ -616,11 +618,11 @@ namespace LLP
         if(!sharedTemplate.fSuccess)
             return false;
 
-        if(sharedTemplate.vPayload.size() != (12 + FalconConstants::FULL_BLOCK_TRITIUM_MIN))
+        if(sharedTemplate.vPayload.size() != (TEMPLATE_METADATA_SIZE + FalconConstants::FULL_BLOCK_TRITIUM_MIN))
         {
             debug::error(FUNCTION, "Template worker invalid block serialization for ",
                 pReason, ": ", sharedTemplate.vPayload.size(), " bytes (expected ",
-                (12 + FalconConstants::FULL_BLOCK_TRITIUM_MIN), ")");
+                (TEMPLATE_METADATA_SIZE + FalconConstants::FULL_BLOCK_TRITIUM_MIN), ")");
             return false;
         }
 

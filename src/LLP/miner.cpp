@@ -2384,6 +2384,8 @@ namespace LLP
          * No cross-lane state sharing. */
         uint32_t nSessionIdSnapshot = 0;
         uint256_t hashGenesisSnapshot = 0;
+        /* Snapshot the peer string before taking MUTEX so lock scope stays focused on
+         * session state and never expands around socket/address formatting work. */
         const std::string strPeer = GetAddress().ToStringIP();
         {
             LOCK(MUTEX);
