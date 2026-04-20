@@ -794,6 +794,31 @@ namespace LLP
         bool find_block(const uint512_t& hashMerkleRoot);
 
 
+        /** lookup_block
+         *
+         *  Non-mutating block template lookup by merkle root.
+         *
+         **/
+        TAO::Ledger::Block* lookup_block(const uint512_t& hashMerkleRoot) const;
+
+
+        /** register_block_template
+         *
+         *  Insert or replace a cached template and record the current best-chain
+         *  hash snapshot for same-height reorg detection.
+         *
+         **/
+        TAO::Ledger::Block* register_block_template(TAO::Ledger::Block* pBlock);
+
+
+        /** erase_block_template
+         *
+         *  Remove a cached template and its staleness snapshot.
+         *
+         **/
+        void erase_block_template(const uint512_t& hashMerkleRoot);
+
+
         /** new_block
          *
          *  Adds a new block to the map.
@@ -946,6 +971,38 @@ namespace LLP
         {
             return m_shutdownRequested.load(std::memory_order_acquire);
         }
+
+#ifdef UNIT_TESTS
+        bool CheckBestHeightForTests()
+        {
+            return check_best_height();
+        }
+
+        TAO::Ledger::Block* RegisterTemplateForTests(TAO::Ledger::Block* pBlock)
+        {
+            return register_block_template(pBlock);
+        }
+
+        TAO::Ledger::Block* LookupTemplateForTests(const uint512_t& hashMerkleRoot) const
+        {
+            return lookup_block(hashMerkleRoot);
+        }
+
+        bool FindTemplateForTests(const uint512_t& hashMerkleRoot)
+        {
+            return find_block(hashMerkleRoot);
+        }
+
+        bool SignBlockForTests(uint64_t nNonce, const uint512_t& hashMerkleRoot)
+        {
+            return sign_block(nNonce, hashMerkleRoot);
+        }
+
+        bool ValidateBlockForTests(const uint512_t& hashMerkleRoot)
+        {
+            return validate_block(hashMerkleRoot);
+        }
+#endif
 
     };
 }
