@@ -14,6 +14,7 @@ ________________________________________________________________________________
 #include <unit/catch2/catch.hpp>
 
 #include <LLP/include/stateless_miner.h>
+#include <LLP/include/mining_template_delivery.h>
 #include <LLP/include/opcode_utility.h>
 #include <LLP/include/stateless_opcodes.h>
 
@@ -228,6 +229,36 @@ TEST_CASE("GET_ROUND Unified Height Change Detection", "[template_staleness][get
         bool fTemplateStale = (ctx.nLastTemplateUnifiedHeight != nCurrentUnifiedHeight);
         REQUIRE(fTemplateStale == false);
     }
+
+    SECTION("Shared helper reports unified-height change as stale")
+    {
+        RoundStateUtility::ChainHeightSnapshot snap;
+        snap.nUnifiedHeight = ChannelHeightConstants::UNIFIED_HEIGHT + 1;
+        snap.hashBestChain = uint1024_t(0xA1);
+        snap.fValid = true;
+
+        const TemplateRefreshDecision decision = EvaluateTemplateRefresh(
+            ChannelHeightConstants::UNIFIED_HEIGHT, uint1024_t(0xA1), snap);
+
+        REQUIRE(decision.fUnifiedHeightChanged == true);
+        REQUIRE(decision.fReorgDetected == false);
+        REQUIRE(decision.fTemplateStale == true);
+    }
+
+    SECTION("Shared helper reports same-height reorg as stale")
+    {
+        RoundStateUtility::ChainHeightSnapshot snap;
+        snap.nUnifiedHeight = ChannelHeightConstants::UNIFIED_HEIGHT;
+        snap.hashBestChain = uint1024_t(0xB2);
+        snap.fValid = true;
+
+        const TemplateRefreshDecision decision = EvaluateTemplateRefresh(
+            ChannelHeightConstants::UNIFIED_HEIGHT, uint1024_t(0xA1), snap);
+
+        REQUIRE(decision.fUnifiedHeightChanged == false);
+        REQUIRE(decision.fReorgDetected == true);
+        REQUIRE(decision.fTemplateStale == true);
+    }
 }
 
 
@@ -385,4 +416,3 @@ TEST_CASE("MINER_READY Recovery Scenario", "[template_staleness][recovery]")
         }
     }
 }
-

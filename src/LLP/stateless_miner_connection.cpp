@@ -32,6 +32,7 @@ ________________________________________________________________________________
 #include <LLP/include/session_status_utility.h>
 #include <LLP/include/session_start_packet.h>
 #include <LLP/include/round_state_utility.h>
+#include <LLP/include/mining_template_delivery.h>
 #include <LLP/include/mining_template_payload.h>
 
 #include <LLP/include/stateless_get_block_handler.h>
@@ -587,7 +588,6 @@ namespace LLP
         if(config::fShutdown.load() || !Connected())
             return false;
 
-        uint32_t nChannel = 0;
         std::string strAddress;
         {
             LOCK(MUTEX);
@@ -595,7 +595,6 @@ namespace LLP
             if(!context.fAuthenticated || (context.nChannel != 1 && context.nChannel != 2))
                 return false;
 
-            nChannel = context.nChannel;
             strAddress = context.strAddress;
         }
 
@@ -609,31 +608,24 @@ namespace LLP
             return false;
         }
 
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if(vBlockData.empty() || vBlockData.size() != FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint32_t nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
+        const uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
+        const SharedTemplatePayloadResult sharedTemplate =
+            BuildSharedTemplatePayload(pBlock, pReason);
+        if(!sharedTemplate.fSuccess)
+            return false;
+
+        if(sharedTemplate.vPayload.size() != (12 + FalconConstants::FULL_BLOCK_TRITIUM_MIN))
         {
             debug::error(FUNCTION, "Template worker invalid block serialization for ",
-                pReason, ": ", vBlockData.size(), " bytes (expected ",
-                FalconConstants::FULL_BLOCK_TRITIUM_MIN, ")");
+                pReason, ": ", sharedTemplate.vPayload.size(), " bytes (expected ",
+                (12 + FalconConstants::FULL_BLOCK_TRITIUM_MIN), ")");
             return false;
         }
 
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        TAO::Ledger::BlockState stateChannel = stateBest;
-        uint32_t nChannelHeight = 0;
-        if(TAO::Ledger::GetLastState(stateChannel, nChannel))
-            nChannelHeight = stateChannel.nChannelHeight;
-
-        const uint32_t nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
-        const uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
-
-        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-            nUnifiedHeight, nChannelHeight, pBlock->nBits);
-
         StatelessPacket blockPacket(OpcodeUtility::Stateless::BLOCK_DATA);
-        blockPacket.DATA.reserve(vMetadata.size() + vBlockData.size());
-        blockPacket.DATA.insert(blockPacket.DATA.end(), vMetadata.begin(), vMetadata.end());
-        blockPacket.DATA.insert(blockPacket.DATA.end(), vBlockData.begin(), vBlockData.end());
+        blockPacket.DATA = sharedTemplate.vPayload;
         blockPacket.LENGTH = static_cast<uint32_t>(blockPacket.DATA.size());
 
         QueuePacket(blockPacket);
@@ -2422,11 +2414,9 @@ namespace LLP
 
                 uint32_t nChannel_snap;
                 uint1024_t hashLastBlock_snap;
-                uint32_t nLastTemplateUnifiedHeight_snap;
                 std::string strAddress_snap;
                 nChannel_snap = ctxSnap.nChannel;
                 hashLastBlock_snap = ctxSnap.hashLastBlock;
-                nLastTemplateUnifiedHeight_snap = ctxSnap.nLastTemplateUnifiedHeight;
                 strAddress_snap = ctxSnap.strAddress;
 
                 /* Capture consistent chain height snapshot via shared utility.
@@ -2438,10 +2428,6 @@ namespace LLP
                     debug::error(FUNCTION, "GET_ROUND: Blockchain not initialized");
                     return true;
                 }
-
-                /* Guard 1 — reorg detection (StakeMinter:534 pattern) */
-                const bool fHashChanged = RoundStateUtility::IsReorgDetected(
-                    hashLastBlock_snap, snap);
 
                 debug::log(3, FUNCTION, "GET_ROUND: unified=", snap.nUnifiedHeight,
                            " prime=", snap.nPrimeHeight, " hash=", snap.nHashHeight,
@@ -2475,16 +2461,15 @@ namespace LLP
                     LOCK(MUTEX);
                     nLiveLastTemplateHeight = context.nLastTemplateUnifiedHeight;
                 }
-                bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
-                    nLiveLastTemplateHeight, snap);
-                bool fTemplateStale = fUnifiedHeightChanged || fHashChanged;
+                const TemplateRefreshDecision refreshDecision = EvaluateTemplateRefresh(
+                    nLiveLastTemplateHeight, hashLastBlock_snap, snap);
 
                 debug::log(2, FUNCTION, "GET_ROUND staleness: unified_changed=",
-                           (fUnifiedHeightChanged ? "YES" : "NO"),
-                           " reorg=", (fHashChanged ? "YES" : "NO"),
-                           " stale=", (fTemplateStale ? "YES" : "NO"));
+                           (refreshDecision.fUnifiedHeightChanged ? "YES" : "NO"),
+                           " reorg=", (refreshDecision.fReorgDetected ? "YES" : "NO"),
+                           " stale=", (refreshDecision.fTemplateStale ? "YES" : "NO"));
 
-                if(fTemplateStale)
+                if(refreshDecision.fTemplateStale)
                 {
                     /* new_block() acquires MUTEX internally — no outer lock needed. */
 
@@ -4418,30 +4403,22 @@ namespace LLP
              * Re-subscription responses bypass via m_force_next_push.
              * Hash-change bypass matches the legacy mining lane so a new tip
              * always gets through immediately. */
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - m_last_template_push_time).count();
-            if (m_force_next_push)
-            {
-                /* Re-subscription bypass: miner explicitly requested fresh work. */
-                m_force_next_push = false;
-            }
-            else if (hashBestChain != m_hashLastPushedChain)
+            const uint1024_t hashPreviousChain = m_hashLastPushedChain;
+            const TemplatePushDecision decision = ApplyTemplatePushThrottle(
+                m_last_template_push_time, m_force_next_push, m_hashLastPushedChain, hashBestChain);
+            if(decision.eReason == TemplatePushDecisionReason::CHAIN_TIP_CHANGED)
             {
                 debug::log(3, FUNCTION, "Push throttle bypassed — new chain tip ",
                            hashBestChain.SubString(), " (was ",
-                           m_hashLastPushedChain.SubString(), ")");
+                           hashPreviousChain.SubString(), ")");
             }
-            else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
-                elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
+            else if(!decision.fShouldSend)
             {
-                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", decision.nElapsedMs, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
             }
-            m_last_template_push_time = now;
-            m_hashLastPushedChain = hashBestChain;
 
             /* Validate subscription state */
             if (!context.fSubscribedToNotifications)
@@ -4588,30 +4565,22 @@ namespace LLP
              * Re-subscription responses bypass via m_force_next_push.
              * Hash-change bypass matches the legacy mining lane so a new tip
              * always gets through immediately. */
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - m_last_template_push_time).count();
-            if (m_force_next_push)
-            {
-                /* Re-subscription bypass: miner explicitly requested fresh work. */
-                m_force_next_push = false;
-            }
-            else if (hashCurrentChain != m_hashLastPushedChain)
+            const uint1024_t hashPreviousChain = m_hashLastPushedChain;
+            const TemplatePushDecision decision = ApplyTemplatePushThrottle(
+                m_last_template_push_time, m_force_next_push, m_hashLastPushedChain, hashCurrentChain);
+            if(decision.eReason == TemplatePushDecisionReason::CHAIN_TIP_CHANGED)
             {
                 debug::log(3, FUNCTION, "Stateless template throttle bypassed — new chain tip ",
                            hashCurrentChain.SubString(), " (was ",
-                           m_hashLastPushedChain.SubString(), ")");
+                           hashPreviousChain.SubString(), ")");
             }
-            else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
-                elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
+            else if(!decision.fShouldSend)
             {
-                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", decision.nElapsedMs, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
             }
-            m_last_template_push_time = now;
-            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel (1=Prime, 2=Hash only) */
             if (context.nChannel != 1 && context.nChannel != 2)
@@ -4654,24 +4623,16 @@ namespace LLP
                        " stale=", canonicalSnap.is_canonically_stale() ? "yes" : "no");
         }
         
-        /* Create new block template - note: new_block() stores in mapBlocks, so we don't own the pointer */
-        TAO::Ledger::Block* pBlock = new_block();
-        if (!pBlock)
-        {
-            debug::log(2, FUNCTION, "new_block() returned nullptr in push path — retrying once");
-            pBlock = new_block();
-        }
-        if (!pBlock)
-        {
-            debug::error(FUNCTION, "Failed to create block template after retry");
-            debug::log(2, "════════════════════════════════════════════════════════════");
-            return;
-        }
-        
-        const SharedTemplatePayloadResult sharedTemplate =
-            BuildSharedTemplatePayload(pBlock, "Stateless push");
+        const SharedTemplatePayloadResult sharedTemplate = BuildSharedTemplatePayloadWithRetry(
+            [this]() -> TAO::Ledger::Block*
+            {
+                return new_block();
+            },
+            "Stateless push");
         if(!sharedTemplate.fSuccess)
         {
+            debug::error(FUNCTION, "Failed to create stateless template payload: ",
+                GetBlockPolicyReasonCode(sharedTemplate.eReason));
             return;
         }
 
@@ -4701,11 +4662,7 @@ namespace LLP
             debug::log(2, "      Difficulty (nBits): 0x", std::hex, nDifficulty, std::dec);
             debug::log(2, "      Difficulty (calc):  ", std::fixed, std::setprecision(6),
                        TAO::Ledger::GetDifficulty(nDifficulty, nChannel));
-            debug::log(2, "      Block Hash:      ", pBlock->GetHash().SubString());
-            debug::log(2, "      Merkle Root:     ", pBlock->hashMerkleRoot.SubString());
-            debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", pBlock->hashPrevBlock.SubString(),
-                       " (template anchor baked in, unified height ", pBlock->nHeight, ")");
-            debug::log(2, FUNCTION, "[BLOCK CREATE] hashPrevBlock FULL (MSB-first): ", pBlock->hashPrevBlock.GetHex());
+            debug::log(2, "      Template Height: ", sharedTemplate.nBlockHeight);
             debug::log(2, "   Total Size:     ", notification.DATA.size(), " bytes (",
                        METADATA_SIZE, " meta + ", TRITIUM_BLOCK_SIZE, " template)");
             debug::log(2, "");

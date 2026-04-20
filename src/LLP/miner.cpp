@@ -31,6 +31,8 @@ ________________________________________________________________________________
 #include <LLP/include/session_status_utility.h>
 #include <LLP/include/session_start_packet.h>
 #include <LLP/include/round_state_utility.h>
+#include <LLP/include/mining_template_delivery.h>
+#include <LLP/include/mining_template_payload.h>
 #include <LLP/types/miner.h>
 #include <LLP/templates/events.h>
 #include <LLP/templates/ddos.h>
@@ -2205,31 +2207,23 @@ namespace LLP
                 return;
             }
 
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - m_last_template_push_time).count();
-            if (m_force_next_push)
-            {
-                /* Re-subscription bypass: miner explicitly requested fresh work. */
-                m_force_next_push = false;
-            }
-            else if (hashBestChain != m_hashLastPushedChain)
+            const uint1024_t hashPreviousChain = m_hashLastPushedChain;
+            const TemplatePushDecision decision = ApplyTemplatePushThrottle(
+                m_last_template_push_time, m_force_next_push, m_hashLastPushedChain, hashBestChain);
+            if(decision.eReason == TemplatePushDecisionReason::CHAIN_TIP_CHANGED)
             {
                 /* Hash-change bypass: chain tip advanced — always deliver. */
                 debug::log(3, FUNCTION, "Push throttle bypassed — new chain tip ",
                            hashBestChain.SubString(), " (was ",
-                           m_hashLastPushedChain.SubString(), ")");
+                           hashPreviousChain.SubString(), ")");
             }
-            else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
-                elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
+            else if(!decision.fShouldSend)
             {
-                debug::log(2, FUNCTION, "Push throttled — ", elapsed, "ms since last push (min ",
+                debug::log(2, FUNCTION, "Push throttled — ", decision.nElapsedMs, "ms since last push (min ",
                            MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
                            GetAddress().ToStringIP(), " — same tip, work delivery delayed");
                 return;
             }
-            m_last_template_push_time = now;
-            m_hashLastPushedChain = hashBestChain;
         }
 
         /* Get channel-specific state */
@@ -2303,7 +2297,6 @@ namespace LLP
             PushNotificationBuilder::BestChainHashForNotification(stateBestForHash);
 
         /* Thread-safe context access and push throttle */
-        uint32_t nChannelCopy;
         {
             LOCK(MUTEX);
 
@@ -2313,32 +2306,25 @@ namespace LLP
              *
              * Hash-change bypass: if the chain tip advanced since the last push,
              * skip the time floor so miners receive the new template immediately. */
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - m_last_template_push_time).count();
-            if(m_force_next_push)
-            {
-                m_force_next_push = false;
-            }
-            else if(hashCurrentChain != m_hashLastPushedChain)
+            const uint1024_t hashPreviousChain = m_hashLastPushedChain;
+            const TemplatePushDecision decision = ApplyTemplatePushThrottle(
+                m_last_template_push_time, m_force_next_push, m_hashLastPushedChain, hashCurrentChain);
+            if(decision.eReason == TemplatePushDecisionReason::CHAIN_TIP_CHANGED)
             {
                 /* Hash-change bypass: chain tip advanced — always deliver. */
                 debug::log(2, FUNCTION, "Legacy template throttle bypassed — new chain tip ",
                            hashCurrentChain.SubString(), " (was ",
-                           m_hashLastPushedChain.SubString(), ")");
+                           hashPreviousChain.SubString(), ")");
             }
-            else if(m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
-                elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
+            else if(!decision.fShouldSend)
             {
-                debug::log(1, FUNCTION, "⏳ Legacy template push throttled — ", elapsed,
+                debug::log(1, FUNCTION, "⏳ Legacy template push throttled — ", decision.nElapsedMs,
                            "ms since last push (min ", MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms)");
                 return;
             }
-            m_last_template_push_time = now;
-            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel */
-            nChannelCopy = nChannel.load();
+            const uint32_t nChannelCopy = nChannel.load();
             if(nChannelCopy != 1 && nChannelCopy != 2)
             {
                 debug::error(FUNCTION, "Invalid channel: ", nChannelCopy);
@@ -2346,50 +2332,30 @@ namespace LLP
             }
         }
 
-        /* Get chain state for metadata */
-        RoundStateUtility::ChainHeightSnapshot snap = RoundStateUtility::CaptureHeights();
-        uint32_t nChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannelCopy);
-
-        /* Create block template */
-        TAO::Ledger::Block* pBlock = new_block();
-        if(!pBlock)
+        const SharedTemplatePayloadResult sharedTemplate = BuildSharedTemplatePayloadWithRetry(
+            [this]() -> TAO::Ledger::Block*
+            {
+                return new_block();
+            },
+            "Legacy push");
+        if(!sharedTemplate.fSuccess)
         {
-            debug::log(2, FUNCTION, "new_block() returned nullptr — retrying once");
-            pBlock = new_block();
-        }
-        if(!pBlock)
-        {
-            debug::error(FUNCTION, "Failed to create block template after retry");
+            debug::error(FUNCTION, "Failed to create legacy template payload: ",
+                GetBlockPolicyReasonCode(sharedTemplate.eReason));
             return;
         }
-
-        /* Serialize block template */
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if(vBlockData.empty())
-        {
-            debug::error(FUNCTION, "Invalid block serialization: empty");
-            return;
-        }
-
-        /* Build payload: 12-byte metadata + block data using shared utility */
-        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-            snap.nUnifiedHeight, nChannelHeight, pBlock->nBits);
-
-        std::vector<uint8_t> vPayload;
-        vPayload.reserve(vMetadata.size() + vBlockData.size());
-        vPayload.insert(vPayload.end(), vMetadata.begin(), vMetadata.end());
-        vPayload.insert(vPayload.end(), vBlockData.begin(), vBlockData.end());
 
         /* Send via stateless framing (16-bit opcode) */
-        respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, vPayload);
+        respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, sharedTemplate.vPayload);
 
         debug::log(2, FUNCTION, "✅ Legacy template sent (",
-                   vPayload.size(), " bytes) channel=", pBlock->nChannel,
-                   " height=", pBlock->nHeight, " to ", GetAddress().ToStringIP());
+                   sharedTemplate.vPayload.size(), " bytes) channel=", sharedTemplate.nBlockChannel,
+                   " height=", sharedTemplate.nBlockHeight, " to ", GetAddress().ToStringIP());
 
         StatelessMinerManager::Get().IncrementTemplatesServed();
 
         /* Update last template unified height (atomic store — see nLastTemplateUnifiedHeight comment). */
+        RoundStateUtility::ChainHeightSnapshot snap = RoundStateUtility::CaptureHeights();
         nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
     }
 
@@ -2924,56 +2890,42 @@ namespace LLP
          *
          * nLastTemplateUnifiedHeight is now std::atomic<uint32_t>, so we can
          * read it safely without holding MUTEX. */
-        uint32_t nCurrentChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannel);
         const uint32_t nLiveLastTemplateHeight =
             nLastTemplateUnifiedHeight.load(std::memory_order_relaxed);
-        bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
-            nLiveLastTemplateHeight, snap);
+        const TemplateRefreshDecision refreshDecision = EvaluateTemplateRefresh(
+            nLiveLastTemplateHeight, uint1024_t(0), snap);
 
-        if(fUnifiedHeightChanged)
+        if(refreshDecision.fTemplateStale)
         {
             debug::log(2, FUNCTION, "Unified height advanced: ",
                        nLiveLastTemplateHeight, " -> ", snap.nUnifiedHeight,
                        " - auto-sending template for channel ", nChannel.load());
 
-            TAO::Ledger::Block* pBlock = new_block();
+            const SharedTemplatePayloadResult sharedTemplate = BuildSharedTemplatePayloadWithRetry(
+                [this]() -> TAO::Ledger::Block*
+                {
+                    return new_block();
+                },
+                "Legacy GET_ROUND");
 
-            if(!pBlock)
+            if(!sharedTemplate.fSuccess)
             {
-                debug::error(FUNCTION, "GET_ROUND auto-send: new_block() returned nullptr");
+                debug::error(FUNCTION, "GET_ROUND auto-send payload unavailable: ",
+                    GetBlockPolicyReasonCode(sharedTemplate.eReason));
             }
             else
             {
-                try {
-                    std::vector<uint8_t> vBlockData = pBlock->Serialize();
+                respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, sharedTemplate.vPayload);
 
-                    if(!vBlockData.empty())
-                    {
-                        /* Build payload: 12-byte metadata + block data using shared utility */
-                        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-                            snap.nUnifiedHeight, nCurrentChannelHeight, pBlock->nBits);
+                debug::log(2, FUNCTION, "Auto-sent BLOCK_DATA (",
+                           sharedTemplate.vPayload.size(), " bytes) channel=",
+                           sharedTemplate.nBlockChannel, " height=", sharedTemplate.nBlockHeight);
 
-                        std::vector<uint8_t> vPayload;
-                        vPayload.reserve(vMetadata.size() + vBlockData.size());
-                        vPayload.insert(vPayload.end(), vMetadata.begin(), vMetadata.end());
-                        vPayload.insert(vPayload.end(), vBlockData.begin(), vBlockData.end());
+                StatelessMinerManager::Get().IncrementTemplatesServed();
 
-                        respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, vPayload);
-
-                        debug::log(2, FUNCTION, "Auto-sent BLOCK_DATA (",
-                                   vPayload.size(), " bytes) channel=",
-                                   pBlock->nChannel, " height=", pBlock->nHeight);
-
-                        StatelessMinerManager::Get().IncrementTemplatesServed();
-
-                        /* Update last template unified height only after successful send.
-                         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
-                        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
-                    }
-                }
-                catch(const std::exception& e) {
-                    debug::error(FUNCTION, "GET_ROUND auto-send exception: ", e.what());
-                }
+                /* Update last template unified height only after successful send.
+                 * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
+                nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
             }
         }
 

@@ -13,7 +13,7 @@ ________________________________________________________________________________
 
 #include <unit/catch2/catch.hpp>
 
-#include <LLP/include/mining_constants.h>
+#include <LLP/include/mining_template_delivery.h>
 
 #include <chrono>
 #include <cstdint>
@@ -42,17 +42,16 @@ namespace
 {
     using steady_clock = std::chrono::steady_clock;
     using time_point   = steady_clock::time_point;
-
-    /** ThrottleResult — outcome of a simulated SendChannelNotification() call. */
-    enum class ThrottleResult { SEND, THROTTLED };
+    using LLP::TemplatePushDecision;
+    using LLP::TemplatePushDecisionReason;
 
     /** PushThrottleState — mirrors the relevant per-connection members. */
-     struct PushThrottleState
-     {
-         time_point m_last_template_push_time{};   // zero = never sent
-         bool       m_force_next_push{false};
-         uint64_t   m_hashLastPushedChain{0};
-     };
+      struct PushThrottleState
+      {
+          time_point m_last_template_push_time{};   // zero = never sent
+          bool       m_force_next_push{false};
+         uint1024_t m_hashLastPushedChain{0};
+      };
 
     /**
      * SimulateSend — apply the throttle logic from SendChannelNotification() /
@@ -61,34 +60,14 @@ namespace
      * Returns SEND if the push would be transmitted, THROTTLED if it would be dropped.
      * Updates state in-place exactly as the production code does.
      */
-    ThrottleResult SimulateSend(PushThrottleState& state, time_point now, uint64_t hashBestChain)
+    TemplatePushDecision SimulateSend(PushThrottleState& state, time_point now, const uint1024_t& hashBestChain)
     {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - state.m_last_template_push_time).count();
-
-        if(state.m_force_next_push)
-        {
-            /* Re-subscription bypass: clear the flag and send. */
-            state.m_force_next_push = false;
-            state.m_last_template_push_time = now;
-            state.m_hashLastPushedChain = hashBestChain;
-            return ThrottleResult::SEND;
-        }
-        else if(hashBestChain != state.m_hashLastPushedChain)
-        {
-            state.m_last_template_push_time = now;
-            state.m_hashLastPushedChain = hashBestChain;
-            return ThrottleResult::SEND;
-        }
-        else if(state.m_last_template_push_time != time_point{} &&
-                elapsed < LLP::MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
-        {
-            return ThrottleResult::THROTTLED;
-        }
-
-        state.m_last_template_push_time = now;
-        state.m_hashLastPushedChain = hashBestChain;
-        return ThrottleResult::SEND;
+        return LLP::ApplyTemplatePushThrottle(
+            state.m_last_template_push_time,
+            state.m_force_next_push,
+            state.m_hashLastPushedChain,
+            hashBestChain,
+            now);
     }
 }
 
@@ -98,7 +77,9 @@ TEST_CASE("Push throttle — first send always passes", "[push_throttle][llp]")
     auto now = steady_clock::now();
 
     /* No prior timestamp: should always send regardless of m_force_next_push. */
-    REQUIRE(SimulateSend(state, now, 0xA1) == ThrottleResult::SEND);
+    const TemplatePushDecision decision = SimulateSend(state, now, uint1024_t(0xA1));
+    REQUIRE(decision.fShouldSend);
+    REQUIRE(decision.eReason == TemplatePushDecisionReason::FIRST_PUSH);
 }
 
 TEST_CASE("Push throttle — rapid second send is throttled without force flag", "[push_throttle][llp]")
@@ -107,11 +88,13 @@ TEST_CASE("Push throttle — rapid second send is throttled without force flag",
     auto t0 = steady_clock::now();
 
     /* First send establishes the timestamp. */
-    REQUIRE(SimulateSend(state, t0, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t0, uint1024_t(0xA1)).fShouldSend);
 
     /* Second send 1 ms later — well within TEMPLATE_PUSH_MIN_INTERVAL_MS (1000 ms). */
     auto t1 = t0 + std::chrono::milliseconds(1);
-    REQUIRE(SimulateSend(state, t1, 0xA1) == ThrottleResult::THROTTLED);
+    const TemplatePushDecision decision = SimulateSend(state, t1, uint1024_t(0xA1));
+    REQUIRE_FALSE(decision.fShouldSend);
+    REQUIRE(decision.eReason == TemplatePushDecisionReason::THROTTLED);
 }
 
 TEST_CASE("Push throttle — rapid second send bypasses throttle with force flag", "[push_throttle][llp]")
@@ -120,14 +103,16 @@ TEST_CASE("Push throttle — rapid second send bypasses throttle with force flag
     auto t0 = steady_clock::now();
 
     /* First send establishes the timestamp. */
-    REQUIRE(SimulateSend(state, t0, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t0, uint1024_t(0xA1)).fShouldSend);
 
     /* Set force flag (simulates STATELESS_MINER_READY / MINER_READY handler). */
     state.m_force_next_push = true;
 
     /* Second send 1 ms later — would normally be throttled but force flag bypasses it. */
     auto t1 = t0 + std::chrono::milliseconds(1);
-    REQUIRE(SimulateSend(state, t1, 0xA1) == ThrottleResult::SEND);
+    const TemplatePushDecision decision = SimulateSend(state, t1, uint1024_t(0xA1));
+    REQUIRE(decision.fShouldSend);
+    REQUIRE(decision.eReason == TemplatePushDecisionReason::FORCE_BYPASS);
 
     /* Force flag must be cleared after the bypassed send. */
     REQUIRE(state.m_force_next_push == false);
@@ -139,17 +124,17 @@ TEST_CASE("Push throttle — force flag is one-shot: subsequent send obeys throt
     auto t0 = steady_clock::now();
 
     /* First send. */
-    REQUIRE(SimulateSend(state, t0, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t0, uint1024_t(0xA1)).fShouldSend);
 
     /* Force bypass: second send passes. */
     state.m_force_next_push = true;
     auto t1 = t0 + std::chrono::milliseconds(1);
-    REQUIRE(SimulateSend(state, t1, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t1, uint1024_t(0xA1)).fShouldSend);
     REQUIRE(state.m_force_next_push == false);
 
     /* Third send immediately after — flag cleared, should be throttled again. */
     auto t2 = t1 + std::chrono::milliseconds(1);
-    REQUIRE(SimulateSend(state, t2, 0xA1) == ThrottleResult::THROTTLED);
+    REQUIRE_FALSE(SimulateSend(state, t2, uint1024_t(0xA1)).fShouldSend);
 }
 
 TEST_CASE("Push throttle — send passes after interval expires", "[push_throttle][llp]")
@@ -158,11 +143,13 @@ TEST_CASE("Push throttle — send passes after interval expires", "[push_throttl
     auto t0 = steady_clock::now();
 
     /* First send. */
-    REQUIRE(SimulateSend(state, t0, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t0, uint1024_t(0xA1)).fShouldSend);
 
     /* Second send after TEMPLATE_PUSH_MIN_INTERVAL_MS + 1 ms — throttle expired. */
     auto t1 = t0 + std::chrono::milliseconds(LLP::MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS + 1);
-    REQUIRE(SimulateSend(state, t1, 0xA1) == ThrottleResult::SEND);
+    const TemplatePushDecision decision = SimulateSend(state, t1, uint1024_t(0xA1));
+    REQUIRE(decision.fShouldSend);
+    REQUIRE(decision.eReason == TemplatePushDecisionReason::INTERVAL_ELAPSED);
 }
 
 TEST_CASE("Push throttle — rapid send bypasses time floor when chain tip changes", "[push_throttle][llp]")
@@ -170,8 +157,10 @@ TEST_CASE("Push throttle — rapid send bypasses time floor when chain tip chang
     PushThrottleState state;
     auto t0 = steady_clock::now();
 
-    REQUIRE(SimulateSend(state, t0, 0xA1) == ThrottleResult::SEND);
+    REQUIRE(SimulateSend(state, t0, uint1024_t(0xA1)).fShouldSend);
 
     auto t1 = t0 + std::chrono::milliseconds(1);
-    REQUIRE(SimulateSend(state, t1, 0xB2) == ThrottleResult::SEND);
+    const TemplatePushDecision decision = SimulateSend(state, t1, uint1024_t(0xB2));
+    REQUIRE(decision.fShouldSend);
+    REQUIRE(decision.eReason == TemplatePushDecisionReason::CHAIN_TIP_CHANGED);
 }
