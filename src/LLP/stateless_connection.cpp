@@ -12,6 +12,7 @@
 ____________________________________________________________________________________________*/
 
 #include <LLP/templates/stateless_connection.h>
+#include <LLP/include/opcode_utility.h>
 #include <LLP/templates/events.h>
 
 namespace LLP
@@ -74,7 +75,7 @@ namespace LLP
                 Event(EVENTS::HEADER);
                 nAvailable -= 4;
 
-                if(INCOMING.LENGTH > 0)
+                if(INCOMING.LENGTH > 0 && INCOMING.LENGTH <= OpcodeUtility::MAX_ANY_PACKET_LENGTH)
                     INCOMING.DATA.reserve(INCOMING.LENGTH);
             }
         }
