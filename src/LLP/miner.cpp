@@ -2418,12 +2418,11 @@ namespace LLP
          * No cross-lane state sharing. */
         uint32_t nSessionIdSnapshot = 0;
         uint256_t hashGenesisSnapshot = 0;
-        std::string strPeer;
+        const std::string strPeer = GetAddress().ToStringIP();
         {
             LOCK(MUTEX);
             nSessionIdSnapshot = nSessionId;
             hashGenesisSnapshot = hashGenesis;
-            strPeer = GetAddress().ToStringIP();
         }
 
         /* BUG #4 fix: Validate nSessionId is non-zero before rate-limit lookups.

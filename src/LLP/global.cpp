@@ -80,6 +80,10 @@ namespace LLP
 
             void Reset()
             {
+                /* Preserve LLP teardown ordering: lightweight ancillary lanes first,
+                 * then externally facing services, and finally the core P2P servers.
+                 * This keeps mining/API/RPC teardown from outliving the Tritium/lookup
+                 * backbone they depend on during shutdown. */
                 time.reset();
                 legacy_mining.reset();
                 stateless_mining.reset();

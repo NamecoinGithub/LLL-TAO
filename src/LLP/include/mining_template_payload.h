@@ -45,6 +45,12 @@ namespace LLP
     };
 
 
+    /** BuildSharedTemplatePayload
+     *
+     *  Build the canonical 12-byte metadata + serialized block payload used by
+     *  both mining lanes. A nullptr block is treated as a transient template
+     *  creation failure and returns INTERNAL_RETRY with the standard retry hint.
+     */
     inline SharedTemplatePayloadResult BuildSharedTemplatePayload(
         TAO::Ledger::Block* pBlock, const char* strLaneLabel)
     {
