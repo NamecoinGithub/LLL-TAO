@@ -28,6 +28,7 @@ ________________________________________________________________________________
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -52,7 +53,7 @@ namespace LLP
      *  creation failure and returns INTERNAL_RETRY with the standard retry hint.
      */
     inline SharedTemplatePayloadResult BuildSharedTemplatePayload(
-        TAO::Ledger::Block* pBlock, const char* strLaneLabel)
+        TAO::Ledger::Block* pBlock, std::string_view strLaneLabel)
     {
         SharedTemplatePayloadResult result;
 
@@ -98,7 +99,7 @@ namespace LLP
 
     template <typename CreateBlockFn>
     inline SharedTemplatePayloadResult BuildSharedTemplatePayloadWithRetry(
-        CreateBlockFn&& fnCreateBlock, const char* strLaneLabel)
+        CreateBlockFn&& fnCreateBlock, std::string_view strLaneLabel)
     {
         TAO::Ledger::Block* pBlock = fnCreateBlock();
         if(!pBlock)

@@ -4250,7 +4250,7 @@ namespace LLP
                 }
 
                 m_rateLimit.tLastGetBlock = now;
-                debug::log(4, FUNCTION, "GET_BLOCK rate budget: key=", strRateKey,
+                debug::log(3, FUNCTION, "GET_BLOCK rate budget: key=", strRateKey,
                     " count=", nCurrentInWindow, "/", RateLimitConfig::MAX_GET_BLOCK_PER_MINUTE);
                 return true;
             }
