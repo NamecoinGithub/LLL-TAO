@@ -206,7 +206,7 @@ TEST_CASE("Legacy packet framing always includes the 4-byte length field", "[pac
 
         for(const auto& testCase : cases)
         {
-            INFO("opcode=0x" << std::hex << static_cast<uint32_t>(testCase.opcode));
+            INFO("opcode=0x" << std::hex << static_cast<uint32_t>(testCase.opcode) << std::dec);
 
             LLP::Packet packet(testCase.opcode);
             packet.LENGTH = testCase.length;
