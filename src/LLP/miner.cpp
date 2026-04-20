@@ -605,7 +605,11 @@ namespace LLP
                         strCategory = "UNKNOWN";
                         break;
                 }
-                debug::log(0, FUNCTION, "[", strCategory, "] Disconnecting ", GetAddress().ToStringIP(), " (", strReason, ")");
+                const bool fHighlightDisconnect = (reason == DISCONNECT::PARTIAL_STALL);
+                debug::log(0,
+                           fHighlightDisconnect ? ANSI_COLOR_BRIGHT_YELLOW : "",
+                           FUNCTION, "[", strCategory, "] Disconnecting ", GetAddress().ToStringIP(), " (", strReason, ")",
+                           fHighlightDisconnect ? ANSI_COLOR_RESET : "");
 
                 /* Interrupt any in-flight SendChannelNotification() path immediately. */
                 m_shutdownRequested.store(true, std::memory_order_release);

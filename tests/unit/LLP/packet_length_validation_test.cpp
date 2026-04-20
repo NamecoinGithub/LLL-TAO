@@ -15,6 +15,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/opcode_utility.h>
 #include <LLP/packets/packet.h>
+#include <LLP/packets/stateless_packet.h>
 
 /* Test packet length validation for request opcodes and fixed-size packets
  * This validates the fixes for Bug #1: Packet parser rejection of impossible LENGTH values
@@ -250,6 +251,72 @@ TEST_CASE("Fixed-size opcodes have maximum length limits", "[llp][packet][valida
         bool bValid = ValidatePacketLength(packet, &strError);
         
         REQUIRE(bValid == false);
+    }
+}
+
+TEST_CASE("Mirrored stateless opcodes inherit legacy payload rules", "[llp][packet][validation][stateless]")
+{
+    using namespace LLP;
+    using namespace LLP::OpcodeUtility;
+
+    SECTION("STATELESS_GET_ROUND with LENGTH>0 is rejected")
+    {
+        StatelessPacket packet(Stateless::GET_ROUND);
+        packet.LENGTH = 16;
+
+        std::string strError;
+        bool bValid = ValidatePacketLength(packet, &strError);
+
+        REQUIRE(bValid == false);
+        REQUIRE(strError.find("GET_ROUND") != std::string::npos);
+    }
+
+    SECTION("STATELESS_GET_HEIGHT with LENGTH>0 is rejected")
+    {
+        StatelessPacket packet(Stateless::GET_HEIGHT);
+        packet.LENGTH = 4;
+
+        std::string strError;
+        bool bValid = ValidatePacketLength(packet, &strError);
+
+        REQUIRE(bValid == false);
+        REQUIRE(strError.find("GET_HEIGHT") != std::string::npos);
+    }
+
+    SECTION("STATELESS_MINER_READY with LENGTH>0 is rejected")
+    {
+        StatelessPacket packet(Stateless::MINER_READY);
+        packet.LENGTH = 1;
+
+        std::string strError;
+        bool bValid = ValidatePacketLength(packet, &strError);
+
+        REQUIRE(bValid == false);
+        REQUIRE(strError.find("MINER_READY") != std::string::npos);
+    }
+
+    SECTION("STATELESS_SESSION_KEEPALIVE keeps the legacy max payload limit")
+    {
+        StatelessPacket packet(Stateless::SESSION_KEEPALIVE);
+        packet.LENGTH = 9;
+
+        std::string strError;
+        bool bValid = ValidatePacketLength(packet, &strError);
+
+        REQUIRE(bValid == false);
+        REQUIRE(strError.find("SESSION_KEEPALIVE") != std::string::npos);
+    }
+
+    SECTION("STATELESS_SESSION_STATUS_ACK keeps its fixed-size contract")
+    {
+        StatelessPacket packet(Stateless::SESSION_STATUS_ACK);
+        packet.LENGTH = 15;
+
+        std::string strError;
+        bool bValid = ValidatePacketLength(packet, &strError);
+
+        REQUIRE(bValid == false);
+        REQUIRE(strError.find("requires exactly 16 bytes") != std::string::npos);
     }
 }
 

@@ -13,11 +13,13 @@ ________________________________________________________________________________
 
 #include <LLP/include/base_address.h>
 #include <LLP/include/mining_constants.h>
+#include <LLP/include/opcode_utility.h>
 #include <LLP/templates/data.h>
 #include <LLP/templates/static.h>
 #include <LLP/templates/socket.h>
 
 #include <chrono>
+#include <sstream>
 
 #include <LLP/types/tritium.h>
 #include <LLP/types/time.h>
@@ -37,6 +39,48 @@ namespace LLP
 {
     namespace
     {
+        template <typename PacketType, typename = void>
+        struct has_frame_fields : std::false_type {};
+
+        template <typename PacketType>
+        struct has_frame_fields<PacketType, std::void_t<
+            decltype(std::declval<PacketType>().HEADER),
+            decltype(std::declval<PacketType>().LENGTH),
+            decltype(std::declval<PacketType>().DATA.size())
+        >> : std::true_type {};
+
+        template <typename PacketType>
+        std::string PartialPacketSummary(const PacketType& packet)
+        {
+            std::ostringstream oss;
+
+            if constexpr (!has_frame_fields<PacketType>::value)
+            {
+                oss << " frame_state=unavailable";
+            }
+            else if constexpr (std::is_same_v<typename PacketType::message_t, uint8_t>)
+            {
+                oss << " opcode=" << OpcodeUtility::GetOpcodeName(packet.HEADER)
+                    << "(0x" << std::hex << static_cast<uint32_t>(packet.HEADER) << std::dec << ")";
+                oss << " length=" << packet.LENGTH
+                    << " received=" << packet.DATA.size();
+            }
+            else if constexpr (std::is_same_v<typename PacketType::message_t, uint16_t>)
+            {
+                oss << " opcode=" << OpcodeUtility::GetOpcodeName16(packet.HEADER)
+                    << "(0x" << std::hex << static_cast<uint32_t>(packet.HEADER) << std::dec << ")";
+                oss << " length=" << packet.LENGTH
+                    << " received=" << packet.DATA.size();
+            }
+            else
+            {
+                oss << " length=" << packet.LENGTH
+                    << " received=" << packet.DATA.size();
+            }
+
+            return oss.str();
+        }
+
         /** POLL_EMPTY timeout for mining connections (milliseconds).
          *
          *  This is the grace period before a spurious POLLIN + Available()==0
@@ -1046,7 +1090,10 @@ namespace LLP
         {
             debug::log(0, FUNCTION, "DataThread[", ID, "]: PARTIAL_STALL for ",
                 ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
-                " — incomplete frame stuck >", PARTIAL_PACKET_TIMEOUT_MS, "ms, disconnecting");
+                " — incomplete frame stuck >", PARTIAL_PACKET_TIMEOUT_MS, "ms, disconnecting",
+                PartialPacketSummary(CONNECTION->INCOMING),
+                " timeout_exempt=", CONNECTION->IsTimeoutExempt(),
+                " buffered=", CONNECTION->Buffered());
 
             remove_connection_with_event(nIndex, DISCONNECT::PARTIAL_STALL);
             return true;
