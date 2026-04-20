@@ -4479,12 +4479,13 @@ namespace LLP
             nChannel, ProtocolLane::STATELESS, stateBest, stateChannel, nDifficulty,
             hashBestChain);
         
+        const uint32_t nChannelHeight = stateChannel.nChannelHeight;
+
         if(config::nVerbose >= 3)
         {
             const std::string strOpcodeName = (nChannel == 1) ?
                 "PRIME_BLOCK_AVAILABLE (NEW_PRIME_AVAILABLE)" :
                 "HASH_BLOCK_AVAILABLE (NEW_HASH_AVAILABLE)";
-            const uint32_t nChannelHeight = stateChannel.nChannelHeight;
 
             debug::log(2, "════════════════════════════════════════════════════════════");
             debug::log(2, "📢 SENDING PUSH NOTIFICATION TO MINER");
@@ -4540,7 +4541,7 @@ namespace LLP
                    " notification to ", GetAddress().ToStringIP(),
                    " session=", nSessionId_snap,
                    " (unified=", stateBest.nHeight, 
-                   ", channelHeight=", stateChannel.nChannelHeight,
+                   ", channelHeight=", nChannelHeight,
                    ", diff=", std::hex, nDifficulty, std::dec, ")");
 
         /* Work Item 6: Attach block template to PUSH notification.
@@ -4690,9 +4691,10 @@ namespace LLP
          * Must use DATA.size() instead of hardcoded value to ensure correct framing. */
         notification.LENGTH = static_cast<uint32_t>(notification.DATA.size());
         
+        const uint32_t nChannelHeight = stateChannel.nChannelHeight;
+
         if(config::nVerbose >= 3)
         {
-            const uint32_t nChannelHeight = stateChannel.nChannelHeight;
             debug::log(2, "   Payload:");
             debug::log(2, "      Unified Height:  ", stateBest.nHeight);
             debug::log(2, "      Channel Height:  ", nChannelHeight);
@@ -4732,7 +4734,7 @@ namespace LLP
         debug::log(2, FUNCTION, "Sent stateless template (0xD081) to ", GetAddress().ToStringIP(),
                    " session=", nSessionId_snap,
                    " (unified=", stateBest.nHeight, 
-                   ", channel=", stateChannel.nChannelHeight,
+                   ", channel=", nChannelHeight,
                    ", diff=", std::hex, nDifficulty, std::dec, ")");
     }
 

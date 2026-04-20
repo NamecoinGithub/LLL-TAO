@@ -2501,6 +2501,10 @@ namespace LLP
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
+        /* Use the snapshot outside MUTEX: hashGenesis is read-only for this
+         * request/response path once captured, and ColinMiningAgent has its own
+         * internal synchronization. Keeping the callback outside MUTEX avoids
+         * extending the connection lock across external agent work. */
         if(hashGenesisSnapshot != 0)
         {
             ColinMiningAgent::Get().on_get_block_received(hashGenesisSnapshot.SubString(8), false);
