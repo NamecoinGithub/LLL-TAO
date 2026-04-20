@@ -127,6 +127,24 @@ namespace LLP
         bool m_template_create_in_flight{false};
         TAO::Ledger::Block* m_last_created_template{nullptr};
 
+    public:
+        /** Async BLOCK_DATA worker for push/GET_ROUND recovery.
+         *  Coalesces multiple "fresh template" requests into one background job so
+         *  the read path only schedules work instead of building templates inline. */
+        enum class TemplateWorkReason : uint8_t
+        {
+            PUSH_NOTIFICATION,
+            GET_ROUND_RECOVERY
+        };
+
+    private:
+        std::mutex m_template_work_mutex;
+        std::condition_variable m_template_work_cv;
+        std::thread m_template_work_thread;
+        bool m_template_worker_running{false};
+        bool m_template_work_pending{false};
+        TemplateWorkReason m_template_work_reason{TemplateWorkReason::PUSH_NOTIFICATION};
+
         /** Timestamp of the last template push (SendStatelessTemplate / SendChannelNotification).
          *
          *  Used by the push throttle guard to prevent flooding miners with full
@@ -518,6 +536,19 @@ namespace LLP
          *
          **/
         void CleanupStaleTemplates(uint32_t nCurrentHeight);
+
+        /** Start/stop the async BLOCK_DATA worker. */
+        void StartTemplateWorker();
+        void StopTemplateWorker();
+
+        /** Queue one coalesced BLOCK_DATA build/send request. */
+        void ScheduleTemplateWork(TemplateWorkReason eReason);
+
+        /** Main loop for the async BLOCK_DATA worker. */
+        void TemplateWorkerLoop();
+
+        /** Build and queue the latest BLOCK_DATA payload from the worker thread. */
+        bool QueueCurrentBlockDataTemplate(TemplateWorkReason eReason);
 
         /** GetChannelManager (PR #136: Fork-Aware Channel State Management)
          *

@@ -200,6 +200,120 @@ namespace OpcodeUtility
     }
 
 
+    static bool ValidateLegacyOpcodeLength(uint8_t nOpcode, uint32_t nLength, std::string* strReason)
+    {
+        /* Authentication packets have specific size constraints */
+        if(nOpcode == Opcodes::MINER_AUTH_INIT)
+        {
+            if(nLength < FalconConstants::MINER_AUTH_INIT_MIN ||
+               nLength > FalconConstants::MINER_AUTH_INIT_MAX)
+            {
+                if(strReason)
+                {
+                    std::ostringstream oss;
+                    oss << "MINER_AUTH_INIT length " << nLength
+                        << " outside valid range [" << FalconConstants::MINER_AUTH_INIT_MIN
+                        << ", " << FalconConstants::MINER_AUTH_INIT_MAX << "]";
+                    *strReason = oss.str();
+                }
+                return false;
+            }
+
+            return true;
+        }
+        else if(nOpcode == Opcodes::MINER_AUTH_RESPONSE)
+        {
+            const size_t MIN_AUTH_RESPONSE = FalconConstants::LENGTH_FIELD_SIZE +
+                                             FalconConstants::FALCON512_PUBKEY_SIZE +
+                                             FalconConstants::TIMESTAMP_SIZE +
+                                             FalconConstants::LENGTH_FIELD_SIZE +
+                                             FalconConstants::FALCON512_SIG_MIN;
+
+            if(nLength < MIN_AUTH_RESPONSE ||
+               nLength > FalconConstants::AUTH_RESPONSE_ENCRYPTED_MAX)
+            {
+                if(strReason)
+                {
+                    std::ostringstream oss;
+                    oss << "MINER_AUTH_RESPONSE length " << nLength
+                        << " outside valid range [" << MIN_AUTH_RESPONSE
+                        << ", " << FalconConstants::AUTH_RESPONSE_ENCRYPTED_MAX << "]";
+                    *strReason = oss.str();
+                }
+                return false;
+            }
+
+            return true;
+        }
+        else if(nOpcode == Opcodes::SUBMIT_BLOCK)
+        {
+            if(nLength > FalconConstants::SUBMIT_BLOCK_WRAPPER_ENCRYPTED_MAX)
+            {
+                if(strReason)
+                {
+                    std::ostringstream oss;
+                    oss << "SUBMIT_BLOCK length " << nLength
+                        << " exceeds maximum " << FalconConstants::SUBMIT_BLOCK_WRAPPER_ENCRYPTED_MAX;
+                    *strReason = oss.str();
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        if(nOpcode == Opcodes::SESSION_STATUS || nOpcode == Opcodes::SESSION_STATUS_ACK)
+        {
+            const uint32_t nExpected = (nOpcode == Opcodes::SESSION_STATUS) ? 8u : 16u;
+            if(nLength != nExpected)
+            {
+                if(strReason)
+                {
+                    std::ostringstream oss;
+                    oss << GetOpcodeName(nOpcode) << " requires exactly "
+                        << nExpected << " bytes, got " << nLength;
+                    *strReason = oss.str();
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        if(IsHeaderOnlyRequest(nOpcode))
+        {
+            if(nLength != 0)
+            {
+                if(strReason)
+                {
+                    std::ostringstream oss;
+                    oss << GetOpcodeName(nOpcode) << " expects no data payload, received "
+                        << nLength << " bytes";
+                    *strReason = oss.str();
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        const int32_t nMaxSize = GetMaxPayloadSize(nOpcode);
+        if(nMaxSize >= 0 && nLength > static_cast<uint32_t>(nMaxSize))
+        {
+            if(strReason)
+            {
+                std::ostringstream oss;
+                oss << GetOpcodeName(nOpcode) << " payload size " << nLength
+                    << " exceeds maximum of " << nMaxSize << " bytes";
+                *strReason = oss.str();
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+
     bool ValidatePacketLength(const Packet& packet, std::string* strReason)
     {
         /* Check against maximum packet length */
@@ -217,103 +331,8 @@ namespace OpcodeUtility
         
         /* Check packet-specific length constraints based on opcode */
         uint8_t nOpcode = packet.HEADER;
-        
-        /* Authentication packets have specific size constraints */
-        if(nOpcode == Opcodes::MINER_AUTH_INIT)
-        {
-            /* MINER_AUTH_INIT: pubkey_len(2) + pubkey(897-1793) + miner_id_len(2) + miner_id(0-256) + genesis(0-32)
-             * Minimum: 901 bytes (Falcon-512, no miner_id, no genesis)
-             * Maximum: 2085 bytes (Falcon-1024, max miner_id, with genesis)
-             */
-            if(packet.LENGTH < FalconConstants::MINER_AUTH_INIT_MIN || 
-               packet.LENGTH > FalconConstants::MINER_AUTH_INIT_MAX)
-            {
-                if(strReason)
-                {
-                    std::ostringstream oss;
-                    oss << "MINER_AUTH_INIT length " << packet.LENGTH 
-                        << " outside valid range [" << FalconConstants::MINER_AUTH_INIT_MIN
-                        << ", " << FalconConstants::MINER_AUTH_INIT_MAX << "]";
-                    *strReason = oss.str();
-                }
-                return false;
-            }
-        }
-        else if(nOpcode == Opcodes::MINER_AUTH_RESPONSE)
-        {
-            /* MINER_AUTH_RESPONSE: pubkey_len(2) + pubkey(897-1793) + timestamp(8) + sig_len(2) + sig(600-1577)
-             * With optional ChaCha20 encryption overhead: +28 bytes
-             * Minimum: ~1510 bytes (Falcon-512, no encryption)
-             * Maximum: 3410 bytes (Falcon-1024 encrypted)
-             */
-            const size_t MIN_AUTH_RESPONSE = FalconConstants::LENGTH_FIELD_SIZE + 
-                                              FalconConstants::FALCON512_PUBKEY_SIZE + 
-                                              FalconConstants::TIMESTAMP_SIZE + 
-                                              FalconConstants::LENGTH_FIELD_SIZE + 
-                                              FalconConstants::FALCON512_SIG_MIN;  // ~1509 bytes
-            
-            if(packet.LENGTH < MIN_AUTH_RESPONSE || 
-               packet.LENGTH > FalconConstants::AUTH_RESPONSE_ENCRYPTED_MAX)
-            {
-                if(strReason)
-                {
-                    std::ostringstream oss;
-                    oss << "MINER_AUTH_RESPONSE length " << packet.LENGTH 
-                        << " outside valid range [" << MIN_AUTH_RESPONSE
-                        << ", " << FalconConstants::AUTH_RESPONSE_ENCRYPTED_MAX << "]";
-                    *strReason = oss.str();
-                }
-                return false;
-            }
-        }
-        else if(nOpcode == Opcodes::SUBMIT_BLOCK)
-        {
-            /* SUBMIT_BLOCK: block header + prime offsets + timestamp + signature + optional encryption
-             * Miners submit block headers only; the node holds all transactions.
-             * Maximum: SUBMIT_BLOCK_WRAPPER_ENCRYPTED_MAX bytes
-             */
-            if(packet.LENGTH > FalconConstants::SUBMIT_BLOCK_WRAPPER_ENCRYPTED_MAX)
-            {
-                if(strReason)
-                {
-                    std::ostringstream oss;
-                    oss << "SUBMIT_BLOCK length " << packet.LENGTH 
-                        << " exceeds maximum " << FalconConstants::SUBMIT_BLOCK_WRAPPER_ENCRYPTED_MAX;
-                    *strReason = oss.str();
-                }
-                return false;
-            }
-        }
-        
-        /* Validate header-only requests have no payload */
-        if(IsHeaderOnlyRequest(nOpcode))
-        {
-            if(packet.LENGTH != 0)
-            {
-                if(strReason)
-                {
-                    std::ostringstream oss;
-                    oss << GetOpcodeName(nOpcode) << " expects no data payload, received " 
-                        << packet.LENGTH << " bytes";
-                    *strReason = oss.str();
-                }
-                return false;
-            }
-        }
-        
-        /* Validate fixed-size opcodes don't exceed maximum */
-        int32_t nMaxSize = GetMaxPayloadSize(nOpcode);
-        if(nMaxSize >= 0 && packet.LENGTH > static_cast<uint32_t>(nMaxSize))
-        {
-            if(strReason)
-            {
-                std::ostringstream oss;
-                oss << GetOpcodeName(nOpcode) << " payload size " << packet.LENGTH 
-                    << " exceeds maximum of " << nMaxSize << " bytes";
-                *strReason = oss.str();
-            }
+        if(!ValidateLegacyOpcodeLength(nOpcode, packet.LENGTH, strReason))
             return false;
-        }
 
         /* Cross-check: log v1 vs v2 payload size for SESSION_KEEPALIVE (observability) */
         if(nOpcode == Opcodes::SESSION_KEEPALIVE)
@@ -537,6 +556,12 @@ namespace OpcodeUtility
             }
             return false;
         }
+
+        /* Mirrored stateless opcodes inherit the same contract as the legacy
+         * opcode they mirror. Rejecting these at header time prevents a bogus
+         * declared payload length from getting stuck as a partial frame. */
+        if(Stateless::IsStateless(packet.HEADER) && !IsUnmirroredStatelessOpcode(packet.HEADER))
+            return ValidateLegacyOpcodeLength(Stateless::Unmirror(packet.HEADER), packet.LENGTH, strReason);
 
         /* Fixed-size payload enforcement for un-mirrored stateless opcodes */
         uint32_t nExpected = GetExpectedPayloadSize16(packet.HEADER);
