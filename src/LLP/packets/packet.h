@@ -171,18 +171,17 @@ namespace LLP
 
         /** HasDataPayload
          *
-         *  Determines if this packet type requires a data payload.
-         *  Traditional packets use HEADER < 128 for data packets and HEADER >= 128
-         *  for request/command packets. However, the Falcon authentication protocol
-         *  (headers 207-212), reward address binding packets (213-214), mining round
-         *  response packets (204-205), and the channel acknowledgment packet (206)
-         *  require data payloads.
+         *  Determines if this packet type may carry a data payload.
+         *  Legacy LLP framing is always [HEADER][LENGTH][DATA], even when LENGTH is 0,
+         *  so this helper classifies payload-capable opcodes rather than deciding
+         *  whether the 4-byte length field is present.
          *
-         *  Packet ranges requiring data:
+         *  Payload-capable packets:
          *  - 0-127: Traditional data packets (BLOCK_DATA, SUBMIT_BLOCK, etc.)
          *  - 204-205: Mining round response packets (PR #151/PR #153)
          *    - NEW_ROUND (204): 16 bytes - Full Height Picture: unified + prime + hash + stake heights
          *    - OLD_ROUND (205): variable - rejection reason or stale height info
+         *  - 201: BLOCK_REJECTED may carry rejection/control payload bytes
          *  - 206: Channel acknowledgment
          *    - CHANNEL_ACK (206): channel number (1 byte)
          *  - 207-212: Falcon authentication and session packets
@@ -196,7 +195,7 @@ namespace LLP
          *    - MINER_SET_REWARD (213): encrypted reward address
          *    - MINER_REWARD_RESULT (214): encrypted validation result
          *
-         *  @return true if this packet type carries data payload
+         *  @return true if this packet type may carry data payload
          *
          **/
         bool HasDataPayload() const
@@ -211,10 +210,8 @@ namespace LLP
 
         /** Header
          *
-         *  Determines if header is fully read.
-         *  For data packets (HEADER < 128, round response 204-205, channel ack 206,
-         *  Falcon auth 207-212, or reward binding 213-214), requires LENGTH > 0.
-         *  For request packets (128-203, 215-254), LENGTH must be 0.
+         *  Determines if header and the legacy 4-byte length field are fully read.
+         *  Payload validity is checked separately by opcode-specific validation.
          *
          **/
         bool Header() const
@@ -222,12 +219,12 @@ namespace LLP
             if(IsNull())
                 return false;
 
-            /* Data packets require LENGTH > 0 (includes Falcon auth packets) */
-            if(HasDataPayload())
-                return LENGTH > 0;
+            /* Header-only request/command packets must declare LENGTH == 0. */
+            if(OpcodeUtility::IsHeaderOnlyRequest(HEADER))
+                return LENGTH == 0;
 
-            /* Request/command packets have no data (LENGTH == 0) */
-            return HEADER < 255 && LENGTH == 0;
+            /* All other legacy opcodes are complete once header+length are read. */
+            return HEADER < 255;
         }
 
 
@@ -267,19 +264,14 @@ namespace LLP
          **/
         std::vector<uint8_t> GetBytes() const
         {
-            std::vector<uint8_t> BYTES(1, HEADER);
-
-            /* Handle packets that carry data payloads (traditional data packets,
-             * Falcon authentication packets, and reward binding packets) */
-            if(HasDataPayload())
-            {
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 16));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 8));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH));
-
-                BYTES.insert(BYTES.end(),  DATA.begin(), DATA.end());
-            }
+            std::vector<uint8_t> BYTES;
+            BYTES.reserve(5 + DATA.size());
+            BYTES.push_back(HEADER);
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 16));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 8));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH));
+            BYTES.insert(BYTES.end(), DATA.begin(), DATA.end());
 
             return BYTES;
         }
@@ -290,9 +282,9 @@ namespace LLP
          *  Serializes class into a byte vector with detailed debugging logs.
          *  Used for diagnosing packet encoding issues in Falcon handshake.
          *
-         *  Handles both traditional data packets (HEADER < 128), mining round
-         *  response packets (204-205), Falcon authentication packets (207-212),
-         *  and reward binding packets (213-214) which all require data payloads.
+         *  Emits legacy framing exactly as it appears on the wire:
+         *  [HEADER][LENGTH][DATA]. This includes header-only requests where
+         *  LENGTH is zero.
          *
          *  @param[in] strContext Context string for log messages
          *
@@ -301,22 +293,20 @@ namespace LLP
          **/
         std::vector<uint8_t> GetBytesWithDebug(const std::string& strContext = "") const
         {
-            std::vector<uint8_t> BYTES(1, HEADER);
+            std::vector<uint8_t> BYTES;
+            BYTES.reserve(5 + DATA.size());
+            BYTES.push_back(HEADER);
 
             /* Log packet header info */
             std::string strLog = strContext.empty() ? "Packet::GetBytes" : strContext;
+            (void)strLog;
 
-            /* Handle packets that carry data payloads */
-            if(HasDataPayload())
-            {
-                /* Encode length and data */
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 16));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH >> 8));
-                BYTES.push_back(static_cast<uint8_t>(LENGTH));
-
-                BYTES.insert(BYTES.end(), DATA.begin(), DATA.end());
-            }
+            /* Legacy framing always includes the 4-byte length field. */
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 24));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 16));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH >> 8));
+            BYTES.push_back(static_cast<uint8_t>(LENGTH));
+            BYTES.insert(BYTES.end(), DATA.begin(), DATA.end());
 
             return BYTES;
         }
