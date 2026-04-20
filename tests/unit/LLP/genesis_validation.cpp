@@ -100,8 +100,6 @@ TEST_CASE("Genesis Validation Tests", "[genesis_validation]")
         REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::INVALID_SIZE) == "Invalid size");
         REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::INVALID_TYPE) == "Invalid type byte");
         REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::NOT_ON_CHAIN) == "Not found on blockchain");
-        REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::NO_DEFAULT_ACCOUNT) == "No default account found");
-        REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::DEFAULT_ACCOUNT_INVALID) == "Default account invalid");
         REQUIRE(GenesisConstants::GetValidationResultString(GenesisConstants::ZERO_GENESIS) == "Zero genesis");
     }
 
@@ -120,11 +118,6 @@ TEST_CASE("Genesis Validation Tests", "[genesis_validation]")
 
 TEST_CASE("Genesis Constants Values", "[genesis_constants]")
 {
-    SECTION("Genesis hash size constant is correct")
-    {
-        REQUIRE(GenesisConstants::GENESIS_HASH_SIZE == 32);
-    }
-
     SECTION("Genesis hex length constant is correct")
     {
         REQUIRE(GenesisConstants::GENESIS_HEX_LENGTH == 64);

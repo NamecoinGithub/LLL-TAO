@@ -62,6 +62,7 @@ ________________________________________________________________________________
 #include <memory>
 #include <iomanip>
 #include <bitset>
+#include <optional>
 
 namespace LLP
 {
@@ -109,6 +110,13 @@ namespace LLP
     memory::atomic<LLP::BaseAddress> TritiumNode::addrThis;
 
 
+    /* GlobalGetBlockLimiter static member definitions.
+     * Process-wide counters for the global ACTION::GET BLOCK rate cap.
+     * Initialized to 0 so the first window starts on first use. */
+    std::atomic<uint32_t> GlobalGetBlockLimiter::nGlobalBlockCount{0};
+    std::atomic<uint64_t> GlobalGetBlockLimiter::nWindowStartMs{0};
+
+
     /** Default Constructor **/
     TritiumNode::TritiumNode()
     : BaseConnection<MessagePacket>()
@@ -131,6 +139,7 @@ namespace LLP
     , hashCheckpoint(0)
     , hashBestChain(0)
     , hashLastIndex(0)
+    , nConsecutiveLastIndex(0)
     , nConsecutiveOrphans(0)
     , nConsecutiveFails(0)
     , strFullVersion()
@@ -163,6 +172,7 @@ namespace LLP
     , hashCheckpoint(0)
     , hashBestChain(0)
     , hashLastIndex(0)
+    , nConsecutiveLastIndex(0)
     , nConsecutiveOrphans(0)
     , nConsecutiveFails(0)
     , strFullVersion()
@@ -194,6 +204,7 @@ namespace LLP
     , hashCheckpoint(0)
     , hashBestChain(0)
     , hashLastIndex(0)
+    , nConsecutiveLastIndex(0)
     , nConsecutiveOrphans(0)
     , nConsecutiveFails(0)
     , strFullVersion()
@@ -1224,8 +1235,11 @@ namespace LLP
                 const uint32_t nBatchLimit =
                     config::GetArg("-batchlimit", 2500);
 
-                /* Set the block batch limits */
-                int32_t nLimits = nBatchLimit;
+                /* Track the number of blocks left to send in this response. */
+                int32_t nBlockBudget = static_cast<int32_t>(nBatchLimit);
+
+                /* Transaction/inventory reads can still use the configured batch size. */
+                const uint32_t nInventoryBatchSize = nBatchLimit;
 
                 /* Get the next type in stream. */
                 uint8_t nType = 0;
@@ -1341,9 +1355,15 @@ namespace LLP
 
                         /* Do a sequential read to obtain the list at our set limit. */
                         std::vector<TAO::Ledger::BlockState> vStates;
-                        while(!fBufferFull.load() && --nLimits >= 0 && hashStart != hashStop
-                            && LLD::Ledger->BatchRead(hashLastRead, "block", vStates, nBatchLimit, true))
+
+                        while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop)
                         {
+                            const auto nNextBlockBatchSize = static_cast<uint32_t>(
+                                std::min<int32_t>(nBlockBudget, static_cast<int32_t>(nBatchLimit)));
+
+                            if(!LLD::Ledger->BatchRead(hashLastRead, "block", vStates, nNextBlockBatchSize, true))
+                                break;
+
                             /* Loop through all available states. */
                             for(auto& state : vStates)
                             {
@@ -1389,7 +1409,7 @@ namespace LLP
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<TAO::Ledger::Transaction> vList;
-                                                        if(LLD::Ledger->BatchRead(proof.second, "tx", vList, nBatchLimit, false))
+                                                        if(LLD::Ledger->BatchRead(proof.second, "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
                                                             for(const auto& tBatch : vList)
@@ -1440,7 +1460,7 @@ namespace LLP
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<Legacy::Transaction> vList;
-                                                        if(LLD::Legacy->BatchRead(std::make_pair(std::string("tx"), proof.second), "tx", vList, nBatchLimit, false))
+                                                        if(LLD::Legacy->BatchRead(std::make_pair(std::string("tx"), proof.second), "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
                                                             for(const auto& tBatch : vList)
@@ -1504,7 +1524,7 @@ namespace LLP
                                 hashStart = hashLastRead;
 
                                 /* Check for stop hash. */
-                                if(--nLimits <= 0 || hashStart == hashStop || fBufferFull.load()) //1MB limit
+                                if(--nBlockBudget <= 0 || hashStart == hashStop || fBufferFull.load()) //1MB limit
                                 {
                                     /* Regular debug for normal limits */
                                     if(config::nVerbose >= 3)
@@ -1513,7 +1533,7 @@ namespace LLP
                                         if(fBufferFull.load())
                                             debug::log(3, FUNCTION, "Buffer is FULL ", Buffered(), " bytes");
 
-                                        debug::log(3, FUNCTION, "Limits ", nLimits, " Reached ", hashStart.SubString(), " == ", hashStop.SubString());
+                                        debug::log(3, FUNCTION, "Block budget ", nBlockBudget, " Reached ", hashStart.SubString(), " == ", hashStop.SubString());
                                     }
 
                                     break;
@@ -1781,6 +1801,66 @@ namespace LLP
                             uint1024_t hashBlock;
                             ssPacket >> hashBlock;
 
+                            /* ── RATE LIMITING (before any LLD I/O) ──────────────────────
+                             * CRITICAL FIX: All rate-limit checks now fire BEFORE ReadBlock()
+                             * so that no disk I/O / SECTOR_MUTEX contention occurs when we are
+                             * over budget.  Previously the limiters ran AFTER ReadBlock() — the
+                             * I/O had already consumed shared LLD::Ledger SECTOR_MUTEX time by
+                             * the time the throttle was consulted, making it ineffective at
+                             * protecting mining template creation from P2P block-serving floods. */
+
+                            /* Add DDOS filtering first (cheap atomic increment). */
+                            if(DDOS)
+                                DDOS->rSCORE += 50;
+
+                            /* Per-connection GET::BLOCK rate limiting.
+                             * Reset the rolling window if expired, then check whether
+                             * this connection has exceeded the per-window block limit.
+                             * If so, log once and skip the remaining items in this packet
+                             * to protect block validation and mining push notification paths. */
+                            m_getTracker.MaybeResetWindow();
+                            {
+                                const uint32_t nMaxBlocks = static_cast<uint32_t>(
+                                    config::GetArg(std::string("-maxgetblocks"),
+                                        static_cast<int64_t>(GetRequestRateTracker::DEFAULT_MAX_GET_BLOCKS)));
+
+                                if(m_getTracker.ShouldThrottleBlock(nMaxBlocks))
+                                {
+                                    debug::log(2, NODE, "ACTION::GET::BLOCK throttled — peer ",
+                                               GetAddress().ToStringIP(), " exceeded ",
+                                               nMaxBlocks,
+                                               " block requests/", GetRequestRateTracker::WINDOW_SECONDS, "s window");
+                                    break;
+                                }
+                            }
+
+                            /* Global aggregate rate limiter — protects shared LLD I/O for mining.
+                             * Applies after the per-connection guard: even if each peer is within
+                             * its individual budget, the combined aggregate can monopolise
+                             * LLD::Ledger, starving mining template creation (new_block()).
+                             * Cap configurable via -maxglobalgetblocks (default 100/s). */
+                            {
+                                const uint32_t nGlobalMax = static_cast<uint32_t>(
+                                    config::GetArg(std::string("-maxglobalgetblocks"),
+                                        static_cast<int64_t>(GlobalGetBlockLimiter::DEFAULT_MAX_GLOBAL_GET_BLOCKS_PER_SEC)));
+
+                                if(GlobalGetBlockLimiter::ShouldThrottle(nGlobalMax))
+                                {
+                                    debug::log(1, NODE, "ACTION::GET::BLOCK global throttle — aggregate P2P block serving rate exceeded (",
+                                               nGlobalMax, "/s cap)");
+                                    std::this_thread::yield();
+                                    break;
+                                }
+
+                                /* Record BEFORE the I/O so the counter accurately reflects
+                                 * requests that will consume SECTOR_MUTEX time. */
+                                GlobalGetBlockLimiter::RecordServed();
+                            }
+
+                            /* ── LLD I/O (only if under rate limits) ─────────────────────
+                             * Now safe to touch disk: both per-connection and global caps
+                             * passed, so this read won't starve mining template creation. */
+
                             /* Check the database for the block. */
                             TAO::Ledger::BlockState state;
                             if(LLD::Ledger->ReadBlock(hashBlock, state))
@@ -1844,7 +1924,6 @@ namespace LLP
                                                 if(!LLD::Ledger->ReadTx(proof.second, tx, TAO::Ledger::FLAGS::MEMPOOL))
                                                     continue;
 
-
                                                 /* Push message of transaction. */
                                                 PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::TRITIUM), tx);
                                             }
@@ -1859,30 +1938,7 @@ namespace LLP
                             /* Debug output. */
                             debug::log(3, NODE, "ACTION::GET: BLOCK ", hashBlock.SubString());
 
-                            /* Add DDOS filtering here. */
-                            if(DDOS)
-                                DDOS->rSCORE += 50;
-
-                            /* Per-connection GET::BLOCK rate limiting.
-                             * Reset the rolling window if expired, then check whether
-                             * this connection has exceeded the per-window block limit.
-                             * If so, log once and skip the remaining items in this packet
-                             * to protect block validation and mining push notification paths. */
-                            m_getTracker.MaybeResetWindow();
-                            {
-                                const uint32_t nMaxBlocks = static_cast<uint32_t>(
-                                    config::GetArg(std::string("-maxgetblocks"),
-                                        static_cast<int64_t>(GetRequestRateTracker::DEFAULT_MAX_GET_BLOCKS)));
-
-                                if(m_getTracker.ShouldThrottleBlock(nMaxBlocks))
-                                {
-                                    debug::log(0, NODE, "ACTION::GET::BLOCK throttled — peer ",
-                                               GetAddress().ToStringIP(), " exceeded ",
-                                               nMaxBlocks,
-                                               " block requests/", GetRequestRateTracker::WINDOW_SECONDS, "s window");
-                                    break;
-                                }
-                            }
+                            /* Per-second yield scoring (post-I/O, for fairness). */
                             if(m_getTracker.RecordGetBlock(
                                 static_cast<uint32_t>(config::GetArg(std::string("-getyieldthreshold"),
                                     static_cast<int64_t>(GetRequestRateTracker::DEFAULT_YIELD_SCORE)))))
@@ -1953,7 +2009,7 @@ namespace LLP
 
                                 if(m_getTracker.ShouldThrottleTx(nMaxTx))
                                 {
-                                    debug::log(0, NODE, "ACTION::GET::TRANSACTION throttled — peer ",
+                                    debug::log(2, NODE, "ACTION::GET::TRANSACTION throttled — peer ",
                                                GetAddress().ToStringIP(), " exceeded ",
                                                nMaxTx,
                                                " tx requests/", GetRequestRateTracker::WINDOW_SECONDS, "s window");
@@ -2315,9 +2371,15 @@ namespace LLP
                                         /* Check if we are repeating our last index. */
                                         if(hashLastIndex == hashLast)
                                         {
-                                            SwitchNode();
-                                            return true;
+                                            if(++nConsecutiveLastIndex >= 3)
+                                            {
+                                                nConsecutiveLastIndex = 0;
+                                                SwitchNode();
+                                                return true;
+                                            }
                                         }
+                                        else
+                                            nConsecutiveLastIndex = 0;
 
                                         /* Check for complete synchronization. */
                                         if(hashLast == TAO::Ledger::ChainState::hashBestChain.load()
@@ -2637,7 +2699,7 @@ namespace LLP
                                 ssResponse << uint8_t(TYPES::TRANSACTION) << tx.second;
 
                                 /* Log the missing data. */
-                                debug::log(0, FUNCTION, "requesting missing tx ", tx.second.SubString());
+                                debug::log(2, FUNCTION, "requesting missing tx ", tx.second.SubString());
 
                                 /* Check if we need to create new protocol message. */
                                 if(++nTotalItems >= ACTION::GET_MAX_ITEMS || tx == block.vMissing.back())
@@ -2649,7 +2711,7 @@ namespace LLP
                                         /* Send out another getblocks request. */
                                         try
                                         {
-                                            debug::log(0, FUNCTION, "broadcasting packet with ", nTotalItems, " items to ", pnode->GetAddress().ToStringIP());
+                                            debug::log(2, FUNCTION, "broadcasting packet with ", nTotalItems, " items to ", pnode->GetAddress().ToStringIP());
 
                                             /* Write our packet with our total items. */
                                             pnode->WritePacket(NewMessage(ACTION::GET, ssResponse));
@@ -2749,8 +2811,6 @@ namespace LLP
                                 uint1024_t(block.hashPrevBlock)
                             );
                         }
-
-                        break;
 
                         /* Log received. */
                         debug::log(3, FUNCTION, "received client block ", block.GetHash().SubString(), " height = ", block.nHeight);
@@ -3881,61 +3941,82 @@ namespace LLP
     /* Helper function to switch the nodes on sync. */
     void TritiumNode::SwitchNode()
     {
-        /* Track our current sync sessions. */
-        std::pair<uint32_t, uint32_t> pairSession;
+        constexpr uint32_t SWITCH_NODE_MAX_RETRIES = 3;
+        constexpr uint32_t SWITCH_NODE_RETRY_DELAY_SECONDS = 3;
 
-        /* Only check our current sync session if it is active. */
-        if(TAO::Ledger::nSyncSession.load() != 0)
-        { LOCK(SESSIONS_MUTEX);
-
-            /* Check for session. */
-            if(!mapSessions.count(TAO::Ledger::nSyncSession.load()))
-                return;
-
-            /* Set the current session. */
-            pairSession = mapSessions[TAO::Ledger::nSyncSession.load()];
-        }
-
-        /* Normal case of asking for a getblocks inventory message. */
-        std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->GetConnection(pairSession);
-        if(pnode != nullptr)
+        const auto sleepBeforeRetry = [](const uint32_t nAttempt, const uint32_t nMaxRetries, const uint32_t nRetryDelaySeconds)
         {
-            /* Send out another getblocks request. */
+            if(nAttempt + 1 < nMaxRetries)
+                runtime::sleep(nRetryDelaySeconds * 1000);
+        };
+
+        for(uint32_t nAttempt = 0; nAttempt < SWITCH_NODE_MAX_RETRIES; ++nAttempt)
+        {
+            /* Track our current sync session so we can exclude it when selecting
+             * the next peer. */
+            std::optional<std::pair<uint32_t, uint32_t>> pairSession;
+            const uint64_t nSyncSession = TAO::Ledger::nSyncSession.load();
+
+            if(nSyncSession != 0)
+            { LOCK(SESSIONS_MUTEX);
+
+                const auto it = mapSessions.find(nSyncSession);
+                if(it != mapSessions.end())
+                    pairSession = it->second;
+                else
+                {
+                    debug::warning(FUNCTION, "Sync session ", nSyncSession, " missing from session map; selecting a new peer");
+                    TAO::Ledger::nSyncSession.store(0);
+                }
+            }
+
+            /* Normal case of asking for a getblocks inventory message. */
+            std::shared_ptr<TritiumNode> pnode = pairSession ? TRITIUM_SERVER->GetConnection(*pairSession)
+                                                            : TRITIUM_SERVER->GetConnection();
+            if(pnode == nullptr)
+            {
+                sleepBeforeRetry(nAttempt, SWITCH_NODE_MAX_RETRIES, SWITCH_NODE_RETRY_DELAY_SECONDS);
+                continue;
+            }
+
             try
             {
-                /* Get the current sync node. */
-                std::shared_ptr<TritiumNode> pcurrent =
-                    TRITIUM_SERVER->GetConnection(pairSession.first, pairSession.second);
+                if(pairSession)
+                {
+                    /* Get the current sync node. */
+                    std::shared_ptr<TritiumNode> pcurrent =
+                        TRITIUM_SERVER->GetConnection(pairSession->first, pairSession->second);
 
-                /* Make sure this is an active connection. */
-                if(pcurrent)
-                    pcurrent->Unsubscribe(SUBSCRIPTION::LASTINDEX | SUBSCRIPTION::BESTCHAIN);
+                    /* Make sure this is an active connection. */
+                    if(pcurrent)
+                        pcurrent->Unsubscribe(SUBSCRIPTION::LASTINDEX | SUBSCRIPTION::BESTCHAIN);
+                }
 
                 /* Initiate the sync */
                 pnode->Sync();
+
+                return;
             }
             catch(const std::exception& e)
             {
-                /* Recurse on failure. */
                 debug::error(FUNCTION, e.what());
+                TAO::Ledger::nSyncSession.store(0);
 
-                SwitchNode();
+                sleepBeforeRetry(nAttempt, SWITCH_NODE_MAX_RETRIES, SWITCH_NODE_RETRY_DELAY_SECONDS);
             }
         }
-        else
-        {
-            /* Reset the current sync node. */
-            TAO::Ledger::nSyncSession.store(0);
 
-            /* Logging to verify (for debugging). */
-            debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 15 seconds...");
+        /* Reset the current sync node. */
+        TAO::Ledger::nSyncSession.store(0);
 
-            /* Wait for timeouts and then restart. */
-            runtime::sleep(15000);
+        /* Logging to verify (for debugging). */
+        debug::log(0, FUNCTION, "No Sync Nodes Available, reconnecting to DNS seeds in 15 seconds...");
 
-            /* Reconnect to our seed nodes. */
-            LLP::MakeConnections(TRITIUM_SERVER);
-        }
+        /* Wait for timeouts and then restart. */
+        runtime::sleep(15000);
+
+        /* Reconnect to our seed nodes. */
+        LLP::MakeConnections(TRITIUM_SERVER);
     }
 
 

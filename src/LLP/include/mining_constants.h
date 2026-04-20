@@ -15,7 +15,14 @@ ________________________________________________________________________________
 #ifndef NEXUS_LLP_INCLUDE_MINING_CONSTANTS_H
 #define NEXUS_LLP_INCLUDE_MINING_CONSTANTS_H
 
+#include <LLP/include/node_cache.h>
+
+#include <Util/include/args.h>
+#include <Util/include/config.h>
+
 #include <cstdint>
+#include <limits>
+#include <string>
 
 namespace LLP
 {
@@ -152,9 +159,112 @@ namespace MiningConstants
     constexpr int64_t NODE_HEALTH_PROBE_INTERVAL_SEC = 120;
 
     //=========================================================================
+    // POLL TIMEOUT
+    //=========================================================================
+
+    /** Default poll() timeout for mining DataThreads (milliseconds).
+     *
+     *  The generic DataThread uses a 100 ms poll() timeout which is fine for
+     *  P2P traffic but adds up to 100 ms of latency for mining I/O — the
+     *  single biggest source of mining read-side delay.
+     *
+     *  Mining DataThread instances (Miner, StatelessMinerConnection) use this
+     *  much shorter timeout so that incoming share submissions and protocol
+     *  messages are picked up with minimal delay.  The trade-off is slightly
+     *  higher CPU utilisation on mining threads, but mining DataThreads
+     *  typically serve far fewer connections than P2P threads and the extra
+     *  wakeups are negligible.
+     *
+     *  Default: 10 ms.
+     *  Overridable at runtime via -miningpolltimeout=<ms>.
+     */
+    constexpr uint32_t DEFAULT_MINING_POLL_TIMEOUT_MS = 10;
+
+    //=========================================================================
+    // CONNECTION TIMEOUTS
+    //=========================================================================
+
+    /** Default read-idle timeout for authenticated mining connections
+     *  (milliseconds).
+     *
+     *  Authenticated miners use this long but finite timeout instead of the
+     *  shorter server-default socket timeout.  It is intentionally aligned with
+     *  the 24-hour keepalive/session liveness window so a healthy miner is not
+     *  disconnected earlier than its session would expire, while still keeping
+     *  transport cleanup finite — preventing
+     *  the "shadow ban" scenario where PUSH works but all miner→node
+     *  requests are silently dropped.
+     *
+     *  The shared MiningConstants liveness helpers clamp runtime config so the
+     *  effective read timeout never falls below the 24-hour mining session
+     *  liveness window.
+     *
+     *  Default: 86 400 000 ms (24 hours).
+     *  Overridable at runtime via -miningreadtimeout=<ms>, subject to the
+     *  shared policy floor.
+     */
+    constexpr uint32_t DEFAULT_MINING_READ_TIMEOUT_MS = 86400000;
+
+    /** Shared 24-hour transport floor.
+     *
+     *  Mining read-idle timeout is intentionally aligned with the 24-hour
+     *  keepalive/session liveness window so a healthy authenticated miner is
+     *  not disconnected earlier than the node would expire its session.
+     *  This is intentionally coupled to NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS
+     *  so transport-idle policy and session-liveness policy cannot drift apart.
+     */
+    /** Session-liveness timeout as uint64 to prevent overflow during ms conversion. */
+    constexpr uint64_t READ_TIMEOUT_FLOOR_SEC_U64 =
+        static_cast<uint64_t>(NodeCache::SESSION_LIVENESS_TIMEOUT_SECONDS);
+
+    /** 24-hour session-liveness floor expressed in milliseconds before narrowing. */
+    constexpr uint64_t READ_TIMEOUT_FLOOR_MS_U64 =
+        READ_TIMEOUT_FLOOR_SEC_U64 * 1000ULL;
+
+    static_assert(READ_TIMEOUT_FLOOR_SEC_U64 <=
+            std::numeric_limits<uint64_t>::max() / 1000ULL,
+        "SESSION_LIVENESS_TIMEOUT_SECONDS must not overflow uint64 during ms conversion.");
+    static_assert(READ_TIMEOUT_FLOOR_MS_U64 <=
+            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+        "SESSION_LIVENESS_TIMEOUT_SECONDS must fit in uint32 milliseconds.");
+    constexpr uint32_t READ_TIMEOUT_FLOOR_MS =
+        static_cast<uint32_t>(READ_TIMEOUT_FLOOR_MS_U64);
+    static_assert(DEFAULT_MINING_READ_TIMEOUT_MS >= READ_TIMEOUT_FLOOR_MS,
+        "DEFAULT_MINING_READ_TIMEOUT_MS must satisfy the shared mining read-timeout floor.");
+
+    /** Shared session liveness timeout accessor used by legacy/stateless paths. */
+    inline uint64_t GetSessionLivenessTimeoutSec(const std::string& strAddress = std::string())
+    {
+        return NodeCache::GetSessionLivenessTimeout(strAddress);
+    }
+
+    /** Shared accessor for authenticated mining read-idle timeout.
+     *
+     *  Runtime config remains supported, but values below the policy floor are
+     *  clamped upward so operators cannot shorten the transport timeout below
+     *  the 24-hour mining liveness contract.
+     */
+    inline uint32_t GetConfiguredReadTimeoutMs()
+    {
+        const int64_t nConfigured = config::GetArg(
+            "-miningreadtimeout",
+            static_cast<int64_t>(DEFAULT_MINING_READ_TIMEOUT_MS));
+
+        const int64_t nClamped =
+            (nConfigured < static_cast<int64_t>(READ_TIMEOUT_FLOOR_MS))
+                ? static_cast<int64_t>(READ_TIMEOUT_FLOOR_MS)
+                : nConfigured;
+
+        if(nClamped >= static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
+            return std::numeric_limits<uint32_t>::max();
+
+        return static_cast<uint32_t>(nClamped);
+    }
+
+    //=========================================================================
     // DIFFICULTY CACHING
     //=========================================================================
-    
+
     /** Difficulty cache time-to-live in milliseconds (1 second)
      *  Reduces expensive GetNextTargetRequired() calls during high mining activity
      */

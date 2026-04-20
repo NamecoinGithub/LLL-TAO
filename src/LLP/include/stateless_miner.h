@@ -816,6 +816,13 @@ namespace LLP
          **/
         MiningContext WithTimestamp(uint64_t nTimestamp_) const;
 
+        /** WithProtocolVersion
+         *
+         *  Returns a new context with updated protocol version.
+         *
+         **/
+        MiningContext WithProtocolVersion(uint32_t nProtocolVersion_) const;
+
         /** WithAuth
          *
          *  Returns a new context with updated authentication status.

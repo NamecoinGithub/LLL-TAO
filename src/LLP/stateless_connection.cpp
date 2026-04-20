@@ -12,6 +12,7 @@
 ____________________________________________________________________________________________*/
 
 #include <LLP/templates/stateless_connection.h>
+#include <LLP/include/opcode_utility.h>
 #include <LLP/templates/events.h>
 
 namespace LLP
@@ -49,8 +50,10 @@ namespace LLP
      */
     void StatelessConnection::ReadPacket()
     {
+        int32_t nAvailable = Available();
+
         /* Handle Reading Packet Header (16-bit, big-endian). */
-        if(Available() >= 2 && INCOMING.IsNull())
+        if(nAvailable >= 2 && INCOMING.IsNull())
         {
             std::vector<uint8_t> HEADER(2, 0);
             if(Read(HEADER, 2) == 2)
@@ -58,22 +61,28 @@ namespace LLP
                 /* Decode 16-bit header (big-endian) */
                 uint16_t nOpcode16 = (static_cast<uint16_t>(HEADER[0]) << 8) | HEADER[1];
                 INCOMING.HEADER = nOpcode16;
+                nAvailable -= 2;
             }
         }
 
         /* Handle Reading Packet Length (32-bit, big-endian). */
-        if(Available() >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
+        if(nAvailable >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
         {
             std::vector<uint8_t> BYTES(4, 0);
             if(Read(BYTES, 4) == 4)
             {
                 INCOMING.SetLength(BYTES);
                 Event(EVENTS::HEADER);
+                nAvailable -= 4;
+
+                /* Skip reserve for oversized declarations; validation disconnects them later
+                 * without trusting the wire length enough to allocate here. */
+                if(INCOMING.LENGTH > 0 && INCOMING.LENGTH <= OpcodeUtility::MAX_ANY_PACKET_LENGTH)
+                    INCOMING.DATA.reserve(INCOMING.LENGTH);
             }
         }
 
         /* Handle Reading Packet Data. */
-        uint32_t nAvailable = Available();
         if(INCOMING.Header() && nAvailable > 0 && !INCOMING.IsNull() && INCOMING.DATA.size() < INCOMING.LENGTH)
         {
             /* The maximum number of bytes to read is the number of bytes specified in the message length,
@@ -82,7 +91,7 @@ namespace LLP
 
             /* Vector to receive the read bytes. This should be the smaller of the number of bytes currently available or the
                maximum amount to read */
-            std::vector<uint8_t> DATA(std::min(nAvailable, nMaxRead), 0);
+            std::vector<uint8_t> DATA(std::min(static_cast<uint32_t>(nAvailable), nMaxRead), 0);
 
             /* Read up to the buffer size. */
             int32_t nRead = Read(DATA, DATA.size());
@@ -94,7 +103,7 @@ namespace LLP
 
             /* If the packet is now considered complete, fire the packet complete event */
             if(INCOMING.Complete())
-                Event(EVENTS::PACKET, static_cast<uint32_t>(DATA.size()));
+                Event(EVENTS::PACKET, static_cast<uint32_t>(nRead > 0 ? nRead : 0));
         }
     }
 

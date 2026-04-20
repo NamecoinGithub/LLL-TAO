@@ -292,11 +292,8 @@ namespace LLP
         }
         else
         {
-            /* SIM Link detected — same genesis on a second connection */
-            debug::log(0, FUNCTION, "[Mining LLP] Dual-connection SIM Link detected: genesis ",
-                       genesis_prefix, "... already has active session");
-            debug::log(0, FUNCTION, "[Mining LLP] Allowing second connection (SIM Link / failover mode)");
-            debug::log(0, FUNCTION, "[Mining LLP] Both connections will receive identical template pushes");
+            debug::log(1, FUNCTION, "[Mining LLP] Multiple concurrent connections observed for genesis ",
+                       genesis_prefix, " @ ", remote_endpoint);
         }
     }
 
@@ -458,47 +455,6 @@ namespace LLP
                            " canonical snapshot stale (", snap_age_ms, " ms) — template may be outdated");
         }
     }
-
-
-    bool ColinMiningAgent::check_and_record_submission(uint32_t nHeight, uint64_t nNonce,
-                                                        const std::string& merkleHex)
-    {
-        /* Compute a cheap dedup key from the three identity fields */
-        size_t nKey = std::hash<uint32_t>{}(nHeight);
-        nKey ^= std::hash<uint64_t>{}(nNonce)         << 1;
-        nKey ^= std::hash<std::string>{}(merkleHex)   << 2;
-
-        std::lock_guard<std::mutex> lock(m_dedup_mutex);
-        auto tNow = std::chrono::steady_clock::now();
-
-        /* Purge expired entries to keep the cache bounded */
-        for(auto it = m_dedup_cache.begin(); it != m_dedup_cache.end(); )
-        {
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                tNow - it->second).count();
-            if(elapsedMs > static_cast<int64_t>(DEDUP_TTL_MS))
-                it = m_dedup_cache.erase(it);
-            else
-                ++it;
-        }
-
-        /* Check for duplicate */
-        if(m_dedup_cache.count(nKey))
-            return true;   // duplicate
-
-        /* Record first submission */
-        m_dedup_cache[nKey] = tNow;
-        return false;
-    }
-
-
-    void ColinMiningAgent::clear_dedup_cache()
-    {
-        std::lock_guard<std::mutex> lock(m_dedup_mutex);
-        m_dedup_cache.clear();
-    }
-
-
     /* ── Private implementation ──────────────────────────────────────────── */
 
     PingFrame ColinMiningAgent::build_ping_frame(const MinerStats& stats,

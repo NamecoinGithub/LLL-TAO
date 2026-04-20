@@ -33,24 +33,24 @@ namespace TestFixtures
     namespace Constants
     {
         /* Sample genesis hashes for testing */
-        const char* GENESIS_1 = "a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122";
-        const char* GENESIS_2 = "b285122d04db2d91cdb6499493c278dbe244e4265506fb9f56bd0ab409de0233";
-        const char* GENESIS_3 = "c396233e15ec3ea2dec7510504d389ecf355f5376617ca0a67ce1bc50aef1344";
-        const char* GENESIS_4 = "d407344f26fd4fb3efd8621615e49afde466f6487728db1b78df2cd61bf02455";
+        inline constexpr const char* GENESIS_1 = "a174011c93ca1c80bca5388382b167cacd33d3154395ea8f45ac99a8308cd122";
+        inline constexpr const char* GENESIS_2 = "b285122d04db2d91cdb6499493c278dbe244e4265506fb9f56bd0ab409de0233";
+        inline constexpr const char* GENESIS_3 = "c396233e15ec3ea2dec7510504d389ecf355f5376617ca0a67ce1bc50aef1344";
+        inline constexpr const char* GENESIS_4 = "d407344f26fd4fb3efd8621615e49afde466f6487728db1b78df2cd61bf02455";
         
         /* Sample register addresses (base58 decoded to uint256_t) */
-        const char* REGISTER_ADDR_1 = "e518455f37fe5fb4f0e9732726f5abfgf577g7598839ec2c89eg3de720g13566";
-        const char* REGISTER_ADDR_2 = "f629566g48gf6gc5g1fa843837g6bcghg688h8609940fd3d90fh4ef831h24677";
+        inline constexpr const char* REGISTER_ADDR_1 = "e518455f37fe5fb4f0e9732726f5abfcf577f7598839ec2c89ef3de720f13566";
+        inline constexpr const char* REGISTER_ADDR_2 = "f629566f48ff6fc5f1fa843837f6bcfcf688f8609940fd3d90ff4ef831f24677";
         
         /* Sample Falcon public key sizes */
-        const size_t FALCON_PUBKEY_SIZE = 897;
-        const size_t FALCON_SIGNATURE_SIZE = 690;
+        inline constexpr size_t FALCON_PUBKEY_SIZE = 897;
+        inline constexpr size_t FALCON_SIGNATURE_SIZE = 690;
         
         /* Sample nonce sizes */
-        const size_t AUTH_NONCE_SIZE = 32;
+        inline constexpr size_t AUTH_NONCE_SIZE = 32;
         
         /* ChaCha20 key size */
-        const size_t CHACHA_KEY_SIZE = 32;
+        inline constexpr size_t CHACHA_KEY_SIZE = 32;
         
     }
     
@@ -199,7 +199,7 @@ namespace TestFixtures
             .WithGenesis(testGenesis)
             .WithKeyId(keyId)
             .WithTimestamp(runtime::unifiedtimestamp())
-            .WithSessionStart(runtime::unifiedtimestamp())
+            .WithSessionStart(runtime::unifiedtimestamp());
     }
     
     /** CreateRewardBoundContext

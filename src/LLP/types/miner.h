@@ -477,8 +477,16 @@ namespace LLP
          * Tracks the unified height at which the last BLOCK_DATA was sent.
          * Used by GET_ROUND auto-send to send templates whenever ANY channel mines
          * a block, because every unified tip move changes hashPrevBlock and ALL
-         * channels need fresh templates (multi-channel mining requirement). */
-        uint32_t             nLastTemplateUnifiedHeight;
+         * channels need fresh templates (multi-channel mining requirement).
+         *
+         * Made atomic to eliminate the data race between the DataThread
+         * (ProcessPacket → handle_get_round) and the notification thread
+         * (SetBest → SendChannelNotification → SendLegacyTemplate).  Both
+         * threads read and write this field without holding MUTEX, so a
+         * plain uint32_t is a C++ data race (UB).  std::atomic<uint32_t>
+         * makes every access safe with relaxed ordering — a slightly stale
+         * value is acceptable since it is only used as a freshness hint. */
+        std::atomic<uint32_t> nLastTemplateUnifiedHeight;
 
         /* KEEPALIVE telemetry fields.
          * nMinerPrevblockSuffix: raw bytes [4..7] of keepalive payload (hashPrevBlock_lo32 as-sent). */
@@ -498,6 +506,21 @@ namespace LLP
          *  push was sent.  Protected by MUTEX.
          **/
         bool m_force_next_push{false};
+
+        /** Best-chain hash of the last template that was delivered to this miner
+         *  (via SendChannelNotification or SendLegacyTemplate).  Protected by MUTEX.
+         *
+         *  Purpose: allow the push throttle to distinguish a genuinely new chain
+         *  tip (different hashPrevBlock → always deliver) from a duplicate push
+         *  for the same tip (same hash → apply the 1-second time floor).
+         *
+         *  Without this, a rapid fork-resolution burst (multiple SetBest() events
+         *  in < 1 s) throttles all but the first notification, leaving miners on
+         *  a stale template for up to 1 second even though a new best block exists.
+         *
+         *  Zero-initialized (default uint1024_t{}) so the first push is always
+         *  delivered regardless of the time floor. */
+        uint1024_t m_hashLastPushedChain;
 
         /** 1-second rate-limit floor for GET_BLOCK fallback polling.
          *
@@ -585,16 +608,35 @@ namespace LLP
 
         /** IsTimeoutExempt
          *
-         *  Authenticated mining connections are exempt from socket read-idle timeout.
-         *  The session-level 24-hour keepalive timeout governs session expiration;
-         *  the socket timeout must not kill long-running authenticated miners.
+         *  Authenticated mining connections bypass aggressive POLL_EMPTY and
+         *  TIMEOUT_WRITE checks.  They are still subject to a finite read-idle
+         *  timeout via GetReadTimeout().
          *
-         *  @return true if miner is authenticated and should bypass socket timeout.
+         *  @return true if miner is authenticated and should bypass aggressive checks.
          *
          **/
         bool IsTimeoutExempt() const final
         {
             return fMinerAuthenticated;
+        }
+
+
+        /** GetReadTimeout
+         *
+         *  Authenticated legacy miners use a long but finite read-idle timeout.
+         *  The effective value comes from the shared MiningConstants helpers so the
+         *  runtime override can never fall below the safety floor required for
+         *  the 24-hour mining liveness contract.
+         *
+         *  @return read-idle timeout in milliseconds, or 0 for default.
+         *
+         **/
+        uint32_t GetReadTimeout() const final
+        {
+            if(fMinerAuthenticated)
+                return MiningConstants::GetConfiguredReadTimeoutMs();
+
+            return 0;
         }
 
 
@@ -752,6 +794,31 @@ namespace LLP
         bool find_block(const uint512_t& hashMerkleRoot);
 
 
+        /** lookup_block
+         *
+         *  Non-mutating block template lookup by merkle root.
+         *
+         **/
+        TAO::Ledger::Block* lookup_block(const uint512_t& hashMerkleRoot) const;
+
+
+        /** register_block_template
+         *
+         *  Insert or replace a cached template and record the current best-chain
+         *  hash snapshot for same-height reorg detection.
+         *
+         **/
+        TAO::Ledger::Block* register_block_template(TAO::Ledger::Block* pBlock);
+
+
+        /** erase_block_template
+         *
+         *  Remove a cached template and its staleness snapshot.
+         *
+         **/
+        void erase_block_template(const uint512_t& hashMerkleRoot);
+
+
         /** new_block
          *
          *  Adds a new block to the map.
@@ -904,6 +971,38 @@ namespace LLP
         {
             return m_shutdownRequested.load(std::memory_order_acquire);
         }
+
+#ifdef UNIT_TESTS
+        bool CheckBestHeightForTests()
+        {
+            return check_best_height();
+        }
+
+        TAO::Ledger::Block* RegisterTemplateForTests(TAO::Ledger::Block* pBlock)
+        {
+            return register_block_template(pBlock);
+        }
+
+        TAO::Ledger::Block* LookupTemplateForTests(const uint512_t& hashMerkleRoot) const
+        {
+            return lookup_block(hashMerkleRoot);
+        }
+
+        bool FindTemplateForTests(const uint512_t& hashMerkleRoot)
+        {
+            return find_block(hashMerkleRoot);
+        }
+
+        bool SignBlockForTests(uint64_t nNonce, const uint512_t& hashMerkleRoot)
+        {
+            return sign_block(nNonce, hashMerkleRoot);
+        }
+
+        bool ValidateBlockForTests(const uint512_t& hashMerkleRoot)
+        {
+            return validate_block(hashMerkleRoot);
+        }
+#endif
 
     };
 }

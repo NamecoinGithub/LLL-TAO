@@ -88,9 +88,40 @@ namespace LLP
 {
     namespace
     {
+        /* Apply a manager transform only to this exact stateless-lane connection.
+         * Same-node cross-lane aliasing is no longer valid for live lane state. */
+        bool TransformTrackedMiner(
+            const MiningContext& ctx,
+            std::function<MiningContext(const MiningContext&)> transformer)
+        {
+            auto& manager = StatelessMinerManager::Get();
+
+            if(!ctx.strAddress.empty())
+                return manager.TransformMiner(ctx.strAddress, std::move(transformer), 1);
+
+            return false;
+        }
+    }
+
+    namespace
+    {
         bool SequenceDiagnosticsEnabled()
         {
             return config::GetBoolArg("-nseqdiag", false);
+        }
+
+        const char* TemplateWorkReasonString(StatelessMinerConnection::TemplateWorkReason eReason)
+        {
+            switch(eReason)
+            {
+                case StatelessMinerConnection::TemplateWorkReason::PUSH_NOTIFICATION:
+                    return "push_notification";
+
+                case StatelessMinerConnection::TemplateWorkReason::GET_ROUND_RECOVERY:
+                    return "get_round_recovery";
+            }
+
+            return "unknown";
         }
     }
 
@@ -150,6 +181,26 @@ namespace LLP
                 case OpcodeUtility::Stateless::SUBMIT_BLOCK:
                 case OpcodeUtility::Stateless::GET_REWARD:
                 case OpcodeUtility::Stateless::GET_ROUND:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        bool IsPriorityStatelessOpcode(const uint16_t nOpcode)
+        {
+            switch(nOpcode)
+            {
+                case OpcodeUtility::Stateless::SESSION_KEEPALIVE:
+                case OpcodeUtility::Stateless::SESSION_STATUS_ACK:
+                case OpcodeUtility::Stateless::NEW_ROUND:
+                case OpcodeUtility::Stateless::OLD_ROUND:
+                case OpcodeUtility::Stateless::SESSION_EXPIRED:
+                case OpcodeUtility::Stateless::GOOD_BLOCK:
+                case OpcodeUtility::Stateless::ORPHAN_BLOCK:
+                case OpcodeUtility::Stateless::BLOCK_ACCEPTED:
+                case OpcodeUtility::Stateless::BLOCK_REJECTED:
                     return true;
 
                 default:
@@ -317,6 +368,8 @@ namespace LLP
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
     {
+        StartTemplateWorker();
+
         /* Log channel manager initialization */
         debug::log(2, FUNCTION, "✓ Channel state managers initialized (Prime + Hash)");
     }
@@ -333,6 +386,8 @@ namespace LLP
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
     {
+        StartTemplateWorker();
+
         /* Log channel manager initialization */
         debug::log(2, FUNCTION, "✓ Channel state managers initialized (Prime + Hash)");
     }
@@ -349,6 +404,8 @@ namespace LLP
     , m_pPrimeState(std::make_unique<PrimeStateManager>())
     , m_pHashState(std::make_unique<HashStateManager>())
     {
+        StartTemplateWorker();
+
         /* Log channel manager initialization */
         debug::log(2, FUNCTION, "✓ Channel state managers initialized (Prime + Hash)");
     }
@@ -357,6 +414,8 @@ namespace LLP
     /** Default Destructor **/
     StatelessMinerConnection::~StatelessMinerConnection()
     {
+        StopTemplateWorker();
+
         /* Clear session keys */
         {
             std::lock_guard<std::mutex> lock(SESSION_MUTEX);
@@ -449,6 +508,163 @@ namespace LLP
         }
         
         return nDiff;
+    }
+
+
+    void StatelessMinerConnection::StartTemplateWorker()
+    {
+        std::lock_guard<std::mutex> lock(m_template_work_mutex);
+
+        if(m_template_worker_running)
+            return;
+
+        m_template_worker_running = true;
+        m_template_work_pending = false;
+        m_template_work_reason = TemplateWorkReason::PUSH_NOTIFICATION;
+        m_template_work_thread = std::thread(&StatelessMinerConnection::TemplateWorkerLoop, this);
+    }
+
+
+    void StatelessMinerConnection::StopTemplateWorker()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_template_work_mutex);
+            m_template_worker_running = false;
+            m_template_work_pending = false;
+        }
+
+        m_template_work_cv.notify_all();
+
+        if(m_template_work_thread.joinable())
+            m_template_work_thread.join();
+    }
+
+
+    void StatelessMinerConnection::ScheduleTemplateWork(TemplateWorkReason eReason)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_template_work_mutex);
+            if(!m_template_worker_running)
+                return;
+
+            m_template_work_pending = true;
+            m_template_work_reason = eReason;
+        }
+
+        m_template_work_cv.notify_one();
+    }
+
+
+    void StatelessMinerConnection::TemplateWorkerLoop()
+    {
+        while(true)
+        {
+            TemplateWorkReason eReason = TemplateWorkReason::PUSH_NOTIFICATION;
+
+            {
+                std::unique_lock<std::mutex> lock(m_template_work_mutex);
+                m_template_work_cv.wait(lock,
+                    [this]
+                    {
+                        return m_template_work_pending || !m_template_worker_running;
+                    });
+
+                if(!m_template_worker_running && !m_template_work_pending)
+                    break;
+
+                eReason = m_template_work_reason;
+                m_template_work_pending = false;
+            }
+
+            QueueCurrentBlockDataTemplate(eReason);
+        }
+    }
+
+
+    bool StatelessMinerConnection::QueueCurrentBlockDataTemplate(TemplateWorkReason eReason)
+    {
+        if(config::fShutdown.load() || !Connected())
+            return false;
+
+        uint32_t nChannel = 0;
+        std::string strAddress;
+        {
+            LOCK(MUTEX);
+
+            if(!context.fAuthenticated || (context.nChannel != 1 && context.nChannel != 2))
+                return false;
+
+            nChannel = context.nChannel;
+            strAddress = context.strAddress;
+        }
+
+        const char* pReason = TemplateWorkReasonString(eReason);
+
+        TAO::Ledger::Block* pBlock = new_block();
+        if(!pBlock)
+        {
+            debug::log(2, FUNCTION, "Template worker skipped ", pReason,
+                " for ", GetAddress().ToStringIP(), " — new_block() returned nullptr");
+            return false;
+        }
+
+        std::vector<uint8_t> vBlockData = pBlock->Serialize();
+        if(vBlockData.empty() || vBlockData.size() != FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+        {
+            debug::error(FUNCTION, "Template worker invalid block serialization for ",
+                pReason, ": ", vBlockData.size(), " bytes (expected ",
+                FalconConstants::FULL_BLOCK_TRITIUM_MIN, ")");
+            return false;
+        }
+
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        TAO::Ledger::BlockState stateChannel = stateBest;
+        uint32_t nChannelHeight = 0;
+        if(TAO::Ledger::GetLastState(stateChannel, nChannel))
+            nChannelHeight = stateChannel.nChannelHeight;
+
+        const uint32_t nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
+        const uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
+
+        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
+            nUnifiedHeight, nChannelHeight, pBlock->nBits);
+
+        StatelessPacket blockPacket(OpcodeUtility::Stateless::BLOCK_DATA);
+        blockPacket.DATA.reserve(vMetadata.size() + vBlockData.size());
+        blockPacket.DATA.insert(blockPacket.DATA.end(), vMetadata.begin(), vMetadata.end());
+        blockPacket.DATA.insert(blockPacket.DATA.end(), vBlockData.begin(), vBlockData.end());
+        blockPacket.LENGTH = static_cast<uint32_t>(blockPacket.DATA.size());
+
+        QueuePacket(blockPacket);
+
+        {
+            LOCK(MUTEX);
+            context = context.WithTimestamp(runtime::unifiedtimestamp())
+                             .WithHeight(nUnifiedHeight)
+                             .WithLastTemplateUnifiedHeight(nUnifiedHeight)
+                             .WithHashLastBlock(hashBestChain);
+        }
+
+        if(!strAddress.empty())
+        {
+            StatelessMinerManager::Get().TransformMiner(strAddress,
+                [nUnifiedHeight, hashBestChain](const MiningContext& current)
+                {
+                    return current.WithTimestamp(runtime::unifiedtimestamp())
+                                  .WithHeight(nUnifiedHeight)
+                                  .WithLastTemplateUnifiedHeight(nUnifiedHeight)
+                                  .WithHashLastBlock(hashBestChain);
+                },
+                1);
+        }
+
+        StatelessMinerManager::Get().IncrementTemplatesServed();
+
+        debug::log(2, FUNCTION, "Template worker queued BLOCK_DATA source=",
+            pReason, " bytes=", blockPacket.DATA.size(), " channel=", pBlock->nChannel,
+            " height=", pBlock->nHeight, " to ", GetAddress().ToStringIP());
+
+        return true;
     }
 
 
@@ -665,6 +881,24 @@ namespace LLP
                         return;
                     }
                 }
+
+                /* Centralized stateless length validation.
+                 * Reject malformed mirrored opcodes (e.g. GET_ROUND with bogus
+                 * payload length) before the body is read, preventing partial-frame
+                 * stalls from impossible schemas. */
+                {
+                    StatelessPacket PACKET = this->INCOMING;
+                    std::string strLengthReason;
+                    if(!OpcodeUtility::ValidatePacketLength(PACKET, &strLengthReason))
+                    {
+                        debug::error(FUNCTION, "Stateless length validation failed at header stage from ",
+                            GetAddress().ToStringIP(), ": ", strLengthReason);
+                        AutoCooldownManager::Get().AddCooldown(
+                            GetAddress(), MiningConstants::AUTOCOOLDOWN_DURATION_SECONDS);
+                        Disconnect();
+                        return;
+                    }
+                }
                 break;
             }
 
@@ -687,14 +921,16 @@ namespace LLP
                 }
                 
                 /* Log connection details with remote address and port */
+                const auto& address = GetAddress();
                 debug::log(0, FUNCTION, "MinerLLP: New stateless connection from ",
-                           GetAddress().ToStringIP(), ":", GetAddress().GetPort());
+                           address.ToStringIP(), ":", address.GetPort());
 
                 /* Initialize context with connection info */
                 LOCK(MUTEX);
 
                 /* Create initial context with connection address for auth */
-                std::string strAddr = GetAddress().ToStringIP();
+                const std::string strIP = address.ToStringIP();
+                std::string strEndpoint = strIP + ":" + std::to_string(address.GetPort());
                 fAuthenticatedAtomic.store(false, std::memory_order_relaxed);
                 fHandshakeInProgressAtomic.store(false, std::memory_order_relaxed);
                 context = MiningContext()
@@ -708,7 +944,7 @@ namespace LLP
                     0,  // nChannel - not set yet
                     TAO::Ledger::ChainState::nBestHeight.load(),  // nHeight - current chain height
                     runtime::unifiedtimestamp(),
-                    strAddr,  // strAddress - for Falcon auth message
+                    strEndpoint,  // strAddress - for Falcon auth message
                     0,  // nProtocolVersion
                     false,  // fAuthenticated
                     0,  // nSessionId
@@ -725,19 +961,19 @@ namespace LLP
                  * Record it via FailoverConnectionTracker so that after the subsequent fresh
                  * Falcon handshake completes we can notify ChannelStateManager and update
                  * the Colin report. */
-                if(strAddr != "127.0.0.1" && strAddr != "::1")
+                if(strIP != "127.0.0.1" && strIP != "::1")
                 {
-                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strAddr);
+                    auto optExistingCtx = StatelessMinerManager::Get().GetMinerContextByIP(strIP);
                     if(!optExistingCtx.has_value())
                     {
-                        FailoverConnectionTracker::Get().RecordConnection(strAddr);
-                        debug::log(0, FUNCTION, "No prior session for ", strAddr,
+                        FailoverConnectionTracker::Get().RecordConnection(strIP);
+                        debug::log(0, FUNCTION, "No prior session for ", strIP,
                                    " — recording as potential failover connection");
                     }
                 }
 
                 /* Register with StatelessMinerManager for tracking */
-                StatelessMinerManager::Get().UpdateMiner(strAddr, context, 1);
+                StatelessMinerManager::Get().UpdateMiner(strEndpoint, context, 1);
 
                 return;
             }
@@ -794,21 +1030,31 @@ namespace LLP
                         strReason = "DISCONNECT::TIMEOUT_WRITE (write stall)";
                         strCategory = "SOFTWARE";
                         break;
+                    case DISCONNECT::PARTIAL_STALL:
+                        strReason = "DISCONNECT::PARTIAL_STALL (incomplete frame stuck)";
+                        strCategory = "SOFTWARE";
+                        break;
                     default:
                         strReason = "UNKNOWN";
                         strCategory = "UNKNOWN";
                         break;
                 }
 
-                debug::log(0, FUNCTION, "MinerLLP: [", strCategory, "] Disconnected from ", GetAddress().ToStringIP(),
-                           " reason: ", strReason);
+                const bool fHighlightDisconnect = (reason == DISCONNECT::PARTIAL_STALL);
+                debug::log(0,
+                           fHighlightDisconnect ? ANSI_COLOR_BRIGHT_YELLOW : "",
+                           FUNCTION, "MinerLLP: [", strCategory, "] Disconnected from ", GetAddress().ToStringIP(),
+                           " reason: ", strReason,
+                           fHighlightDisconnect ? ANSI_COLOR_RESET : "");
 
                 /* Remove from StatelessMinerManager tracking.
-                 * RemoveMiner() handles cross-cache cleanup (NodeSessionRegistry
-                 * MarkDisconnected) internally. */
+                 * Remove only THIS stateless-lane endpoint.  RemoveMiner() handles
+                 * cross-cache cleanup while CompareAndErase-protected indexes prevent
+                 * a stale disconnect from erasing a freshly reconnected endpoint. */
                 {
                     LOCK(MUTEX);
-                    StatelessMinerManager::Get().RemoveMiner(context.strAddress);
+                    if(!context.strAddress.empty())
+                        StatelessMinerManager::Get().RemoveMiner(context.strAddress);
                 }
 
                 return;
@@ -873,6 +1119,14 @@ namespace LLP
             if(!PreflightSessionGate(PACKET, ctxSnap))
                 return true;
 
+            std::string strLengthReason;
+            if(!OpcodeUtility::ValidatePacketLength(PACKET, &strLengthReason))
+            {
+                debug::error(FUNCTION, "Stateless packet length validation failed from ",
+                    GetAddress().ToStringIP(), ": ", strLengthReason);
+                return false;
+            }
+
             /* ============================================================================
              * 16-BIT OPCODE HANDLERS (Stateless Mining Protocol for NexusMiner)
              * ============================================================================ */
@@ -895,7 +1149,13 @@ namespace LLP
                     return false;
                 }
 
-                context.strAddress = GetAddress().ToStringIP();
+                const std::string strConnectionAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                {
+                    LOCK(MUTEX);
+                    context.strAddress = strConnectionAddress;
+                }
 
                 /* Subscribe to notifications (same logic as 8-bit MINER_READY) */
                 context = context.WithSubscription(context.nChannel);
@@ -929,7 +1189,7 @@ namespace LLP
                     bool fEncReady = context.fEncryptionReady;
                     std::vector<uint8_t> vKey = context.vChaChaKey;
                     uint32_t nLastUH = context.nLastTemplateUnifiedHeight;
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    StatelessMinerManager::Get().TransformMiner(strConnectionAddress,
                         [fSubscribed, nSubChannel, fEncReady, vKey, nLastUH](const MiningContext& current) {
                             MiningContext updated = current
                                 .WithSubscription(nSubChannel)
@@ -1225,14 +1485,14 @@ namespace LLP
                  * avoiding TOCTOU race with NotifyNewRound. We capture chain state
                  * outside the transform and apply it atomically. */
                 {
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [](const MiningContext& current) {
                             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(stateBest.nHeight)
                                           .WithLastTemplateUnifiedHeight(stateBest.nHeight)
                                           .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
-                        }, 1);
+                        });
                 }
                 StatelessMinerManager::Get().IncrementTemplatesServed();
 
@@ -1855,28 +2115,6 @@ namespace LLP
                     return true;
                 }
 
-                /* ── SIM Link deduplication check ────────────────────────────────
-                 *  Shared dedup cache (via ColinMiningAgent) detects when the same
-                 *  solution is submitted on both the stateless lane (this handler,
-                 *  port 9323) and the legacy lane (miner.cpp, port 8323).
-                 */
-                if(ColinMiningAgent::Get().check_and_record_submission(
-                        pTritium->nHeight, nonce, hashMerkle.GetHex()))
-                {
-                    debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                               "(height=", pTritium->nHeight, " nonce=", nonce,
-                               ") — second connection submission ignored (SIM Link dedup)");
-                    if(ctxSnap.hashGenesis != 0)
-                    {
-                        ColinMiningAgent::Get().on_block_submitted(
-                            ctxSnap.hashGenesis.SubString(8), pTritium->nChannel,
-                            false, "DUPLICATE_SUBMISSION");
-                    }
-                    StatelessPacket response(STATELESS_BLOCK_REJECTED);
-                    respond(response);
-                    return true;
-                }
-
                 /* ── Pre-validation staleness diagnostics ──────────────────────────────
                  *  If block.vtx contains transactions for the same sigchain genesis as the
                  *  producer, the producer must follow the last vtx tx — not the disk last
@@ -2104,11 +2342,11 @@ namespace LLP
                 /* Atomic transform: update timestamp and height on CURRENT value in mapMiners */
                 {
                     uint32_t nHeight = nCurrentHeight;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                    TransformTrackedMiner(ctxSnap,
                         [nHeight](const MiningContext& current) {
                             return current.WithTimestamp(runtime::unifiedtimestamp())
                                           .WithHeight(nHeight);
-                        }, 1);
+                        });
                 }
 
                 return true;
@@ -2160,10 +2398,10 @@ namespace LLP
                 }
 
                 /* Atomic transform: update timestamp on CURRENT value in mapMiners */
-                StatelessMinerManager::Get().TransformMiner(strAddress_snap,
+                TransformTrackedMiner(ctxSnap,
                     [](const MiningContext& current) {
                         return current.WithTimestamp(runtime::unifiedtimestamp());
-                    }, 1);
+                    });
 
                 return true;
             }
@@ -2204,9 +2442,6 @@ namespace LLP
                 const bool fHashChanged = RoundStateUtility::IsReorgDetected(
                     hashLastBlock_snap, snap);
 
-                /* Channel-specific height for staleness check */
-                uint32_t nChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannel_snap);
-
                 debug::log(3, FUNCTION, "GET_ROUND: unified=", snap.nUnifiedHeight,
                            " prime=", snap.nPrimeHeight, " hash=", snap.nHashHeight,
                            " stake=", snap.nStakeHeight);
@@ -2226,9 +2461,21 @@ namespace LLP
                 /* GET_ROUND COMPATIBILITY: AUTO-SEND TEMPLATE
                  * Legacy miners polling GET_ROUND expect BLOCK_DATA when height changes.
                  * CRITICAL: Use UNIFIED height — every tip move (any channel) changes
-                 * hashPrevBlock, requiring ALL channels to get fresh templates. */
+                 * hashPrevBlock, requiring ALL channels to get fresh templates.
+                 *
+                 * FIX: Re-read nLastTemplateUnifiedHeight from the LIVE context (under
+                 * MUTEX) rather than the stale snapshot captured at packet dispatch time.
+                 * The async template worker updates context.nLastTemplateUnifiedHeight
+                 * under MUTEX after it actually queues BLOCK_DATA. Using the
+                 * snapshot value would cause a false-positive "height changed" and trigger a
+                 * redundant new_block() call — the second template of the triple storm. */
+                uint32_t nLiveLastTemplateHeight;
+                {
+                    LOCK(MUTEX);
+                    nLiveLastTemplateHeight = context.nLastTemplateUnifiedHeight;
+                }
                 bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
-                    nLastTemplateUnifiedHeight_snap, snap);
+                    nLiveLastTemplateHeight, snap);
                 bool fTemplateStale = fUnifiedHeightChanged || fHashChanged;
 
                 debug::log(2, FUNCTION, "GET_ROUND staleness: unified_changed=",
@@ -2240,78 +2487,12 @@ namespace LLP
                 {
                     /* new_block() acquires MUTEX internally — no outer lock needed. */
 
-                    /* Create block template with retry logic (up to 3 attempts) */
-                    TAO::Ledger::Block* pBlock = nullptr;
-                    bool fTemplateSent = false;
-                    for(int nRetry = 0; nRetry < 3 && !pBlock; ++nRetry)
-                    {
-                        pBlock = new_block();
-                        if(!pBlock && nRetry < 2)
-                        {
-                            debug::log(2, FUNCTION, "GET_ROUND auto-send: new_block() retry ", nRetry + 1, "/3");
-                            runtime::sleep(50);
-                        }
-                    }
+                    ScheduleTemplateWork(TemplateWorkReason::GET_ROUND_RECOVERY);
 
-                    if(!pBlock)
-                    {
-                        debug::error(FUNCTION, "GET_ROUND auto-send: new_block() failed after 3 retries");
-                    }
-                    else
-                    {
-                        try {
-                            std::vector<uint8_t> vBlockData = pBlock->Serialize();
-
-                            if(!vBlockData.empty())
-                            {
-                                /* Build payload: 12-byte metadata + block data using shared utility */
-                                std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-                                    snap.nUnifiedHeight, nChannelHeight, pBlock->nBits);
-
-                                std::vector<uint8_t> vPayload;
-                                vPayload.reserve(vMetadata.size() + vBlockData.size());
-                                vPayload.insert(vPayload.end(), vMetadata.begin(), vMetadata.end());
-                                vPayload.insert(vPayload.end(), vBlockData.begin(), vBlockData.end());
-
-                                StatelessPacket blockPacket(OpcodeUtility::Stateless::BLOCK_DATA);
-                                blockPacket.DATA   = vPayload;
-                                blockPacket.LENGTH = static_cast<uint32_t>(vPayload.size());
-                                respond(blockPacket);
-
-                                debug::log(2, FUNCTION, "✅ BLOCK_DATA auto-sent (",
-                                           vPayload.size(), " bytes) channel=", pBlock->nChannel,
-                                           " height=", pBlock->nHeight);
-
-                                StatelessMinerManager::Get().IncrementTemplatesServed();
-                                fTemplateSent = true;
-                            }
-                            else
-                            {
-                                debug::error(FUNCTION, "GET_ROUND auto-send: Serialization returned empty");
-                            }
-                        }
-                        catch(const std::exception& e) {
-                            debug::error(FUNCTION, "GET_ROUND auto-send exception: ", e.what());
-                        }
-                    }
-
-                    /* Brief lock for context mutations */
-                    {
-                        LOCK(MUTEX);
-                        /* Only advance staleness anchors if template was actually sent.
-                         * If creation failed, keep old anchors so the next GET_ROUND retries. */
-                        if(fTemplateSent)
-                        {
-                            context = context.WithTimestamp(runtime::unifiedtimestamp())
-                                             .WithHeight(snap.nUnifiedHeight)
-                                             .WithLastTemplateUnifiedHeight(snap.nUnifiedHeight)
-                                             .WithHashLastBlock(snap.hashBestChain);
-                        }
-                        else
-                        {
-                            context = context.WithTimestamp(runtime::unifiedtimestamp());
-                        }
-                    }
+                    /* Keep only the activity timestamp here; the async worker
+                     * advances template anchors after it actually queues BLOCK_DATA. */
+                    LOCK(MUTEX);
+                    context = context.WithTimestamp(runtime::unifiedtimestamp());
                 }
                 else
                 {
@@ -2321,19 +2502,10 @@ namespace LLP
 
                 /* Atomic transform: apply updates to CURRENT value in mapMiners */
                 {
-                    bool fSent = fTemplateStale;  // approximation for atomic transform
-                    uint32_t nUH = snap.nUnifiedHeight;
-                    uint1024_t hashBest = snap.hashBestChain;
-                    StatelessMinerManager::Get().TransformMiner(strAddress_snap,
-                        [fSent, nUH, hashBest](const MiningContext& current) {
-                            if(fSent)
-                                return current.WithTimestamp(runtime::unifiedtimestamp())
-                                              .WithHeight(nUH)
-                                              .WithLastTemplateUnifiedHeight(nUH)
-                                              .WithHashLastBlock(hashBest);
-                            else
-                                return current.WithTimestamp(runtime::unifiedtimestamp());
-                        }, 1);
+                    TransformTrackedMiner(ctxSnap,
+                        [](const MiningContext& current) {
+                            return current.WithTimestamp(runtime::unifiedtimestamp());
+                        });
                 }
 
                 return true;
@@ -2365,9 +2537,15 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext contextSnapshot;
+                {
+                    LOCK(MUTEX);
+                    contextSnapshot = context;
+                }
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_PRIMARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_PRIMARY_ALIVE, &contextSnapshot, fSessionValid);
 
                 StatelessPacket ackResponse(OpcodeUtility::Stateless::SESSION_STATUS_ACK);
                 ackResponse.DATA = vAck;
@@ -2379,11 +2557,9 @@ namespace LLP
 
                 debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent (stateless lane)");
 
-                /* TWO-STEP RE-ARM INVARIANT (PR #375):
-                 * set → SendChannelNotification → re-set → SendStatelessTemplate
-                 *
-                 * No outer MUTEX held — SendChannelNotification() and
-                 * SendStatelessTemplate() each acquire MUTEX internally. */
+                /* Degraded recovery now sends a single fresh-work action.
+                 * Directly pushing the stateless template avoids competing
+                 * notification+template sends on the same connection. */
                 bool fAuth_snap;
                 uint32_t nChannel_snap;
                 {
@@ -2400,11 +2576,6 @@ namespace LLP
                         LOCK(MUTEX);
                         m_force_next_push = true;
                         m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                    }
-                    SendChannelNotification();
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
                     }
                     SendStatelessTemplate();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed — miner should exit DEGRADED");
@@ -2623,7 +2794,7 @@ namespace LLP
                  * updates from NotifyNewRound. */
                 {
                     MiningContext authCtx = context;  /* snapshot of all auth state */
-                    StatelessMinerManager::Get().TransformMiner(context.strAddress,
+                    TransformTrackedMiner(context,
                         [authCtx](const MiningContext& current) {
                             /* Start from CURRENT (preserves height from NotifyNewRound),
                              * then overlay auth-specific fields from connection context */
@@ -2643,7 +2814,7 @@ namespace LLP
                             if(!authCtx.vDisposablePubKey.empty())
                                 result = result.WithDisposableKey(authCtx.vDisposablePubKey, authCtx.hashDisposableKeyID);
                             return result;
-                        }, 1);
+                        });
                 }
 
                 /* Log session registration for auth packets */
@@ -2656,11 +2827,12 @@ namespace LLP
                      * FailoverConnectionTracker::IsFailover() returns true when the CONNECT
                      * event found no recoverable session for this IP, indicating the miner
                      * has failed over to this node and performed a full fresh handshake. */
-                    if(FailoverConnectionTracker::Get().IsFailover(context.strAddress))
+                    const std::string strFailoverIP = GetAddress().ToStringIP();
+                    if(FailoverConnectionTracker::Get().IsFailover(strFailoverIP))
                     {
                         ChannelStateManager::NotifyFailoverConnection(context.hashKeyID, context.strAddress);
                         /* Clear the pending failover flag now that auth has completed */
-                        FailoverConnectionTracker::Get().ClearConnection(context.strAddress);
+                        FailoverConnectionTracker::Get().ClearConnection(strFailoverIP);
                     }
                 }
                 
@@ -2712,9 +2884,11 @@ namespace LLP
                     debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication");
 
                     /* Build SESSION_START using shared utility.
-                     * The session liveness timeout is a node-wide constant from NodeCache,
-                     * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                    const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(context.strAddress);
+                     * The session liveness timeout is a shared mining-liveness
+                     * policy value, NOT a per-context field.  nSessionTimeout
+                     * was removed from MiningContext. */
+                    const uint64_t nLivenessTimeout =
+                        MiningConstants::GetSessionLivenessTimeoutSec(context.strAddress);
                     StatelessPacket sessionStart(StatelessOpcodes::SESSION_START);
                     sessionStart.DATA = SessionStartPacket::BuildPayload(
                         context.nSessionId, nLivenessTimeout, context.hashGenesis);
@@ -2819,52 +2993,17 @@ namespace LLP
     /** Send a stateless packet response */
     void StatelessMinerConnection::respond(const StatelessPacket& packet)
     {
-        /* INVESTIGATION (2026-03-25): During a sustained ACTION::GET TRANSACTION flood from
-         * suspicious peer 83.8.1.23, the node's send buffer can fill beyond MAX_SEND_BUFFER,
-         * causing BaseConnection<>::WritePacket() to silently drop outbound packets (only
-         * logged at level 4).  This was observed as a 930s SESSION_STATUS_ACK silence
-         * coinciding with a TRANSACTION burst — a possible network-layer attack vector
-         * (send-queue starvation / write-queue saturation).
+        /* Write the packet to the socket send buffer.
+         * WritePacket() may buffer data if the kernel send buffer is full.
+         * Linux mining sockets now use the write-service path: FLUSH_THREAD
+         * materializes queued packets and EPOLLOUT-assisted DataThread service
+         * drains buffered bytes when the kernel is writable.  We still avoid
+         * calling Flush() inline here because that would hold SOCKET_MUTEX on
+         * the notification thread and contend with inbound mining reads.
          *
-         * Keepalive handler code paths are NOT the root cause: ProcessSessionKeepalive()
-         * and ProcessSessionStatus() are pure/lock-free and build responses correctly.
-         * respond() itself acquires no mutex and calls WritePacket() directly.
-         *
-         * fBufferFull is set to true by WritePacket() when a write is dropped and reset
-         * to false by Socket::Flush() after data drains successfully.  Logging at level 0
-         * here makes the saturation condition operator-visible without requiring -v 4. */
-        if(fBufferFull.load() && Buffered() > 0)
-        {
-            debug::log(0, FUNCTION, "WARNING: send buffer saturated before write "
-                       "(opcode=0x", std::hex, packet.HEADER, std::dec,
-                       " size=", packet.GetBytes().size(), " buffered=", Buffered(), "); "
-                       "attempting flush");
-
-            /* Single batch Flush() now drains as much as the kernel TCP buffer
-             * allows (the old 3×10ms retry loop is no longer needed since
-             * Flush() loops internally until send() would block).  This
-             * eliminates up to 30ms of DataThread blocking per respond() call
-             * under buffer pressure. */
-            Flush();
-
-            if(fBufferFull.load())
-            {
-                debug::log(0, FUNCTION, "WARNING: flush did not fully drain buffer — packet may be dropped "
-                           "(opcode=0x", std::hex, packet.HEADER, std::dec, ")");
-            }
-        }
-
-        /* Serialize and write the packet */
-        WritePacket(packet);
-
-        /* Explicitly flush the socket buffer so mining GET responses (GET_ROUND,
-         * SESSION_STATUS, KEEPALIVE ACK) are pushed to the wire immediately.
-         * Without this, responses sit in vBuffer until the FLUSH_THREAD wakes —
-         * creating an asymmetry where PUSH notifications (which go through
-         * FLUSH_THREAD's explicit Flush()) drain reliably but request/response
-         * traffic can stall.  This aligns both paths. */
-        if(Buffered() > 0)
-            Flush();
+         * Control-path replies and submit-block results are flagged high
+         * priority so they can bypass buffered template/work traffic. */
+        WritePacket(packet, IsPriorityStatelessOpcode(packet.HEADER));
     }
 
 
@@ -4183,7 +4322,10 @@ namespace LLP
      * data races with writers (e.g. in ProcessPacket). Callers get a snapshot
      * of the state and cannot mutate the internal context directly.
      */
-    /* IsTimeoutExempt - authenticated miners bypass socket read-idle timeout */
+    /* IsTimeoutExempt - authenticated miners bypass aggressive POLL_EMPTY and
+     * TIMEOUT_WRITE checks but are still subject to a finite read-idle timeout
+     * via GetReadTimeout().  This avoids the "shadow ban" scenario where a
+     * stalled read pipeline would persist indefinitely. */
     bool StatelessMinerConnection::IsTimeoutExempt() const
     {
         /* Read the atomic mirror of context.fAuthenticated.
@@ -4193,6 +4335,18 @@ namespace LLP
          * timeout exemption does not synchronize access to any other fields. */
         return fAuthenticatedAtomic.load(std::memory_order_relaxed)
             || fHandshakeInProgressAtomic.load(std::memory_order_relaxed);
+    }
+
+
+    /* GetReadTimeout - authenticated miners use a long but finite read-idle
+     * timeout sourced from the shared MiningConstants helpers.  Runtime config
+     * is clamped to the shared 24-hour safety floor. */
+    uint32_t StatelessMinerConnection::GetReadTimeout() const
+    {
+        if(fAuthenticatedAtomic.load(std::memory_order_relaxed))
+            return MiningConstants::GetConfiguredReadTimeoutMs();
+
+        return 0;  /* Use DataThread default TIMEOUT for unauthenticated connections */
     }
 
 
@@ -4237,6 +4391,13 @@ namespace LLP
             return;
         }
         
+        /* Snapshot the best tip before taking MUTEX so the hash lookup work
+         * stays outside the lock; the comparison/update against push-throttle
+         * state still happens under MUTEX below. */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashBestChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
         /* Thread-safe context access - use RAII lock guard */
         uint32_t nChannel;
         {
@@ -4244,7 +4405,9 @@ namespace LLP
 
             /* Push throttle — drop if a template was sent less than
              * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
-             * Re-subscription responses bypass via m_force_next_push. */
+             * Re-subscription responses bypass via m_force_next_push.
+             * Hash-change bypass matches the legacy mining lane so a new tip
+             * always gets through immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
@@ -4253,14 +4416,22 @@ namespace LLP
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
             }
+            else if (hashBestChain != m_hashLastPushedChain)
+            {
+                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                           hashBestChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
+            }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(1, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
-                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner must wait");
+                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
+                           GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashBestChain;
 
             /* Validate subscription state */
             if (!context.fSubscribedToNotifications)
@@ -4277,9 +4448,6 @@ namespace LLP
             nChannel = context.nSubscribedChannel;
         }  // MUTEX automatically unlocked here
         
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nChannel))
@@ -4295,10 +4463,6 @@ namespace LLP
 
         /* Get difficulty */
         uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-
-        /* Keep the tip hash consistent with the loaded best-state snapshot. */
-        const uint1024_t hashBestChain =
-            PushNotificationBuilder::BestChainHashForNotification(stateBest);
         
         /* Build notification using unified builder */
         StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
@@ -4338,8 +4502,11 @@ namespace LLP
         debug::log(2, "      client may fall back to polling GET_ROUND (133/0x85).");
         debug::log(2, "════════════════════════════════════════════════════════════");
 
-        /* Send to miner */
-        respond(notification);
+        /* Enqueue for deferred sending by FLUSH_THREAD.
+         * This decouples the block-acceptance notification thread from
+         * SOCKET_MUTEX contention — the packet is built here but written
+         * to the socket asynchronously on the FLUSH_THREAD. */
+        QueuePacket(notification);
 
         /* Reset connection activity timer — the miner is alive and receiving push notifications.
          * Without this, the node would disconnect active miners during long Prime searches (~2-5 min)
@@ -4366,77 +4533,18 @@ namespace LLP
                    ", diff=", std::hex, nDifficulty, std::dec, ")");
 
         /* Work Item 6: Attach block template to PUSH notification.
-         * After sending the notification, immediately try to create and send
-         * a BLOCK_DATA template so the miner can start hashing without
-         * needing a separate GET_BLOCK round-trip. */
+         * After sending the notification, queue an async BLOCK_DATA build/send
+         * so the miner gets fresh work without blocking this notification path. */
         TryAttachBlockTemplate();
     }
 
 
     /* TryAttachBlockTemplate - Best-effort template tag-along with PUSH notification.
-     * Creates a block template and sends it as BLOCK_DATA immediately after the
-     * push notification.  If template creation fails, the notification was already
-     * sent and the miner will fall back to GET_BLOCK or GET_ROUND polling. */
+     * Schedules a coalesced background BLOCK_DATA build/send so the caller only
+     * enqueues work; the async worker performs template creation off the hot path. */
     void StatelessMinerConnection::TryAttachBlockTemplate()
     {
-        if(config::fShutdown.load())
-            return;
-
-        /* Create block template — best effort, no retry loop here */
-        TAO::Ledger::Block* pBlock = new_block();
-        if(!pBlock)
-        {
-            debug::log(2, FUNCTION, "TryAttachBlockTemplate: new_block() returned nullptr — "
-                "miner will use GET_BLOCK or GET_ROUND fallback");
-            return;
-        }
-
-        /* Serialize and validate — P9: strict 216-byte check matching SendStatelessTemplate() */
-        std::vector<uint8_t> vBlockData = pBlock->Serialize();
-        if(vBlockData.empty() || vBlockData.size() != FalconConstants::FULL_BLOCK_TRITIUM_MIN)
-        {
-            debug::error(FUNCTION, "TryAttachBlockTemplate: invalid block serialization: ",
-                         vBlockData.size(), " bytes (expected ",
-                         FalconConstants::FULL_BLOCK_TRITIUM_MIN, ")");
-            return;
-        }
-
-        /* Build 228-byte payload: 12-byte metadata + 216-byte block
-         * Uses RoundStateUtility::SerializeTemplateMetadata() for consistent big-endian
-         * serialization across all template-sending paths. */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        TAO::Ledger::BlockState stateChannel = stateBest;
-        uint32_t nChannelHeight = 0;
-        if(TAO::Ledger::GetLastState(stateChannel, pBlock->nChannel))
-            nChannelHeight = stateChannel.nChannelHeight;
-
-        const uint32_t nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
-
-        std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
-            nUnifiedHeight, nChannelHeight, pBlock->nBits);
-
-        StatelessPacket blockPacket(OpcodeUtility::Stateless::BLOCK_DATA);
-        blockPacket.DATA.reserve(vMetadata.size() + vBlockData.size());
-        blockPacket.DATA.insert(blockPacket.DATA.end(), vMetadata.begin(), vMetadata.end());
-        blockPacket.DATA.insert(blockPacket.DATA.end(), vBlockData.begin(), vBlockData.end());
-        blockPacket.LENGTH = static_cast<uint32_t>(blockPacket.DATA.size());
-
-        respond(blockPacket);
-
-        debug::log(2, FUNCTION, "Attached BLOCK_DATA to PUSH notification: ",
-            blockPacket.DATA.size(), "B channel=", pBlock->nChannel,
-            " height=", pBlock->nHeight);
-
-        /* Update staleness anchors */
-        {
-            LOCK(MUTEX);
-            context = context.WithTimestamp(runtime::unifiedtimestamp())
-                             .WithHeight(nUnifiedHeight)
-                             .WithLastTemplateUnifiedHeight(nUnifiedHeight)
-                             .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
-        }
-
-        StatelessMinerManager::Get().IncrementTemplatesServed();
+        ScheduleTemplateWork(TemplateWorkReason::PUSH_NOTIFICATION);
     }
 
 
@@ -4453,6 +4561,10 @@ namespace LLP
             debug::log(2, FUNCTION, "Shutdown in progress; skipping stateless template");
             return;
         }
+
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashCurrentChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
         
         /* Thread-safe context access */
         uint32_t nChannel;
@@ -4462,16 +4574,8 @@ namespace LLP
             /* Push throttle — drop if a template was sent less than
              * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
              * Re-subscription responses bypass via m_force_next_push.
-             *
-             * IMPORTANT — two-step re-arm when calling SendChannelNotification() then
-             * SendStatelessTemplate() in sequence (e.g. MINER_READY and SESSION_STATUS
-             * degraded-recovery handlers):
-             *   1. Set m_force_next_push = true
-             *   2. Call SendChannelNotification()   ← consumes flag, updates m_last_template_push_time
-             *   3. Set m_force_next_push = true     ← re-arm: without this, elapsed ~0 ms here → throttled
-             *   4. Call SendStatelessTemplate()
-             * Omitting step 3 causes the template to be dropped silently, leaving the miner
-             * in degraded mode with no work. */
+             * Hash-change bypass matches the legacy mining lane so a new tip
+             * always gets through immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
@@ -4480,14 +4584,22 @@ namespace LLP
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
             }
+            else if (hashCurrentChain != m_hashLastPushedChain)
+            {
+                debug::log(2, FUNCTION, "Stateless template throttle bypassed — new chain tip ",
+                           hashCurrentChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
+            }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(1, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
-                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner must wait");
+                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
+                           GetAddress().ToStringIP(), " — work delivery delayed");
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel (1=Prime, 2=Hash only) */
             if (context.nChannel != 1 && context.nChannel != 2)
@@ -4505,9 +4617,6 @@ namespace LLP
         debug::log(2, "════════════════════════════════════════════════════════════");
         debug::log(2, "   To Address:     ", GetAddress().ToStringIP());
         debug::log(2, "   Channel:        ", nChannel, " (", GetChannelName(nChannel), ")");
-        
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
@@ -4594,8 +4703,11 @@ namespace LLP
         debug::log(2, "      Template pushed automatically on new blocks");
         debug::log(2, "════════════════════════════════════════════════════════════");
         
-        /* Send to miner */
-        respond(notification);
+        /* Enqueue for deferred sending by FLUSH_THREAD.
+         * Consistent with SendChannelNotification() — avoids SOCKET_MUTEX
+         * contention between the notification thread and DataThread's
+         * ReadPacket() loop. */
+        QueuePacket(notification);
         
         /* Update statistics and store canonical snapshot in context. */
         uint64_t nNotificationTimestamp = runtime::unifiedtimestamp();

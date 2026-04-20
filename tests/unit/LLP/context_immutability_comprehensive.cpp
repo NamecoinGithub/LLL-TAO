@@ -240,13 +240,17 @@ TEST_CASE("MiningContext Immutability - Cryptographic Fields", "[context][immuta
         REQUIRE(updated.vChaChaKey == testKey);
     }
     
-    SECTION("WithEncryptionReady creates new context, original unchanged")
+    SECTION("WithChaChaKey derives encryption readiness, original unchanged")
     {
-        MiningContext original;
-        MiningContext updated = original.WithEncryptionReady(true);
+        std::vector<uint8_t> testKey = CreateTestChaChaKey();
+        MiningContext original = MiningContext().WithAuth(true);
+        MiningContext updated = original.WithChaChaKey(testKey);
         
         REQUIRE(original.fEncryptionReady == false);
         REQUIRE(updated.fEncryptionReady == true);
+        REQUIRE(original.vChaChaKey.empty());
+        REQUIRE(updated.vChaChaKey == testKey);
+        REQUIRE(updated.nSessionState == MinerSessionState::ENCRYPTION_READY);
     }
 }
 

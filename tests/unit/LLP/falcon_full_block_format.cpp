@@ -70,10 +70,13 @@ TEST_CASE("Falcon Full Block Format Reconstruction", "[falcon_full_block]")
         
         REQUIRE(fullBlockPacket.size() == FalconConstants::FULL_BLOCK_TRITIUM_SIZE);
         
-        /* Add timestamp (8 bytes) */
+        /* Add timestamp (8 bytes, little-endian to match the
+         * SignedWorkSubmission wire format documented in
+         * src/LLP/include/disposable_falcon.h:
+         * [merkle_root][nonce LE][timestamp LE][sig_len LE][signature]. */
         uint64_t timestamp = 1735392000;
-        std::vector<uint8_t> timestampBytes = convert::uint2bytes64(timestamp);
-        fullBlockPacket.insert(fullBlockPacket.end(), timestampBytes.begin(), timestampBytes.end());
+        for(size_t i = 0; i < FalconConstants::TIMESTAMP_SIZE; ++i)
+            fullBlockPacket.push_back(static_cast<uint8_t>((timestamp >> (i * 8)) & 0xFF));
         
         REQUIRE(fullBlockPacket.size() == FalconConstants::FULL_BLOCK_TRITIUM_SIZE + FalconConstants::TIMESTAMP_SIZE);
         

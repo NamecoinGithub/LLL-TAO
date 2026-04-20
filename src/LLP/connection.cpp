@@ -49,18 +49,27 @@ namespace LLP
      */
     void Connection::ReadPacket()
     {
+        /* Snapshot available bytes once — avoids up to three ioctl(FIONREAD)
+         * syscalls per ReadPacket() call (one per conditional below).  We
+         * subtract bytes as they are consumed; if the kernel accumulates more
+         * data between reads, it will be picked up on the next ReadPacket()
+         * invocation (next epoll/poll event).  This is safe for the
+         * non-blocking, event-driven model used by all DataThreads. */
+        int32_t nAvailable = Available();
+
         /* Handle Reading Packet Type Header (8-bit). */
-        if(Available() >= 1 && INCOMING.IsNull())
+        if(nAvailable >= 1 && INCOMING.IsNull())
         {
             std::vector<uint8_t> HEADER(1, 255);
             if(Read(HEADER, 1) == 1)
             {
                 INCOMING.HEADER = HEADER[0];
+                nAvailable -= 1;
             }
         }
 
         /* Read the packet length. */
-        if(Available() >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
+        if(nAvailable >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
         {
             /* Handle Reading Packet Length Header. */
             std::vector<uint8_t> BYTES(4, 0);
@@ -68,11 +77,19 @@ namespace LLP
             {
                 INCOMING.SetLength(BYTES);
                 Event(EVENTS::HEADER);
+                nAvailable -= 4;
+
+                /* Pre-allocate the DATA vector to the declared packet length.
+                 * Without reserve(), each subsequent insert() into a growing
+                 * vector triggers a geometric reallocation (copy of all existing
+                 * bytes).  With reserve(), the vector has capacity for the full
+                 * payload up front, making every subsequent end-insert O(1). */
+                if(INCOMING.LENGTH > 0)
+                    INCOMING.DATA.reserve(INCOMING.LENGTH);
             }
         }
 
         /* Handle Reading Packet Data. */
-        uint32_t nAvailable = Available();
         if(INCOMING.Header() && nAvailable > 0 && !INCOMING.IsNull() && INCOMING.DATA.size() < INCOMING.LENGTH)
         {
             /* The maximum number of bytes to read is the number of bytes specified in the message length,
@@ -81,7 +98,7 @@ namespace LLP
 
             /* Vector to receive the read bytes. This should be the smaller of the number of bytes currently available or the
                maximum amount to read */
-            std::vector<uint8_t> DATA(std::min(nAvailable, nMaxRead), 0);
+            std::vector<uint8_t> DATA(std::min((uint32_t)nAvailable, nMaxRead), 0);
 
             /* Read up to the buffer size. */
             int32_t nRead = Read(DATA, DATA.size());

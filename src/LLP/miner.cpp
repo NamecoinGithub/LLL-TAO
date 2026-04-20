@@ -129,6 +129,45 @@ namespace LLP
             }
         }
 
+        bool IsPriorityLegacyOpcode(const uint8_t nHeader)
+        {
+            switch(nHeader)
+            {
+                case OpcodeUtility::Opcodes::SESSION_KEEPALIVE:
+                case OpcodeUtility::Opcodes::SESSION_STATUS_ACK:
+                case OpcodeUtility::Opcodes::NEW_ROUND:
+                case OpcodeUtility::Opcodes::OLD_ROUND:
+                case OpcodeUtility::Opcodes::GOOD_BLOCK:
+                case OpcodeUtility::Opcodes::ORPHAN_BLOCK:
+                case OpcodeUtility::Opcodes::BLOCK_ACCEPTED:
+                case OpcodeUtility::Opcodes::BLOCK_REJECTED:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        bool IsPriorityStatelessOpcode(const uint16_t nOpcode)
+        {
+            switch(nOpcode)
+            {
+                case OpcodeUtility::Stateless::SESSION_KEEPALIVE:
+                case OpcodeUtility::Stateless::SESSION_STATUS_ACK:
+                case OpcodeUtility::Stateless::NEW_ROUND:
+                case OpcodeUtility::Stateless::OLD_ROUND:
+                case OpcodeUtility::Stateless::SESSION_EXPIRED:
+                case OpcodeUtility::Stateless::GOOD_BLOCK:
+                case OpcodeUtility::Stateless::ORPHAN_BLOCK:
+                case OpcodeUtility::Stateless::BLOCK_ACCEPTED:
+                case OpcodeUtility::Stateless::BLOCK_REJECTED:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
         bool LegacyOpcodeRequiresChannel(const uint8_t nOpcode)
         {
             switch(nOpcode)
@@ -423,9 +462,6 @@ namespace LLP
                             return;
                         }
 
-                        /* Store the new block in the memory map of recent blocks being worked on. */
-                        mapBlocks[pBlock->hashMerkleRoot] = pBlock;
-
                         /* Serialize the block vData */
                         vData = pBlock->Serialize();
 
@@ -481,6 +517,32 @@ namespace LLP
                     debug::log(0, FUNCTION, "  Remote mining: ENABLED");
                 }
 
+                /* Track the exact legacy-lane endpoint immediately so later auth,
+                 * keepalive, and disconnect operations mutate/remove only this
+                 * connection's lane state.  Stateless lane already does this on
+                 * connect; legacy lane needs the same pre-auth seed entry so its
+                 * TransformMiner() calls do not become canonical-session-only
+                 * fallbacks. */
+                {
+                    const std::string strAddress =
+                        GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                    MiningContext context(
+                        nChannel,
+                        nBestHeight.load(std::memory_order_relaxed),
+                        runtime::unifiedtimestamp(),
+                        strAddress,
+                        1,
+                        false,
+                        0,
+                        uint256_t(0),
+                        uint256_t(0)
+                    );
+
+                    context = context.WithProtocolLane(ProtocolLane::LEGACY);
+                    StatelessMinerManager::Get().UpdateMiner(strAddress, context, 0);
+                }
+
                 return;
             }
 
@@ -534,25 +596,34 @@ namespace LLP
                         strReason = "DISCONNECT::TIMEOUT_WRITE (write stall)";
                         strCategory = "SOFTWARE";
                         break;
+                    case DISCONNECT::PARTIAL_STALL:
+                        strReason = "DISCONNECT::PARTIAL_STALL (incomplete frame stuck)";
+                        strCategory = "SOFTWARE";
+                        break;
                     default:
                         strReason = "UNKNOWN";
                         strCategory = "UNKNOWN";
                         break;
                 }
-                debug::log(0, FUNCTION, "[", strCategory, "] Disconnecting ", GetAddress().ToStringIP(), " (", strReason, ")");
+                const bool fHighlightDisconnect = (reason == DISCONNECT::PARTIAL_STALL);
+                debug::log(0,
+                           fHighlightDisconnect ? ANSI_COLOR_BRIGHT_YELLOW : "",
+                           FUNCTION, "[", strCategory, "] Disconnecting ", GetAddress().ToStringIP(), " (", strReason, ")",
+                           fHighlightDisconnect ? ANSI_COLOR_RESET : "");
 
                 /* Interrupt any in-flight SendChannelNotification() path immediately. */
                 m_shutdownRequested.store(true, std::memory_order_release);
 
-                /* RemoveMiner handles local maps + cross-cache
-                 * propagation to NodeSessionRegistry.
-                 * Under single-lane policy, the miner may have a
-                 * StatelessMinerManager entry from prior stateless activity. */
-                if(fMinerAuthenticated)
+                /* Remove only THIS legacy-lane endpoint.  RemoveMiner() guards all
+                 * secondary indices with CompareAndErase so a reconnect that already
+                 * replaced the hashKeyID/session mapping on another endpoint will not
+                 * be clobbered by this stale disconnect. */
+                const std::string strMinerAddress =
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
+
+                if(!strMinerAddress.empty())
                 {
-                    const std::string strMinerAddress = GetAddress().ToStringIP();
-                    if(!strMinerAddress.empty())
-                        StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
+                    StatelessMinerManager::Get().RemoveMiner(strMinerAddress);
                 }
 
                 /* Notify Colin agent on disconnect (only if genesis was known) */
@@ -660,25 +731,36 @@ namespace LLP
                     return true;
                 }
 
-                /* Capture address before atomic transform for session recovery */
-                std::string strSessionAddress = optContext.value().strAddress;
+                const auto& address = GetAddress();
+                const std::string strConnectionAddress =
+                    address.ToStringIP() + ":" + std::to_string(address.GetPort());
 
                 /* Atomic transform: update timestamp, keepalive count, and prevblock suffix
                  * directly on the CURRENT value in mapMiners, avoiding TOCTOU race where
                  * NotifyNewRound could overwrite connection-specific fields. */
-                MiningContext transformedCtx;
+                MiningContext transformedCtx = optContext.value();
                 std::array<uint8_t, 4> prevSuffix = nMinerPrevblockSuffix;
-                StatelessMinerManager::Get().TransformMinerBySession(nKeepaliveSession,
-                    [prevSuffix, &transformedCtx](const MiningContext& current) {
-                        uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
-                        transformedCtx = current
-                            .WithTimestamp(nKeepaliveTimestamp)
-                            .WithKeepaliveCount(current.nKeepaliveCount + 1)
-                            .WithKeepaliveSent(current.nKeepaliveSent + 1)
-                            .WithLastKeepaliveTime(nKeepaliveTimestamp)
-                            .WithMinerPrevblockSuffix(prevSuffix);
-                        return transformedCtx;
-                    });
+                const auto applyKeepaliveRefresh = [prevSuffix, &transformedCtx](const MiningContext& current) {
+                    const uint64_t nKeepaliveTimestamp = runtime::unifiedtimestamp();
+                    transformedCtx = current
+                        .WithTimestamp(nKeepaliveTimestamp)
+                        .WithKeepaliveCount(current.nKeepaliveCount + 1)
+                        .WithKeepaliveSent(current.nKeepaliveSent + 1)
+                        .WithLastKeepaliveTime(nKeepaliveTimestamp)
+                        .WithMinerPrevblockSuffix(prevSuffix);
+                    return transformedCtx;
+                };
+                const bool fUpdatedLaneContext = StatelessMinerManager::Get().TransformMiner(
+                    strConnectionAddress,
+                    applyKeepaliveRefresh, 0);
+
+                if(!fUpdatedLaneContext)
+                {
+                    transformedCtx = applyKeepaliveRefresh(transformedCtx);
+
+                    debug::log(1, FUNCTION, "SESSION_KEEPALIVE: no exact legacy-lane manager entry for ",
+                               strConnectionAddress, " - refreshed canonical session only");
+                }
 
                 /* CRITICAL FIX: Refresh the canonical session identity in NodeSessionRegistry.
                  * Previously, keepalive updated MiningContext.nTimestamp but never touched
@@ -784,9 +866,22 @@ namespace LLP
 
                 /* Validate session and build ACK via shared utility.
                  * Uses GetMinerContextBySessionID() for robust cross-port lookup. */
+                MiningContext currentContext(
+                    nSubscribedChannel,
+                    nBestHeight.load(std::memory_order_relaxed),
+                    runtime::unifiedtimestamp(),
+                    GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort()),
+                    0,
+                    fMinerAuthenticated.load(std::memory_order_relaxed),
+                    nSessionId,
+                    hashKeyID,
+                    hashGenesis
+                );
+                currentContext = currentContext.WithProtocolLane(ProtocolLane::LEGACY);
+
                 bool fSessionValid = false;
                 auto vAck = SessionStatusUtility::ValidateAndBuildAck(
-                    req, SessionStatus::LANE_SECONDARY_ALIVE, fSessionValid);
+                    req, SessionStatus::LANE_SECONDARY_ALIVE, &currentContext, fSessionValid);
 
                 respond(OpcodeUtility::Opcodes::SESSION_STATUS_ACK, vAck);
 
@@ -795,10 +890,9 @@ namespace LLP
 
                 debug::log(2, FUNCTION, "SESSION_STATUS_ACK sent (legacy lane)");
 
-                /* TWO-STEP RE-ARM INVARIANT (PR #375):
-                 * BUG 1 FIX: Legacy lane was missing the re-arm + SendLegacyTemplate() step.
-                 * set → SendChannelNotification → re-set → SendLegacyTemplate.
-                 * Without this, degraded miners on legacy port never received recovery templates. */
+                /* Degraded recovery now sends a single fresh-work action.
+                 * Directly pushing BLOCK_DATA avoids competing notification+template
+                 * sends on the same connection during recovery. */
                 if(SessionStatusUtility::IsDegraded(req) &&
                     fSubscribedToNotifications && (nSubscribedChannel == 1 || nSubscribedChannel == 2))
                 {
@@ -807,11 +901,6 @@ namespace LLP
                         LOCK(MUTEX);
                         m_force_next_push = true;
                         m_get_block_cooldown = AutoCoolDown(std::chrono::seconds(MiningConstants::GET_BLOCK_COOLDOWN_SECONDS));
-                    }
-                    SendChannelNotification();
-                    {
-                        LOCK(MUTEX);
-                        m_force_next_push = true;  // re-arm: SendChannelNotification() consumed the flag
                     }
                     SendLegacyTemplate();
                     debug::log(0, FUNCTION, "✓ Degraded-recovery template pushed on legacy lane — miner should exit DEGRADED");
@@ -1107,9 +1196,11 @@ namespace LLP
                         debug::log(0, FUNCTION, "Sending SESSION_START after successful authentication (legacy lane)");
 
                         /* Build SESSION_START payload using shared utility.
-                         * The session liveness timeout is a node-wide constant from NodeCache,
-                         * NOT a per-context field.  nSessionTimeout was removed from MiningContext. */
-                        const uint64_t nLivenessTimeout = NodeCache::GetSessionLivenessTimeout(updatedContext.strAddress);
+                         * The session liveness timeout is a shared mining
+                         * policy value, NOT a per-context field.  nSessionTimeout
+                         * was removed from MiningContext. */
+                        const uint64_t nLivenessTimeout =
+                            MiningConstants::GetSessionLivenessTimeoutSec(updatedContext.strAddress);
                         std::vector<uint8_t> vSessionStart = SessionStartPacket::BuildPayload(
                             nSessionId, nLivenessTimeout, hashGenesis);
 
@@ -1434,36 +1525,17 @@ namespace LLP
                    " - ", GetMinerPacketName(nHeader), " (0x", std::hex, uint32_t(nHeader), std::dec, ")",
                    " length=", vData.size());
 
-        /* If the send buffer is saturated, attempt to drain before writing.
-         * Mining responses are small (keepalive = 32 B, round = 16 B) and
-         * should fit after even a partial flush. */
-        if(fBufferFull.load() && Buffered() > 0)
-        {
-            debug::log(0, FUNCTION, "WARNING: send buffer saturated before write "
-                       "(opcode=0x", std::hex, uint32_t(nHeader), std::dec,
-                       " buffered=", Buffered(), "); attempting flush");
-
-            /* Single batch Flush() now drains as much as the kernel TCP buffer
-             * allows (the old 3×10ms retry loop is no longer needed since
-             * Flush() loops internally until send() would block).  This
-             * eliminates up to 30ms of DataThread blocking per respond() call
-             * under buffer pressure. */
-            Flush();
-
-            if(fBufferFull.load())
-            {
-                debug::log(0, FUNCTION, "WARNING: flush did not fully drain buffer — packet may be dropped "
-                           "(opcode=0x", std::hex, uint32_t(nHeader), std::dec, ")");
-            }
-        }
-
-        this->WritePacket(RESPONSE);
-
-        /* Explicitly flush so mining GET responses reach the wire immediately.
-         * Without this, responses sit in vBuffer until FLUSH_THREAD wakes —
-         * creating an asymmetry vs PUSH notifications that drain reliably. */
-        if(Buffered() > 0)
-            Flush();
+        /* Write the packet to the socket send buffer.
+         * WritePacket() may buffer data if the kernel send buffer is full.
+         * Linux mining sockets now use the write-service path: FLUSH_THREAD
+         * materializes queued packets and EPOLLOUT-assisted DataThread service
+         * drains buffered bytes when the kernel is writable.  We still avoid
+         * calling Flush() inline here because that would hold SOCKET_MUTEX on
+         * the notification thread and contend with inbound mining reads.
+         *
+         * Control-path replies and submit-block results are flagged high
+         * priority so they can bypass buffered template/work traffic. */
+        this->WritePacket(RESPONSE, IsPriorityLegacyOpcode(nHeader));
     }
 
 
@@ -1495,14 +1567,11 @@ namespace LLP
             return false;
         }
 
-        /* Consult the authoritative StatelessMinerManager context when available.
-         * Primary: GetMinerContextByAddressOrIP() handles ephemeral port changes (GAP 3).
-         * Fallback: construct from per-connection member variables (pre-manager state).
-         * Third parameter (fMigrateAddress=false): read-only lookup, do not re-key the
-         * context address in the manager — migration is reserved for SUBMIT_BLOCK. */
+        /* Consult only the current legacy-lane manager entry when available.
+         * Same-node cross-lane recovery is no longer valid; protected legacy opcodes
+         * must stay bound to their own lane state. */
         const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-        auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-            strLookupAddr, nSessionId, /* fMigrateAddress= */ false);
+        std::optional<MiningContext> optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
 
         MiningContext ctx = [&]() -> MiningContext
         {
@@ -1688,11 +1757,6 @@ namespace LLP
         /* Clear the parallel hash-snapshot map. */
         mapBlockHashes.clear();
 
-        /* Clear the cross-connection SUBMIT_BLOCK deduplication cache on new round.
-         * Same block solutions submitted on both SIM Link lanes after the round
-         * ends would be expired anyway, but clearing eagerly avoids false positives. */
-        ColinMiningAgent::Get().clear_dedup_cache();
-
         /* Reset the coinbase transaction. */
         tCoinbaseTx.SetNull();
 
@@ -1718,8 +1782,7 @@ namespace LLP
     /*  Determines if the block exists. */
     bool Miner::find_block(const uint512_t& hashMerkleRoot)
     {
-        /* Check that the block exists. */
-        if(!mapBlocks.count(hashMerkleRoot))
+        if(lookup_block(hashMerkleRoot) == nullptr)
         {
             debug::log(2, FUNCTION, "Block Not Found ", hashMerkleRoot.SubString());
 
@@ -1727,6 +1790,62 @@ namespace LLP
         }
 
         return true;
+    }
+
+
+    /*  Non-mutating lookup of the cached block template. */
+    TAO::Ledger::Block* Miner::lookup_block(const uint512_t& hashMerkleRoot) const
+    {
+        const auto it = mapBlocks.find(hashMerkleRoot);
+        if(it == mapBlocks.end())
+            return nullptr;
+
+        return it->second;
+    }
+
+
+    /*  Register a block template and its best-chain snapshot together. */
+    TAO::Ledger::Block* Miner::register_block_template(TAO::Ledger::Block* pBlock)
+    {
+        if(pBlock == nullptr)
+            return nullptr;
+
+        if(pBlock->hashMerkleRoot == 0)
+        {
+            debug::error(FUNCTION, "Refusing to cache template with null merkle root");
+            delete pBlock;
+            return nullptr;
+        }
+
+        const uint512_t hashMerkleRoot = pBlock->hashMerkleRoot;
+        const uint1024_t hashCurrentBest = TAO::Ledger::ChainState::hashBestChain.load();
+
+        auto itExisting = mapBlocks.find(hashMerkleRoot);
+        if(itExisting != mapBlocks.end() && itExisting->second != pBlock)
+        {
+            delete itExisting->second;
+            itExisting->second = pBlock;
+        }
+        else
+            mapBlocks[hashMerkleRoot] = pBlock;
+
+        mapBlockHashes[hashMerkleRoot] = hashCurrentBest;
+
+        return pBlock;
+    }
+
+
+    /*  Remove a cached block template and its corresponding reorg snapshot. */
+    void Miner::erase_block_template(const uint512_t& hashMerkleRoot)
+    {
+        const auto it = mapBlocks.find(hashMerkleRoot);
+        if(it != mapBlocks.end())
+        {
+            delete it->second;
+            mapBlocks.erase(it);
+        }
+
+        mapBlockHashes.erase(hashMerkleRoot);
     }
 
 
@@ -1807,14 +1926,14 @@ namespace LLP
         }
         
         debug::log(2, FUNCTION, "Created block ", pBlock->ProofHash().SubString());
-        return pBlock;
+        return register_block_template(pBlock);
     }
 
 
     /*  signs the block. */
     bool Miner::sign_block(uint64_t nNonce, const uint512_t& hashMerkleRoot, const std::vector<uint8_t>& vOffsets)
     {
-        TAO::Ledger::Block *pBaseBlock = mapBlocks[hashMerkleRoot];
+        TAO::Ledger::Block *pBaseBlock = lookup_block(hashMerkleRoot);
 
         /* Update block with the nonce and time. */
         if(pBaseBlock)
@@ -1927,7 +2046,7 @@ namespace LLP
     {
         /* If the block dynamically casts to a legacy block, validate the legacy block. */
         {
-            Legacy::LegacyBlock *pBlock = dynamic_cast<Legacy::LegacyBlock *>(mapBlocks[hashMerkleRoot]);
+            Legacy::LegacyBlock *pBlock = dynamic_cast<Legacy::LegacyBlock *>(lookup_block(hashMerkleRoot));
 
             if(pBlock)
             {
@@ -1947,7 +2066,7 @@ namespace LLP
         }
 
         /* If the block dynamically casts to a tritium block, validate the tritium block. */
-        TAO::Ledger::TritiumBlock *pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(mapBlocks[hashMerkleRoot]);
+        TAO::Ledger::TritiumBlock *pBlock = dynamic_cast<TAO::Ledger::TritiumBlock*>(lookup_block(hashMerkleRoot));
         if(pBlock)
         {
             debug::log(2, FUNCTION, "Tritium");
@@ -1980,12 +2099,11 @@ namespace LLP
                 /* Invalidate the failed template from the cache so the miner's
                  * next new_block() receives a fresh template rather than the
                  * stale one that failed to land. */
-                auto itFailed = mapBlocks.find(hashMerkleRoot);
-                if(itFailed != mapBlocks.end())
+                if(lookup_block(hashMerkleRoot) != nullptr)
                 {
                     debug::log(0, FUNCTION, "Invalidating failed template ",
                         hashMerkleRoot.SubString(), " from cache — next new_block() will regenerate");
-                    mapBlocks.erase(itFailed);
+                    erase_block_template(hashMerkleRoot);
                 }
 
                 return false;
@@ -2035,7 +2153,7 @@ namespace LLP
         ctx.nChannel = nChannel;
         ctx.fSubscribedToNotifications = fSubscribedToNotifications;
         ctx.nSubscribedChannel = nSubscribedChannel;
-        ctx.strAddress = GetAddress().ToStringIP();
+        ctx.strAddress = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
         ctx.nProtocolLane = ProtocolLane::LEGACY;  // Legacy Miner uses 8-bit opcodes
         return ctx;
     }
@@ -2060,9 +2178,24 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock.
+         * The hash is needed inside the lock to implement the hash-based
+         * bypass: a new hashPrevBlock always bypasses the 1-second floor
+         * so miners receive fresh work after every fork step. */
+        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashBestChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBest);
+
         /* Push throttle — drop if a template was sent less than
-         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago (guards against fork-resolution bursts).
-         * Re-subscription responses bypass via m_force_next_push. */
+         * TEMPLATE_PUSH_MIN_INTERVAL_MS ago AND the chain tip has not changed
+         * (same hashPrevBlock).  Re-subscription responses bypass via
+         * m_force_next_push.
+         *
+         * Hash-change bypass: a fork step produces a new hashBestChain
+         * within the 1-second window.  Without the hash check, all but the
+         * first SetBest() notification in a burst are dropped, leaving miners
+         * on a stale template for up to 1 second.  With it, each distinct tip
+         * is delivered immediately regardless of timing. */
         {
             LOCK(MUTEX);
             if(shouldAbortNotification())
@@ -2080,19 +2213,25 @@ namespace LLP
                 /* Re-subscription bypass: miner explicitly requested fresh work. */
                 m_force_next_push = false;
             }
+            else if (hashBestChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Push throttle bypassed — new chain tip ",
+                           hashBestChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
+            }
             else if (m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
             {
-                debug::log(1, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
-                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner must wait");
+                debug::log(0, FUNCTION, "⏳ Push throttled — ", elapsed, "ms since last push (min ",
+                           MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS, "ms); miner=",
+                           GetAddress().ToStringIP(), " — same tip, work delivery delayed");
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashBestChain;
         }
 
-        /* Get blockchain state */
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        
         /* Get channel-specific state */
         TAO::Ledger::BlockState stateChannel = stateBest;
         if (!TAO::Ledger::GetLastState(stateChannel, nSubscribedChannel))
@@ -2103,10 +2242,6 @@ namespace LLP
         
         /* Get difficulty */
         uint32_t nDifficulty = LLP::StatelessMinerConnection::GetCachedDifficulty(nSubscribedChannel);
-
-        /* Keep the tip hash consistent with the loaded best-state snapshot. */
-        const uint1024_t hashBestChain =
-            PushNotificationBuilder::BestChainHashForNotification(stateBest);
 
         if(shouldAbortNotification())
         {
@@ -2120,8 +2255,14 @@ namespace LLP
             nSubscribedChannel, ProtocolLane::LEGACY, stateBest, stateChannel, nDifficulty,
             hashBestChain);
         
-        /* Send to miner */
-        respond(notification.HEADER, notification.DATA);
+        /* Enqueue for deferred sending by FLUSH_THREAD.
+         * This decouples the block-acceptance notification thread from
+         * SOCKET_MUTEX contention — the packet is built here but written
+         * to the socket asynchronously on the FLUSH_THREAD where
+         * WritePacket() + Flush() naturally belong.  This eliminates the
+         * reader-writer SOCKET_MUTEX contention between this notification
+         * path and the DataThread's ReadPacket() loop. */
+        QueuePacket(notification);
         
         debug::log(0, FUNCTION, "[BLOCK CREATE] hashPrevBlock = ", hashBestChain.SubString(),
                    " (template anchor embedded in push notification, unified height ", stateBest.nHeight + 1, ")");
@@ -2154,20 +2295,37 @@ namespace LLP
             return;
         }
 
+        /* Snapshot the chain tip BEFORE entering the throttle lock (same
+         * pattern as SendChannelNotification) so the hash-based bypass can
+         * be evaluated while holding MUTEX without a blocking load inside. */
+        TAO::Ledger::BlockState stateBestForHash = TAO::Ledger::ChainState::tStateBest.load();
+        const uint1024_t hashCurrentChain =
+            PushNotificationBuilder::BestChainHashForNotification(stateBestForHash);
+
         /* Thread-safe context access and push throttle */
         uint32_t nChannelCopy;
         {
             LOCK(MUTEX);
 
-            /* Push throttle — same pattern as SendStatelessTemplate().
+            /* Push throttle — same pattern as SendChannelNotification().
              * TWO-STEP RE-ARM INVARIANT: caller must re-arm m_force_next_push
-             * after SendChannelNotification() before calling this method. */
+             * after SendChannelNotification() before calling this method.
+             *
+             * Hash-change bypass: if the chain tip advanced since the last push,
+             * skip the time floor so miners receive the new template immediately. */
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - m_last_template_push_time).count();
             if(m_force_next_push)
             {
                 m_force_next_push = false;
+            }
+            else if(hashCurrentChain != m_hashLastPushedChain)
+            {
+                /* Hash-change bypass: chain tip advanced — always deliver. */
+                debug::log(2, FUNCTION, "Legacy template throttle bypassed — new chain tip ",
+                           hashCurrentChain.SubString(), " (was ",
+                           m_hashLastPushedChain.SubString(), ")");
             }
             else if(m_last_template_push_time != std::chrono::steady_clock::time_point{} &&
                 elapsed < MiningConstants::TEMPLATE_PUSH_MIN_INTERVAL_MS)
@@ -2177,6 +2335,7 @@ namespace LLP
                 return;
             }
             m_last_template_push_time = now;
+            m_hashLastPushedChain = hashCurrentChain;
 
             /* Validate channel */
             nChannelCopy = nChannel.load();
@@ -2186,6 +2345,10 @@ namespace LLP
                 return;
             }
         }
+
+        /* Get chain state for metadata */
+        RoundStateUtility::ChainHeightSnapshot snap = RoundStateUtility::CaptureHeights();
+        uint32_t nChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannelCopy);
 
         /* Create block template */
         TAO::Ledger::Block* pBlock = new_block();
@@ -2208,10 +2371,6 @@ namespace LLP
             return;
         }
 
-        /* Get chain state for metadata */
-        RoundStateUtility::ChainHeightSnapshot snap = RoundStateUtility::CaptureHeights();
-        uint32_t nChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannelCopy);
-
         /* Build payload: 12-byte metadata + block data using shared utility */
         std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
             snap.nUnifiedHeight, nChannelHeight, pBlock->nBits);
@@ -2230,8 +2389,8 @@ namespace LLP
 
         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-        /* Update last template unified height */
-        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+        /* Update last template unified height (atomic store — see nLastTemplateUnifiedHeight comment). */
+        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
     }
 
 
@@ -2341,10 +2500,11 @@ namespace LLP
 
         /* Update last template unified height after sending template.
          * Uses UNIFIED height — every tip move changes hashPrevBlock,
-         * so ALL channels need fresh templates regardless of which channel mined. */
+         * so ALL channels need fresh templates regardless of which channel mined.
+         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
         {
             TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-            nLastTemplateUnifiedHeight = stateBest.nHeight;
+            nLastTemplateUnifiedHeight.store(stateBest.nHeight, std::memory_order_relaxed);
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
@@ -2407,27 +2567,13 @@ namespace LLP
     /* Stateless handler for SUBMIT_BLOCK - validates and processes a block submission */
     bool Miner::handle_submit_block_stateless(const Packet& PACKET)
     {
-        /* R-02: Session consistency gate — validate the authoritative session context
-         * persisted in StatelessMinerManager before proceeding with block processing.
-         * The live connection context has hashKeyID=0 for legacy-lane miners; the
-         * StatelessMinerManager carries the full context populated during auth.
-         *
-         * Also resolves nCrossLaneSessionId for the cross-lane SUBMIT_BLOCK fallback
-         * path (GAP 3 hardening: IP-only lookup if IP:port misses on reconnect). */
-        uint32_t nCrossLaneSessionId = nSessionId;   /* default: per-connection session */
+        /* R-02: Lane-local session consistency gate — legacy SUBMIT_BLOCK must rely
+         * only on this connection's own lane state, not on any other-lane alias. */
         {
             const std::string strLookupAddr = GetAddress().ToStringIP() + ":" + std::to_string(GetAddress().GetPort());
-            const auto optCtx = StatelessMinerManager::Get().GetMinerContextByAddressOrIP(
-                strLookupAddr, nSessionId, true);
+            const auto optCtx = StatelessMinerManager::Get().GetMinerContext(strLookupAddr);
             if(optCtx.has_value())
             {
-                nCrossLaneSessionId = optCtx->nSessionId;
-                if(optCtx->strAddress != strLookupAddr)
-                {
-                    debug::log(1, FUNCTION, "Legacy lane: resolved session via IP-only fallback from ",
-                               optCtx->strAddress, " to ", strLookupAddr,
-                               ", session=", nCrossLaneSessionId);
-                }
                 const SessionConsistencyResult consistency = optCtx->ValidateConsistency();
                 if(consistency != SessionConsistencyResult::Ok)
                 {
@@ -2439,7 +2585,8 @@ namespace LLP
             }
             else
             {
-                debug::log(2, FUNCTION, "Legacy lane: no session context found, cross-lane resolution unavailable");
+                debug::log(2, FUNCTION, "Legacy lane: no exact-address session context found for ",
+                           strLookupAddr, " - relying on local connection state");
             }
         }
 
@@ -2603,7 +2750,7 @@ namespace LLP
                 return true;
             }
 
-            pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(mapBlocks[hashMerkle]);
+            pTritium = dynamic_cast<TAO::Ledger::TritiumBlock*>(lookup_block(hashMerkle));
         }
 
         if(!pTritium)
@@ -2633,30 +2780,6 @@ namespace LLP
                        pTritium->hashPrevBlock.SubString(),
                        " != hashBestChain=", hashCurrentBest.SubString());
             respond_auto(ORPHAN_BLOCK);
-            return true;
-        }
-
-        /* ── SIM Link deduplication check ─────────────────────────────────────
-         *  When a miner runs two simultaneous connections (NexusMiner SIM Link:
-         *  one on legacy port 8323, one on stateless port 9323) both lanes may
-         *  submit the same solution within milliseconds of each other.  Deduplicate
-         *  by caching a hash of (nHeight, nNonce, hashMerkleRoot) for 10 seconds.
-         *  Only the first submission is forwarded to ValidateMinedBlock / AcceptMinedBlock.
-         *  The second is silently rejected with BLOCK_REJECTED.
-         */
-        if(ColinMiningAgent::Get().check_and_record_submission(
-                pTritium->nHeight, nonce, hashMerkle.GetHex()))
-        {
-            debug::log(0, FUNCTION, "SUBMIT_BLOCK: Duplicate submission detected "
-                       "(height=", pTritium->nHeight, " nonce=", nonce,
-                       ") — second connection submission ignored (SIM Link dedup)");
-            if(hashGenesis != 0)
-            {
-                ColinMiningAgent::Get().on_block_submitted(
-                    hashGenesis.SubString(8), pTritium->nChannel,
-                    false, "DUPLICATE_SUBMISSION");
-            }
-            respond_auto(BLOCK_REJECTED);
             return true;
         }
 
@@ -2800,15 +2923,20 @@ namespace LLP
 
         /* GET_ROUND COMPATIBILITY: AUTO-SEND TEMPLATE
          * CRITICAL: Use UNIFIED height — every tip move (any channel) changes
-         * hashPrevBlock, requiring ALL channels to get fresh templates. */
+         * hashPrevBlock, requiring ALL channels to get fresh templates.
+         *
+         * nLastTemplateUnifiedHeight is now std::atomic<uint32_t>, so we can
+         * read it safely without holding MUTEX. */
         uint32_t nCurrentChannelHeight = RoundStateUtility::GetChannelHeight(snap, nChannel);
+        const uint32_t nLiveLastTemplateHeight =
+            nLastTemplateUnifiedHeight.load(std::memory_order_relaxed);
         bool fUnifiedHeightChanged = RoundStateUtility::IsTemplateStale(
-            nLastTemplateUnifiedHeight, snap);
+            nLiveLastTemplateHeight, snap);
 
         if(fUnifiedHeightChanged)
         {
             debug::log(2, FUNCTION, "Unified height advanced: ",
-                       nLastTemplateUnifiedHeight, " -> ", snap.nUnifiedHeight,
+                       nLiveLastTemplateHeight, " -> ", snap.nUnifiedHeight,
                        " - auto-sending template for channel ", nChannel.load());
 
             TAO::Ledger::Block* pBlock = new_block();
@@ -2841,8 +2969,9 @@ namespace LLP
 
                         StatelessMinerManager::Get().IncrementTemplatesServed();
 
-                        /* Update last template unified height only after successful send */
-                        nLastTemplateUnifiedHeight = snap.nUnifiedHeight;
+                        /* Update last template unified height only after successful send.
+                         * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
+                        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
                     }
                 }
                 catch(const std::exception& e) {
@@ -2877,7 +3006,7 @@ namespace LLP
         vPacket.insert(vPacket.end(), vData.begin(), vData.end());
 
         /* Write raw bytes to connection */
-        Write(vPacket, vPacket.size());
+        Write(vPacket, vPacket.size(), IsPriorityStatelessOpcode(nOpcode));
 
         debug::log(3, FUNCTION, "Stateless response: opcode=0x", std::hex, nOpcode,
                    " length=", std::dec, nLength, " to ", GetAddress().ToStringIP());

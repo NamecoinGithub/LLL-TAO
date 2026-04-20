@@ -202,7 +202,7 @@ TEST_CASE("ProcessResult Factory Tests", "[stateless_miner]")
     SECTION("Success creates valid result")
     {
         MiningContext ctx;
-        Packet resp;
+        StatelessPacket resp;
         
         ProcessResult result = ProcessResult::Success(ctx, resp);
         
@@ -310,7 +310,7 @@ TEST_CASE("StatelessMiner SET_CHANNEL Processing", "[stateless_miner]")
         REQUIRE(result.response.DATA[0] == 0x02);
         
         /* Verify CHANNEL_ACK is recognized as having data payload */
-        REQUIRE(result.response.HasDataPayload() == true);
+        REQUIRE(OpcodeUtility::HasDataPayload(result.response.HEADER) == true);
         
         /* Verify serialization includes LENGTH and DATA */
         std::vector<uint8_t> bytes = result.response.GetBytes();
@@ -937,28 +937,31 @@ TEST_CASE("Packet HasDataPayload and Authentication Packet Serialization", "[pac
         REQUIRE(serializedLength == 102);
     }
     
-    SECTION("Traditional request packets serialize without data")
+    SECTION("Traditional request packets serialize with zero length framing")
     {
-        /* Create a GET_BLOCK packet (129) - should not serialize data */
+        /* Create a GET_BLOCK packet (129) with zero payload */
         Packet packet(129);  // GET_BLOCK
-        packet.DATA.push_back(0xFF);  // Add some data (shouldn't be serialized)
-        packet.LENGTH = 1;
-        
+        packet.LENGTH = 0;
+         
         /* Serialize the packet */
         std::vector<uint8_t> bytes = packet.GetBytes();
-        
-        /* Should have only header (1 byte) since GET_BLOCK is a request packet */
-        REQUIRE(bytes.size() == 1);
+         
+        /* Legacy framing is always HEADER(1) + LENGTH(4), even for header-only requests. */
+        REQUIRE(bytes.size() == 5);
         REQUIRE(bytes[0] == 129);
+        REQUIRE(bytes[1] == 0x00);
+        REQUIRE(bytes[2] == 0x00);
+        REQUIRE(bytes[3] == 0x00);
+        REQUIRE(bytes[4] == 0x00);
     }
     
     SECTION("Header() function correctly identifies complete auth packets")
     {
-        /* Auth packet with data - should require LENGTH > 0 */
+        /* Auth packet with zero length is framed, but later payload validation rejects it. */
         Packet authPacket(MINER_AUTH_CHALLENGE);
         authPacket.LENGTH = 0;
-        REQUIRE(authPacket.Header() == false);  /* Not complete without length */
-        
+        REQUIRE(authPacket.Header() == true);
+         
         authPacket.LENGTH = 32;
         REQUIRE(authPacket.Header() == true);   /* Complete with length */
     }
@@ -1168,12 +1171,10 @@ TEST_CASE("DisposableFalcon Wrapper Basic Operations", "[disposable_falcon]")
         std::vector<uint8_t> serialized = wrapResult.submission.Serialize();
         
         /* Unwrap (using the public key from the session) */
-        DisposableFalcon::WrapperResult unwrapResult = 
-            pWrapper->UnwrapWorkSubmission(serialized, vPubKey);
-        
-        REQUIRE(unwrapResult.fSuccess == true);
-        REQUIRE(unwrapResult.submission.hashMerkleRoot == merkle);
-        REQUIRE(unwrapResult.submission.nNonce == 9999);
+        DisposableFalcon::SignedWorkSubmission unwrapped;
+        REQUIRE(DisposableFalcon::VerifyWorkSubmission(serialized, vPubKey, unwrapped));
+        REQUIRE(unwrapped.hashMerkleRoot == merkle);
+        REQUIRE(unwrapped.nNonce == 9999);
     }
 }
 

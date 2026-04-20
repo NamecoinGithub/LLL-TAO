@@ -238,7 +238,8 @@ namespace LLP
         /** on_miner_connected
          *
          *  Called when a miner connects and authenticates.
-         *  Detects SIM Link (dual connection) when same genesis connects twice.
+         *  Records concurrent connections for diagnostics when the same genesis
+         *  appears more than once on this node.
          *
          *  @param[in] genesis_prefix    First 8 hex chars of miner genesis
          *  @param[in] remote_endpoint   Remote IP:port string
@@ -323,38 +324,6 @@ namespace LLP
         void on_canonical_snap_updated(const std::string& genesis_prefix,
                                        uint64_t snap_age_ms,
                                        bool is_stale);
-
-
-        /** check_and_record_submission
-         *
-         *  Thread-safe deduplication check for SUBMIT_BLOCK across connections.
-         *
-         *  Implements a 10-second TTL cache keyed by (nHeight, nNonce, merkleHex).
-         *  When the NexusMiner SIM Link architecture submits the same block on both
-         *  the legacy (port 8323) and stateless (port 9323) lanes simultaneously,
-         *  only the first submission returns false (not a duplicate).  The second
-         *  returns true (duplicate) and should be silently rejected.
-         *
-         *  The cache is cleared when clear_dedup_cache() is called (i.e., on new round).
-         *
-         *  @param[in] nHeight    Unified block height from template
-         *  @param[in] nNonce     Block nonce submitted by miner
-         *  @param[in] merkleHex  Hex string of hashMerkleRoot
-         *
-         *  @return true if this is a duplicate submission (already seen within 10s)
-         *
-         **/
-        bool check_and_record_submission(uint32_t nHeight, uint64_t nNonce,
-                                          const std::string& merkleHex);
-
-
-        /** clear_dedup_cache
-         *
-         *  Clears the SUBMIT_BLOCK deduplication cache.
-         *  Should be called when a new mining round starts (e.g., clear_map()).
-         *
-         **/
-        void clear_dedup_cache();
 
 
     private:
@@ -468,15 +437,6 @@ namespace LLP
         std::atomic<bool>                   m_running{false};
         std::atomic<bool>                   m_shutdownReportPending{false};
 
-        /** Cross-connection SUBMIT_BLOCK deduplication cache.
-         *  Keyed by hash of (nHeight, nNonce, merkleHex).  TTL = 10 seconds.
-         *  Protected by m_dedup_mutex (separate from m_mutex to avoid contention).
-         **/
-        std::unordered_map<size_t, std::chrono::steady_clock::time_point> m_dedup_cache;
-        std::mutex m_dedup_mutex;
-
-        /** TTL for dedup cache entries (milliseconds) **/
-        static constexpr uint32_t DEDUP_TTL_MS = 10000;
     };
 
 } // namespace LLP

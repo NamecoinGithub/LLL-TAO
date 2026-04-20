@@ -30,6 +30,7 @@ ________________________________________________________________________________
 #include <mutex>
 #include <map>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace LLP
@@ -127,6 +128,24 @@ namespace LLP
         bool m_template_create_in_flight{false};
         TAO::Ledger::Block* m_last_created_template{nullptr};
 
+    public:
+        /** Async BLOCK_DATA worker for push/GET_ROUND recovery.
+         *  Coalesces multiple "fresh template" requests into one background job so
+         *  the read path only schedules work instead of building templates inline. */
+        enum class TemplateWorkReason : uint8_t
+        {
+            PUSH_NOTIFICATION,
+            GET_ROUND_RECOVERY
+        };
+
+    private:
+        std::mutex m_template_work_mutex;
+        std::condition_variable m_template_work_cv;
+        std::thread m_template_work_thread;
+        bool m_template_worker_running{false};
+        bool m_template_work_pending{false};
+        TemplateWorkReason m_template_work_reason{TemplateWorkReason::PUSH_NOTIFICATION};
+
         /** Timestamp of the last template push (SendStatelessTemplate / SendChannelNotification).
          *
          *  Used by the push throttle guard to prevent flooding miners with full
@@ -141,6 +160,11 @@ namespace LLP
          *  fresh push regardless of when the previous push was sent.  Protected by MUTEX.
          **/
         bool m_force_next_push{false};
+
+        /** Best-chain hash of the last tip delivered on the stateless push path.
+         *  Protected by MUTEX and used to bypass the time floor whenever the
+         *  chain tip changes, matching the legacy mining lane semantics. */
+        uint1024_t m_hashLastPushedChain;
 
         /** 1-second rate-limit floor for GET_BLOCK fallback polling.
          *
@@ -295,16 +319,26 @@ namespace LLP
 
         /** IsTimeoutExempt
          *
-         *  Authenticated stateless mining connections are exempt from socket
-         *  read-idle timeout. The session-level 24-hour keepalive timeout
-         *  governs session expiration; the socket timeout must not kill
-         *  long-running authenticated miners during extended mining operations.
+         *  Authenticated stateless mining connections bypass aggressive
+         *  POLL_EMPTY and TIMEOUT_WRITE checks.  They are still subject to
+         *  a finite read-idle timeout via GetReadTimeout().
          *
-         *  @return true if miner is authenticated or is in the auth handshake and
-         *          should bypass aggressive socket timeouts.
+         *  @return true if miner is authenticated or is in the auth handshake.
          *
          **/
         bool IsTimeoutExempt() const final;
+
+        /** GetReadTimeout
+         *
+         *  Authenticated stateless miners use a long but finite read-idle
+         *  timeout sourced from the shared MiningConstants helpers.  The runtime
+         *  override is clamped so it cannot fall below the safety floor
+         *  required for the 24-hour mining liveness contract.
+         *
+         *  @return read-idle timeout in milliseconds, or 0 for default.
+         *
+         **/
+        uint32_t GetReadTimeout() const final;
 
         /** GetWriteTimeout
          *
@@ -356,11 +390,12 @@ namespace LLP
 
         /** SendStatelessTemplate
          *
-         *  Send a complete mining template using 16-bit opcode 0xD008 (STATELESS_GET_BLOCK).
+         *  Send a complete mining template using mirrored GET_BLOCK opcode 0xD081
+         *  (Mirror(0x81) / STATELESS_GET_BLOCK).
          *  This is used by the stateless mining protocol for NexusMiner.
          *
          *  Packet format (228 bytes total):
-         *  - Opcode: 0xD008 (2 bytes, big-endian)
+         *  - Opcode: 0xD081 (2 bytes, big-endian)
          *  - Metadata (12 bytes, big-endian):
          *    - Unified height (4 bytes)
          *    - Channel height (4 bytes)
@@ -503,6 +538,19 @@ namespace LLP
          *
          **/
         void CleanupStaleTemplates(uint32_t nCurrentHeight);
+
+        /** Start/stop the async BLOCK_DATA worker. */
+        void StartTemplateWorker();
+        void StopTemplateWorker();
+
+        /** Queue one coalesced BLOCK_DATA build/send request. */
+        void ScheduleTemplateWork(TemplateWorkReason eReason);
+
+        /** Main loop for the async BLOCK_DATA worker. */
+        void TemplateWorkerLoop();
+
+        /** Build and queue the latest BLOCK_DATA payload from the worker thread. */
+        bool QueueCurrentBlockDataTemplate(TemplateWorkReason eReason);
 
         /** GetChannelManager (PR #136: Fork-Aware Channel State Management)
          *

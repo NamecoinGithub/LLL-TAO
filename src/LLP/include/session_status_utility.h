@@ -21,6 +21,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/session_status.h>
 #include <LLP/include/stateless_manager.h>
+#include <LLP/include/node_session_registry.h>
 
 #include <Util/include/debug.h>
 #include <Util/include/runtime.h>
@@ -30,14 +31,16 @@ namespace LLP
 
     /** SessionStatusUtility
      *
-     *  Shared utility for SESSION_STATUS ACK building with robust SessionManager
-     *  tie-in.  Used by both the Legacy (miner.cpp, port 8323) and Stateless
+     *  Shared utility for SESSION_STATUS ACK building with canonical session
+     *  registry tie-in.  Used by both the Legacy (miner.cpp, port 8323) and Stateless
      *  (stateless_miner_connection.cpp, port 9323) lanes.
      *
      *  Design:
-     *  - Uses StatelessMinerManager::GetMinerContextBySessionID() as the
-     *    authoritative session lookup for both lanes (legacy pattern preferred).
-     *  - Pure functions: no internal mutexes, no side effects.
+     *  - Uses NodeSessionRegistry as the authoritative session lookup for both lanes.
+     *  - SESSION_STATUS is a soft health probe; unknown session IDs are diagnostic.
+     *  - If the wire session_id misses but the current authenticated hashKeyID is
+     *    still known, the utility reconciles to the canonical session instead of
+     *    treating the miner as bad.
      *  - Callers handle lane-specific response framing (8-bit vs 16-bit opcodes).
      *
      *  Session Disconnection Scenarios:
@@ -69,16 +72,18 @@ namespace LLP
 
         /** ValidateAndBuildAck
          *
-         *  Validate a SESSION_STATUS request against the SessionManager and build
+         *  Validate a SESSION_STATUS request against the canonical session registry and build
          *  the 16-byte ACK response payload.
          *
-         *  Uses StatelessMinerManager::GetMinerContextBySessionID() for robust
-         *  session lookup that works across both lanes and survives reconnections.
+         *  Uses NodeSessionRegistry first, with authenticated hashKeyID-based
+         *  reconciliation when the wire session_id misses.
          *
          *  @param[in] req         The parsed SESSION_STATUS request.
          *  @param[in] lane        Which lane this request arrived on:
          *                         LANE_PRIMARY_ALIVE (stateless) or
          *                         LANE_SECONDARY_ALIVE (legacy).
+         *  @param[in] pCurrentContext Optional current connection snapshot for
+         *                         authenticated session reconciliation.
          *  @param[out] fValid     Set to true if session was found and ACK built.
          *
          *  @return std::vector<uint8_t> containing the 16-byte ACK payload.
@@ -88,33 +93,81 @@ namespace LLP
         inline std::vector<uint8_t> ValidateAndBuildAck(
             const SessionStatus::SessionStatusRequest& req,
             uint32_t nLaneFlag,
+            const MiningContext* pCurrentContext,
             bool& fValid)
         {
             fValid = false;
 
-            /* Look up session by ID through the SessionManager.
-             * This is the authoritative lookup used by both lanes. */
-            auto optContext = StatelessMinerManager::Get().GetMinerContextBySessionID(req.session_id);
-            if(!optContext.has_value())
+            std::optional<NodeSessionEntry> optEntry = NodeSessionRegistry::Get().Lookup(req.session_id);
+            if(!optEntry.has_value() && pCurrentContext != nullptr
+            && pCurrentContext->fAuthenticated && pCurrentContext->hashKeyID != 0)
             {
-                debug::error(FUNCTION, "SESSION_STATUS: unknown session_id=0x",
-                             std::hex, req.session_id, std::dec);
-                return SessionStatus::BuildAckPayload(req.session_id, 0u, 0u, req.status_flags);
+                const MiningContext& currentContext = *pCurrentContext;
+                optEntry = NodeSessionRegistry::Get().LookupByKey(currentContext.hashKeyID);
+
+                if(!optEntry.has_value() && currentContext.hashGenesis != 0)
+                {
+                    MiningContext canonicalContext = currentContext.WithSession(
+                        MiningContext::DeriveSessionId(currentContext.hashKeyID));
+
+                    auto [nCanonicalSessionId, fNewSession] = NodeSessionRegistry::Get().RegisterOrRefresh(
+                        canonicalContext.hashKeyID,
+                        canonicalContext.hashGenesis,
+                        canonicalContext,
+                        canonicalContext.nProtocolLane);
+
+                    debug::log(1, FUNCTION,
+                        "SESSION_STATUS: reconciled missing session via authenticated key=",
+                        canonicalContext.hashKeyID.SubString(),
+                        " requested=0x", std::hex, req.session_id,
+                        " canonical=0x", nCanonicalSessionId, std::dec,
+                        fNewSession ? " (re-registered)" : " (refreshed)");
+
+                    /* Returning the canonical registry session ID here is the explicit
+                     * reconciliation contract: the wire alias may drift, but the ACK
+                     * repairs the miner back onto the registry-derived session. */
+                    fValid = true;
+                    return SessionStatus::BuildAckPayload(
+                        nCanonicalSessionId,
+                        nLaneFlag | SessionStatus::LANE_AUTHENTICATED,
+                        static_cast<uint32_t>(canonicalContext.GetSessionDuration(runtime::unifiedtimestamp())),
+                        req.status_flags);
+                }
+
+                if(optEntry.has_value() && req.session_id != optEntry->nSessionId)
+                {
+                    debug::log(1, FUNCTION,
+                        "SESSION_STATUS: canonical session mismatch for key=",
+                        pCurrentContext->hashKeyID.SubString(),
+                        " requested=0x", std::hex, req.session_id,
+                        " canonical=0x", optEntry->nSessionId, std::dec);
+                }
+            }
+
+            if(!optEntry.has_value())
+            {
+                /* Intentional severity downgrade: SESSION_STATUS is a soft health probe,
+                 * so a miss is diagnostic telemetry rather than a miner fault. */
+                debug::log(1, FUNCTION, "SESSION_STATUS: diagnostic miss for session_id=0x",
+                           std::hex, req.session_id, std::dec);
+                return SessionStatus::BuildAckPayload(req.session_id, nLaneFlag, 0u, req.status_flags);
             }
 
             fValid = true;
 
             /* Build lane health flags */
-            uint32_t nLaneHealth = 0;
-            nLaneHealth |= nLaneFlag;
-            nLaneHealth |= SessionStatus::LANE_AUTHENTICATED;
+            uint32_t nLaneHealth = nLaneFlag | SessionStatus::LANE_AUTHENTICATED;
+            if(optEntry->fStatelessLive)
+                nLaneHealth |= SessionStatus::LANE_PRIMARY_ALIVE;
+            if(optEntry->fLegacyLive)
+                nLaneHealth |= SessionStatus::LANE_SECONDARY_ALIVE;
 
             /* Calculate session uptime */
             const uint32_t nUptime = static_cast<uint32_t>(
-                optContext->GetSessionDuration(runtime::unifiedtimestamp()));
+                optEntry->context.GetSessionDuration(runtime::unifiedtimestamp()));
 
             return SessionStatus::BuildAckPayload(
-                req.session_id, nLaneHealth, nUptime, req.status_flags);
+                optEntry->nSessionId, nLaneHealth, nUptime, req.status_flags);
         }
 
 
