@@ -190,6 +190,10 @@ namespace LLP
         std::atomic<bool> fCONNECTED;
 
 
+        /** Count consecutive authenticated POLL_EMPTY near-misses. **/
+        std::atomic<uint32_t> nConsecutivePollEmptyStrikes;
+
+
         /** Index for the current data thread processing. **/
         int32_t nDataThread;
 

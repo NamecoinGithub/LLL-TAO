@@ -62,6 +62,7 @@ namespace LLP
     , fDDOS           (false)
     , fOUTGOING       (false)
     , fCONNECTED      (false)
+    , nConsecutivePollEmptyStrikes(0)
     , nDataThread     (-1)
     , nDataIndex      (-1)
     , FLUSH_CONDITION (nullptr)
@@ -84,6 +85,7 @@ namespace LLP
     , fDDOS           (fDDOSIn)
     , fOUTGOING       (fOutgoing)
     , fCONNECTED      (false)
+    , nConsecutivePollEmptyStrikes(0)
     , nDataThread     (-1)
     , nDataIndex      (-1)
     , FLUSH_CONDITION (nullptr)
@@ -106,6 +108,7 @@ namespace LLP
     , fDDOS           (fDDOSIn)
     , fOUTGOING       (fOutgoing)
     , fCONNECTED      (false)
+    , nConsecutivePollEmptyStrikes(0)
     , nDataThread     (-1)
     , nDataIndex      (-1)
     , FLUSH_CONDITION (nullptr)
@@ -187,6 +190,7 @@ namespace LLP
         fDDOS           = false;
         fOUTGOING       = false;
         fCONNECTED      = false;
+        nConsecutivePollEmptyStrikes = 0;
         nDataThread     = -1;
         nDataIndex      = -1;
 
