@@ -40,6 +40,9 @@ namespace LLP
         std::vector<uint8_t> vPayload;
         GetBlockPolicyReason eReason = GetBlockPolicyReason::NONE;
         uint32_t nRetryAfterMs = 0;
+        uint32_t nUnifiedHeight = 0;
+        uint32_t nChannelHeight = 0;
+        uint1024_t hashBestChain = 0;
         uint32_t nBlockChannel = 0;
         uint32_t nBlockHeight = 0;
         uint32_t nBlockBits = 0;
@@ -66,6 +69,7 @@ namespace LLP
 
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
         TAO::Ledger::BlockState stateChannel = stateBest;
+        const uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
         uint32_t nChannelHeight = 0;
         if(TAO::Ledger::GetLastState(stateChannel, pBlock->nChannel))
             nChannelHeight = stateChannel.nChannelHeight;
@@ -89,6 +93,9 @@ namespace LLP
         result.fSuccess = true;
         result.eReason = GetBlockPolicyReason::NONE;
         result.nRetryAfterMs = 0;
+        result.nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
+        result.nChannelHeight = nChannelHeight;
+        result.hashBestChain = hashBestChain;
         result.nBlockChannel = pBlock->nChannel;
         result.nBlockHeight = pBlock->nHeight;
         result.nBlockBits = pBlock->nBits;

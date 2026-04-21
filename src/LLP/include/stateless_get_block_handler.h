@@ -78,6 +78,9 @@ namespace LLP
         std::vector<uint8_t> vPayload;
         GetBlockPolicyReason eReason = GetBlockPolicyReason::NONE;
         uint32_t nRetryAfterMs  = 0;
+        uint32_t nUnifiedHeight = 0;
+        uint32_t nChannelHeight = 0;
+        uint1024_t hashBestChain = 0;
 
         /* Block metadata — populated on success */
         uint32_t nBlockChannel  = 0;

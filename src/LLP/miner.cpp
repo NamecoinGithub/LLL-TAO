@@ -2355,8 +2355,7 @@ namespace LLP
         StatelessMinerManager::Get().IncrementTemplatesServed();
 
         /* Update last template unified height (atomic store — see nLastTemplateUnifiedHeight comment). */
-        RoundStateUtility::ChainHeightSnapshot snap = RoundStateUtility::CaptureHeights();
-        nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
+        nLastTemplateUnifiedHeight.store(sharedTemplate.nUnifiedHeight, std::memory_order_relaxed);
     }
 
 
@@ -2464,8 +2463,7 @@ namespace LLP
          * so ALL channels need fresh templates regardless of which channel mined.
          * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
         {
-            TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-            nLastTemplateUnifiedHeight.store(stateBest.nHeight, std::memory_order_relaxed);
+            nLastTemplateUnifiedHeight.store(result.nUnifiedHeight, std::memory_order_relaxed);
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
@@ -2917,17 +2915,24 @@ namespace LLP
             }
             else
             {
-                respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, sharedTemplate.vPayload);
+                try
+                {
+                    respond_stateless(OpcodeUtility::Stateless::BLOCK_DATA, sharedTemplate.vPayload);
 
-                debug::log(2, FUNCTION, "Auto-sent BLOCK_DATA (",
-                           sharedTemplate.vPayload.size(), " bytes) channel=",
-                           sharedTemplate.nBlockChannel, " height=", sharedTemplate.nBlockHeight);
+                    debug::log(2, FUNCTION, "Auto-sent BLOCK_DATA (",
+                               sharedTemplate.vPayload.size(), " bytes) channel=",
+                               sharedTemplate.nBlockChannel, " height=", sharedTemplate.nBlockHeight);
 
-                StatelessMinerManager::Get().IncrementTemplatesServed();
+                    StatelessMinerManager::Get().IncrementTemplatesServed();
 
-                /* Update last template unified height only after successful send.
-                 * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
-                nLastTemplateUnifiedHeight.store(snap.nUnifiedHeight, std::memory_order_relaxed);
+                    /* Update last template unified height only after successful send.
+                     * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
+                    nLastTemplateUnifiedHeight.store(sharedTemplate.nUnifiedHeight, std::memory_order_relaxed);
+                }
+                catch(const std::exception& e)
+                {
+                    debug::error(FUNCTION, "GET_ROUND auto-send failed: ", e.what());
+                }
             }
         }
 

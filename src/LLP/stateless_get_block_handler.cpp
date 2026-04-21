@@ -28,6 +28,9 @@ namespace LLP
         result.vPayload      = shared.vPayload;
         result.eReason       = shared.eReason;
         result.nRetryAfterMs = shared.nRetryAfterMs;
+        result.nUnifiedHeight = shared.nUnifiedHeight;
+        result.nChannelHeight = shared.nChannelHeight;
+        result.hashBestChain = shared.hashBestChain;
         result.nBlockChannel = shared.nBlockChannel;
         result.nBlockHeight  = shared.nBlockHeight;
         result.nBlockBits    = shared.nBlockBits;
