@@ -467,7 +467,7 @@ namespace LLP
                 return nCachedDiff;
             }
 
-            debug::log(2, FUNCTION, "⚠️  Zero difficulty cached for channel ", nChannel,
+            debug::log(2, FUNCTION, "WARNING: zero difficulty cached for channel ", nChannel,
                        " - forcing recalculation");
         }
         
@@ -4630,7 +4630,6 @@ namespace LLP
         if(nDifficulty == 0)
         {
             debug::error(FUNCTION, "Refusing to send stateless template with zero difficulty for channel ", nChannel);
-            debug::log(2, "════════════════════════════════════════════════════════════");
             return;
         }
         
