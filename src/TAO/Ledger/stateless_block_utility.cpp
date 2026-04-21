@@ -80,7 +80,10 @@ namespace TAO::Ledger
                 ssBlock >> block;
 
                 if(!ssBlock.End())
+                {
+                    debug::log(3, FUNCTION, "Canonical TritiumBlock SUBMIT_BLOCK parse rejected due to trailing bytes");
                     return false;
+                }
 
                 if(block.nChannel != 1 && block.nChannel != 2)
                     return false;

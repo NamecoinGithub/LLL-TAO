@@ -352,6 +352,15 @@ namespace LLP
         debug::log(0, FUNCTION, "   [Disposable: ", disposableVersion, "]");
     }
 
+    inline static bool ValidateDifficultyBits(const uint32_t nChannel, const uint32_t nDifficulty, const char* pszContext)
+    {
+        if(nDifficulty != 0)
+            return true;
+
+        debug::error(FUNCTION, pszContext, " returned zero difficulty for channel ", nChannel);
+        return false;
+    }
+
     /* The block iterator to act as extra nonce. */
     std::atomic<uint32_t> StatelessMinerConnection::nBlockIterator(0);
     
@@ -460,7 +469,7 @@ namespace LLP
         {
             /* Cache hit - return cached value */
             uint32_t nCachedDiff = nDiffCacheValue[nChannel].nDifficulty.load(std::memory_order_acquire);
-            if(nCachedDiff != 0)
+            if(ValidateDifficultyBits(nChannel, nCachedDiff, "Difficulty cache"))
             {
                 debug::log(3, FUNCTION, "Difficulty cache HIT for channel ", nChannel, 
                           " (age: ", (nNow - nCacheTime), "s)");
@@ -505,10 +514,9 @@ namespace LLP
             nNow = runtime::unifiedtimestamp();  // Update timestamp after recalculation
         }
 
-        if(nDiff == 0)
+        if(!ValidateDifficultyBits(nChannel, nDiff, "Difficulty recalculation"))
         {
-            debug::error(FUNCTION, "Refusing to cache zero difficulty for channel ", nChannel,
-                         " at best height ", stateBest.nHeight);
+            debug::error(FUNCTION, "Best height during zero difficulty guard: ", stateBest.nHeight);
             return 0;
         }
 
