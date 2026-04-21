@@ -960,6 +960,7 @@ TEST_CASE("Packet HasDataPayload and Authentication Packet Serialization", "[pac
         /* Auth packet with zero length is framed, but later payload validation rejects it. */
         Packet authPacket(MINER_AUTH_CHALLENGE);
         authPacket.LENGTH = 0;
+        authPacket.fLengthRead = true;
         REQUIRE(authPacket.Header() == true);
          
         authPacket.LENGTH = 32;
@@ -971,6 +972,7 @@ TEST_CASE("Packet HasDataPayload and Authentication Packet Serialization", "[pac
         /* Request packet - should require LENGTH == 0 */
         Packet reqPacket(129);  // GET_BLOCK
         reqPacket.LENGTH = 0;
+        reqPacket.fLengthRead = true;
         REQUIRE(reqPacket.Header() == true);   /* Complete with no length */
         
         reqPacket.LENGTH = 10;

@@ -320,6 +320,51 @@ TEST_CASE("Mirrored stateless opcodes inherit legacy payload rules", "[llp][pack
     }
 }
 
+TEST_CASE("Packet completion waits for the physical length field read", "[llp][packet][validation][framing]")
+{
+    using namespace LLP;
+    using namespace LLP::OpcodeUtility;
+
+    SECTION("Legacy packet header stays incomplete until SetLength runs")
+    {
+        Packet packet(Opcodes::GET_BLOCK);
+
+        REQUIRE(packet.Header() == false);
+        REQUIRE(packet.Complete() == false);
+
+        packet.SetLength({0x00, 0x00, 0x00, 0x00});
+
+        REQUIRE(packet.Header() == true);
+        REQUIRE(packet.Complete() == true);
+    }
+
+    SECTION("Stateless packet header stays incomplete until SetLength runs")
+    {
+        StatelessPacket packet(Stateless::GET_BLOCK);
+
+        REQUIRE(packet.Header() == false);
+        REQUIRE(packet.Complete() == false);
+
+        packet.SetLength({0x00, 0x00, 0x00, 0x00});
+
+        REQUIRE(packet.Header() == true);
+        REQUIRE(packet.Complete() == true);
+    }
+
+    SECTION("Payload packets remain incomplete until the declared bytes arrive")
+    {
+        Packet packet(Opcodes::BLOCK_DATA);
+        packet.SetLength({0x00, 0x00, 0x00, 0x03});
+
+        REQUIRE(packet.Header() == true);
+        REQUIRE(packet.Complete() == false);
+
+        packet.DATA = {0xAA, 0xBB, 0xCC};
+
+        REQUIRE(packet.Complete() == true);
+    }
+}
+
 TEST_CASE("Large payload attack vectors are blocked", "[llp][packet][security]")
 {
     using namespace LLP;

@@ -52,6 +52,10 @@ namespace LLP
         uint32_t                LENGTH;
 
 
+        /** Tracks whether the 4-byte length field has been physically read. **/
+        bool                    fLengthRead;
+
+
         /** The packet payload. **/
         std::vector<uint8_t>    DATA;
 
@@ -60,6 +64,7 @@ namespace LLP
         StatelessPacket()
         : HEADER (0xFFFF)
         , LENGTH (0)
+        , fLengthRead(false)
         , DATA   ( )
         {
         }
@@ -69,6 +74,7 @@ namespace LLP
         StatelessPacket(const StatelessPacket& packet)
         : HEADER (packet.HEADER)
         , LENGTH (packet.LENGTH)
+        , fLengthRead(packet.fLengthRead)
         , DATA   (packet.DATA)
         {
         }
@@ -78,6 +84,7 @@ namespace LLP
         StatelessPacket(StatelessPacket&& packet) noexcept
         : HEADER (std::move(packet.HEADER))
         , LENGTH (std::move(packet.LENGTH))
+        , fLengthRead(std::move(packet.fLengthRead))
         , DATA   (std::move(packet.DATA))
         {
         }
@@ -88,6 +95,7 @@ namespace LLP
         {
             HEADER = packet.HEADER;
             LENGTH = packet.LENGTH;
+            fLengthRead = packet.fLengthRead;
             DATA   = packet.DATA;
 
             return *this;
@@ -99,6 +107,7 @@ namespace LLP
         {
             HEADER = std::move(packet.HEADER);
             LENGTH = std::move(packet.LENGTH);
+            fLengthRead = std::move(packet.fLengthRead);
             DATA   = std::move(packet.DATA);
 
             return *this;
@@ -129,6 +138,7 @@ namespace LLP
         {
             HEADER   = 0xFFFF;
             LENGTH   = 0;
+            fLengthRead = false;
             DATA.clear();
         }
 
@@ -179,8 +189,10 @@ namespace LLP
             if(IsNull())
                 return false;
 
-            /* For stateless packets, header is complete when LENGTH is set */
-            return LENGTH > 0 || (HEADER != 0xFFFF && LENGTH == 0);
+            if(!fLengthRead)
+                return false;
+
+            return HEADER != 0xFFFF;
         }
 
 
@@ -208,6 +220,7 @@ namespace LLP
         void SetLength(const std::vector<uint8_t> &BYTES)
         {
             LENGTH = (BYTES[0] << 24) + (BYTES[1] << 16) + (BYTES[2] << 8) + (BYTES[3]);
+            fLengthRead = true;
         }
 
 
