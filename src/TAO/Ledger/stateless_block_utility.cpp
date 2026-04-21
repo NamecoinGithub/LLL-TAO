@@ -102,8 +102,9 @@ namespace TAO::Ledger
 
                 return true;
             }
-            catch(const std::exception&)
+            catch(const std::exception& e)
             {
+                debug::log(3, FUNCTION, "Canonical TritiumBlock SUBMIT_BLOCK parse failed: ", e.what());
                 return false;
             }
         }
