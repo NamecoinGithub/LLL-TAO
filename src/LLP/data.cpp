@@ -573,9 +573,10 @@ namespace LLP
                                 continue;
                             }
 
-                            /* Log near-miss for authenticated miners — this would have killed
-                             * the connection prior to the IsTimeoutExempt() bypass.  Useful
-                             * for diagnosing spurious POLLIN events from TCP keepalive, etc. */
+                            /* Log near-miss for authenticated miners when POLLIN fires with no
+                             * readable payload. This would have killed the connection before the
+                             * IsTimeoutExempt() bypass and helps diagnose TCP keepalive or other
+                             * socket-layer wakeups. */
                             debug::log(3, FUNCTION, "DataThread[", ID, "]: POLL_EMPTY near-miss for authenticated ",
                                 ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
                                 " revents=", POLLFDS.at(nIndex).revents,

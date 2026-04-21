@@ -1404,23 +1404,25 @@ namespace LLP
                                                 /* Check for tritium. */
                                                 case TAO::Ledger::TRANSACTION::TRITIUM:
                                                 {
-                                                    /* Check our map contains transactions. */
-                                                    if(!mapTritium.count(proof.second) || mapTritium.empty())
+                                                    auto itTritium = mapTritium.find(proof.second);
+                                                    if(itTritium == mapTritium.end())
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<TAO::Ledger::Transaction> vList;
                                                         if(LLD::Ledger->BatchRead(proof.second, "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
-                                                            for(const auto& tBatch : vList)
-                                                                mapTritium.emplace(std::make_pair(tBatch.GetHash(), std::move(tBatch)));
+                                                            for(auto& tBatch : vList)
+                                                                mapTritium.emplace(tBatch.GetHash(), std::move(tBatch));
 
                                                             //debug::notice("Read ", vList.size(), " entries (", mapTritium.size(), ")");
                                                         }
+
+                                                        itTritium = mapTritium.find(proof.second);
                                                     }
 
                                                     /* Check that we found it in batch. */
-                                                    if(!mapTritium.count(proof.second))
+                                                    if(itTritium == mapTritium.end())
                                                     {
                                                         /* Make sure we have the transaction. */
                                                         TAO::Ledger::Transaction tMissing;
@@ -1440,13 +1442,13 @@ namespace LLP
                                                     {
                                                         /* Build our transaction serialization stream. */
                                                         DataStream ssData(SER_DISK, LLD::DATABASE_VERSION);
-                                                        ssData << mapTritium[proof.second];
+                                                        ssData << itTritium->second;
 
                                                         /* Push this to our new sync block. */
                                                         block.vtx.push_back(std::make_pair(proof.first, ssData.Bytes()));
 
                                                         /* Delete processed transaction from memory. */
-                                                        mapTritium.erase(proof.second);
+                                                        mapTritium.erase(itTritium);
                                                     }
 
                                                     break;
@@ -1455,23 +1457,25 @@ namespace LLP
                                                 /* Check for legacy. */
                                                 case TAO::Ledger::TRANSACTION::LEGACY:
                                                 {
-                                                    /* Check our map contains transactions. */
-                                                    if(!mapLegacy.count(proof.second) || mapLegacy.empty())
+                                                    auto itLegacy = mapLegacy.find(proof.second);
+                                                    if(itLegacy == mapLegacy.end())
                                                     {
                                                         /* Read the next batch of inventory. */
                                                         std::vector<Legacy::Transaction> vList;
                                                         if(LLD::Legacy->BatchRead(std::make_pair(std::string("tx"), proof.second), "tx", vList, nInventoryBatchSize, false))
                                                         {
                                                             /* Add all of our values to a map. */
-                                                            for(const auto& tBatch : vList)
-                                                                mapLegacy.emplace(std::make_pair(tBatch.GetHash(), std::move(tBatch)));
+                                                            for(auto& tBatch : vList)
+                                                                mapLegacy.emplace(tBatch.GetHash(), std::move(tBatch));
 
                                                             //debug::notice("Read ", vList.size(), " entries (", mapLegacy.size(), ")");
                                                         }
+
+                                                        itLegacy = mapLegacy.find(proof.second);
                                                     }
 
                                                     /* Check that we found it in batch. */
-                                                    if(!mapLegacy.count(proof.second))
+                                                    if(itLegacy == mapLegacy.end())
                                                     {
                                                         /* Make sure we have the transaction. */
                                                         Legacy::Transaction tMissing;
@@ -1491,13 +1495,13 @@ namespace LLP
                                                     {
                                                         /* Build our transaction serialization stream. */
                                                         DataStream ssData(SER_DISK, LLD::DATABASE_VERSION);
-                                                        ssData << mapLegacy[proof.second];
+                                                        ssData << itLegacy->second;
 
                                                         /* Push this to our new sync block. */
                                                         block.vtx.push_back(std::make_pair(proof.first, ssData.Bytes()));
 
                                                         /* Delete processed transaction from memory. */
-                                                        mapLegacy.erase(proof.second);
+                                                        mapLegacy.erase(itLegacy);
                                                     }
                                                 }
 
