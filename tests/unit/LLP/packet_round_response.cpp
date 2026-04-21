@@ -145,6 +145,7 @@ TEST_CASE("Packet::Header() validation for round response packets", "[packet][ro
         LLP::Packet packet;
         packet.HEADER = 204;  // NEW_ROUND
         packet.LENGTH = 16;
+        packet.fLengthRead = true;
         
         REQUIRE(packet.Header() == true);
     }
@@ -154,6 +155,7 @@ TEST_CASE("Packet::Header() validation for round response packets", "[packet][ro
         LLP::Packet packet;
         packet.HEADER = 205;  // OLD_ROUND
         packet.LENGTH = 8;
+        packet.fLengthRead = true;
         
         REQUIRE(packet.Header() == true);
     }
@@ -163,6 +165,7 @@ TEST_CASE("Packet::Header() validation for round response packets", "[packet][ro
         LLP::Packet packet;
         packet.HEADER = 204;  // NEW_ROUND
         packet.LENGTH = 0;
+        packet.fLengthRead = true;
          
         REQUIRE(packet.Header() == true);
     }
@@ -176,6 +179,7 @@ TEST_CASE("Packet::Complete() for round response packets", "[packet][round_respo
         LLP::Packet packet;
         packet.HEADER = 204;
         packet.LENGTH = 16;
+        packet.fLengthRead = true;
         packet.DATA.resize(16, 0x00);
         
         REQUIRE(packet.Complete() == true);
@@ -186,6 +190,7 @@ TEST_CASE("Packet::Complete() for round response packets", "[packet][round_respo
         LLP::Packet packet;
         packet.HEADER = 204;
         packet.LENGTH = 16;
+        packet.fLengthRead = true;
         packet.DATA.resize(8, 0x00);  // Partial data
         
         REQUIRE(packet.Complete() == false);

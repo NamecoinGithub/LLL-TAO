@@ -93,6 +93,7 @@ TEST_CASE("Packet::Header() validation for reward binding packets", "[packet][re
         LLP::Packet packet;
         packet.HEADER = 213;  // LLP::Miner::MINER_SET_REWARD
         packet.LENGTH = 65;
+        packet.fLengthRead = true;
         
         REQUIRE(packet.Header() == true);
     }
@@ -102,6 +103,7 @@ TEST_CASE("Packet::Header() validation for reward binding packets", "[packet][re
         LLP::Packet packet;
         packet.HEADER = 214;  // LLP::Miner::MINER_REWARD_RESULT
         packet.LENGTH = 50;
+        packet.fLengthRead = true;
         
         REQUIRE(packet.Header() == true);
     }
@@ -111,6 +113,7 @@ TEST_CASE("Packet::Header() validation for reward binding packets", "[packet][re
         LLP::Packet packet;
         packet.HEADER = 213;  // LLP::Miner::MINER_SET_REWARD
         packet.LENGTH = 0;
+        packet.fLengthRead = true;
          
         REQUIRE(packet.Header() == true);
     }
@@ -124,6 +127,7 @@ TEST_CASE("Packet::Complete() for reward binding packets", "[packet][reward]")
         LLP::Packet packet;
         packet.HEADER = 213;
         packet.LENGTH = 65;
+        packet.fLengthRead = true;
         packet.DATA.resize(65, 0x00);
         
         REQUIRE(packet.Complete() == true);
@@ -134,6 +138,7 @@ TEST_CASE("Packet::Complete() for reward binding packets", "[packet][reward]")
         LLP::Packet packet;
         packet.HEADER = 213;
         packet.LENGTH = 65;
+        packet.fLengthRead = true;
         packet.DATA.resize(30, 0x00);  // Partial data
         
         REQUIRE(packet.Complete() == false);
@@ -175,6 +180,7 @@ TEST_CASE("Legacy packet framing always includes the 4-byte length field", "[pac
     {
         LLP::Packet packet(Opcodes::GET_BLOCK);
         packet.LENGTH = 0;
+        packet.fLengthRead = true;
 
         const std::vector<uint8_t> bytes = packet.GetBytes();
 
@@ -210,6 +216,7 @@ TEST_CASE("Legacy packet framing always includes the 4-byte length field", "[pac
 
             LLP::Packet packet(testCase.opcode);
             packet.LENGTH = testCase.length;
+            packet.fLengthRead = true;
             packet.DATA.resize(testCase.length, 0xAB);
 
             const std::vector<uint8_t> bytes = packet.GetBytes();
