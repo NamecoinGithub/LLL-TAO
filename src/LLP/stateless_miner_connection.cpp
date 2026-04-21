@@ -610,9 +610,6 @@ namespace LLP
             return false;
         }
 
-        TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
-        const uint32_t nUnifiedHeight = static_cast<uint32_t>(stateBest.nHeight);
-        const uint1024_t hashBestChain = TAO::Ledger::ChainState::hashBestChain.load();
         const SharedTemplatePayloadResult sharedTemplate =
             BuildSharedTemplatePayload(pBlock, pReason);
         if(!sharedTemplate.fSuccess)
@@ -635,20 +632,20 @@ namespace LLP
         {
             LOCK(MUTEX);
             context = context.WithTimestamp(runtime::unifiedtimestamp())
-                             .WithHeight(nUnifiedHeight)
-                             .WithLastTemplateUnifiedHeight(nUnifiedHeight)
-                             .WithHashLastBlock(hashBestChain);
+                             .WithHeight(sharedTemplate.nUnifiedHeight)
+                             .WithLastTemplateUnifiedHeight(sharedTemplate.nUnifiedHeight)
+                             .WithHashLastBlock(sharedTemplate.hashBestChain);
         }
 
         if(!strAddress.empty())
         {
             StatelessMinerManager::Get().TransformMiner(strAddress,
-                [nUnifiedHeight, hashBestChain](const MiningContext& current)
+                [sharedTemplate](const MiningContext& current)
                 {
                     return current.WithTimestamp(runtime::unifiedtimestamp())
-                                  .WithHeight(nUnifiedHeight)
-                                  .WithLastTemplateUnifiedHeight(nUnifiedHeight)
-                                  .WithHashLastBlock(hashBestChain);
+                                  .WithHeight(sharedTemplate.nUnifiedHeight)
+                                  .WithLastTemplateUnifiedHeight(sharedTemplate.nUnifiedHeight)
+                                  .WithHashLastBlock(sharedTemplate.hashBestChain);
                 },
                 1);
         }
@@ -1468,12 +1465,11 @@ namespace LLP
                 /* Update context timestamp, height, last template channel height, and
                  * hashLastBlock snapshot (primary staleness anchor, StakeMinter pattern). */
                 {
-                    TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
                     LOCK(MUTEX);
                     context = context.WithTimestamp(runtime::unifiedtimestamp())
-                                     .WithHeight(stateBest.nHeight)
-                                     .WithLastTemplateUnifiedHeight(stateBest.nHeight)
-                                     .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
+                                     .WithHeight(gbResult.nUnifiedHeight)
+                                     .WithLastTemplateUnifiedHeight(gbResult.nUnifiedHeight)
+                                     .WithHashLastBlock(gbResult.hashBestChain);
                 }
 
                 /* Atomic transform: update template tracking on CURRENT value in mapMiners,
@@ -1481,12 +1477,11 @@ namespace LLP
                  * outside the transform and apply it atomically. */
                 {
                     TransformTrackedMiner(context,
-                        [](const MiningContext& current) {
-                            TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+                        [gbResult](const MiningContext& current) {
                             return current.WithTimestamp(runtime::unifiedtimestamp())
-                                          .WithHeight(stateBest.nHeight)
-                                          .WithLastTemplateUnifiedHeight(stateBest.nHeight)
-                                          .WithHashLastBlock(TAO::Ledger::ChainState::hashBestChain.load());
+                                          .WithHeight(gbResult.nUnifiedHeight)
+                                          .WithLastTemplateUnifiedHeight(gbResult.nUnifiedHeight)
+                                          .WithHashLastBlock(gbResult.hashBestChain);
                         });
                 }
                 StatelessMinerManager::Get().IncrementTemplatesServed();
