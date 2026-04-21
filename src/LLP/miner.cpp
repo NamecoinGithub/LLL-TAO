@@ -2463,7 +2463,7 @@ namespace LLP
          * so ALL channels need fresh templates regardless of which channel mined.
          * Atomic store — see nLastTemplateUnifiedHeight comment in miner.h. */
         {
-                    nLastTemplateUnifiedHeight.store(result.nUnifiedHeight, std::memory_order_relaxed);
+            nLastTemplateUnifiedHeight.store(result.nUnifiedHeight, std::memory_order_relaxed);
         }
 
         /* Notify Colin agent: template pushed via GET_BLOCK */
