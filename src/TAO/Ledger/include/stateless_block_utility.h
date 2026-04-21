@@ -97,10 +97,17 @@ namespace TAO
          *  Result of parsing a Falcon-wrapped full-block SUBMIT_BLOCK payload.
          *
          *  Payload grammar is channel-aware and shared across both legacy and
-         *  stateless mining lanes:
+         *  stateless mining lanes. The node accepts two block encodings:
          *
-         *  Hash:  [block(216)][timestamp(8 LE)][sig_len(2 LE)][signature]
-         *  Prime: [block(216)][vOffsets(N)][timestamp(8 LE)][sig_len(2 LE)][signature]
+         *  v1 legacy wrapper:
+         *    Hash:  [block_header(216, Block::Serialize)][timestamp(8 LE)][sig_len(2 LE)][signature]
+         *    Prime: [block_header(216, Block::Serialize)][vOffsets(N)][timestamp(8 LE)][sig_len(2 LE)][signature]
+         *
+         *  v2 canonical wrapper:
+         *    Hash/Prime: [serialized TritiumBlock][timestamp(8 LE)][sig_len(2 LE)][signature]
+         *
+         *  In v2, Prime offsets live inside TritiumBlock::vOffsets instead of being
+         *  appended as transport-only bytes.
          *
          **/
         struct FalconWrappedSubmitBlockParseResult
@@ -268,9 +275,8 @@ namespace TAO
         /** ParseFalconWrappedSubmitBlock
          *
          *  Tail-parse a decrypted Falcon-wrapped full-block SUBMIT_BLOCK payload.
-         *  The first 216 bytes are always the serialized Tritium block body. Any
-         *  bytes between that 216-byte body and the Falcon trailer are treated as
-         *  Prime offsets when nChannel == 1.
+         *  Supports both the legacy 216-byte Block::Serialize() header wrapper and
+         *  the canonical TritiumBlock serialization wrapper.
          *
          *  @param[in] vPayload Decrypted full-block payload
          *

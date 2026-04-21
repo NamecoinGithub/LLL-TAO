@@ -40,6 +40,7 @@ ________________________________________________________________________________
 #include <Util/include/convert.h>
 #include <Util/include/debug.h>
 #include <Util/include/runtime.h>
+#include <Util/templates/datastream.h>
 #include <sstream>
 
 /* Global TAO namespace. */
@@ -62,6 +63,90 @@ namespace TAO::Ledger
                 nValue |= static_cast<uint64_t>(vData[nOffset + i]) << (8 * i);
 
             return nValue;
+        }
+
+
+        bool PopulateCanonicalSubmitBlockCandidate(
+            const std::vector<uint8_t>& vBlockBytes,
+            const uint64_t nTimestamp,
+            const uint16_t nSignatureLength,
+            const std::vector<uint8_t>& vSignature,
+            FalconWrappedSubmitBlockParseResult& result)
+        {
+            try
+            {
+                DataStream ssBlock(vBlockBytes, SER_NETWORK, LLP::PROTOCOL_VERSION);
+                TritiumBlock block;
+                ssBlock >> block;
+
+                if(!ssBlock.End())
+                    return false;
+
+                if(block.nChannel != 1 && block.nChannel != 2)
+                    return false;
+
+                if(block.nChannel == 2 && !block.vOffsets.empty())
+                    return false;
+
+                result.success = true;
+                result.vBlockBytes = vBlockBytes;
+                result.vBlockBody = vBlockBytes;
+                result.vOffsets = block.vOffsets;
+                result.vSignature = vSignature;
+                result.hashMerkle = block.hashMerkleRoot;
+                result.nonce = block.nNonce;
+                result.timestamp = nTimestamp;
+                result.nSignatureLength = nSignatureLength;
+                result.nChannel = block.nChannel;
+                result.nUnifiedHeight = block.nHeight;
+
+                return true;
+            }
+            catch(const std::exception&)
+            {
+                return false;
+            }
+        }
+
+
+        bool PopulateLegacySubmitBlockCandidate(
+            const std::vector<uint8_t>& vBlockBytes,
+            const uint64_t nTimestamp,
+            const uint16_t nSignatureLength,
+            const std::vector<uint8_t>& vSignature,
+            FalconWrappedSubmitBlockParseResult& result)
+        {
+            if(vBlockBytes.size() < LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+                return false;
+
+            const std::vector<uint8_t> vBlockBody(
+                vBlockBytes.begin(),
+                vBlockBytes.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN);
+
+            TritiumBlock block;
+            block.Deserialize(vBlockBody);
+
+            if(block.nChannel != 1 && block.nChannel != 2)
+                return false;
+
+            if(block.nChannel == 2 && vBlockBytes.size() != LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
+                return false;
+
+            result.success = true;
+            result.vBlockBytes = vBlockBytes;
+            result.vBlockBody = vBlockBody;
+            result.vOffsets.assign(
+                vBlockBytes.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN,
+                vBlockBytes.end());
+            result.vSignature = vSignature;
+            result.hashMerkle = block.hashMerkleRoot;
+            result.nonce = block.nNonce;
+            result.timestamp = nTimestamp;
+            result.nSignatureLength = nSignatureLength;
+            result.nChannel = block.nChannel;
+            result.nUnifiedHeight = block.nHeight;
+
+            return true;
         }
 
 
@@ -93,36 +178,18 @@ namespace TAO::Ledger
                 return false;
 
             const std::vector<uint8_t> vBlockBytes(vPayload.begin(), vPayload.begin() + nBlockBytesSize);
-            const std::vector<uint8_t> vBlockBody(
-                vBlockBytes.begin(),
-                vBlockBytes.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN);
+            const uint64_t nTimestamp = ReadUint64LE(vPayload, nTimestampOffset);
+            const std::vector<uint8_t> vSignature(vPayload.begin() + nSignatureOffset, vPayload.end());
 
-            const uint32_t nChannel = convert::bytes2uint(
-                vBlockBody, LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET);
-            if(nChannel != 1 && nChannel != 2)
-                return false;
+            /* Prefer canonical TritiumBlock serialization (v2), then fall back to
+             * the legacy 216-byte Block::Serialize() wrapper (v1). */
+            if(PopulateCanonicalSubmitBlockCandidate(vBlockBytes, nTimestamp, nSignatureLength, vSignature, result))
+                return true;
 
-            if(nChannel == 2 && nBlockBytesSize != LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN)
-                return false;
+            if(PopulateLegacySubmitBlockCandidate(vBlockBytes, nTimestamp, nSignatureLength, vSignature, result))
+                return true;
 
-            result.success = true;
-            result.vBlockBytes = vBlockBytes;
-            result.vBlockBody = vBlockBody;
-            result.vOffsets.assign(
-                vBlockBytes.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN,
-                vBlockBytes.end());
-            result.vSignature.assign(vPayload.begin() + nSignatureOffset, vPayload.end());
-            result.hashMerkle.SetBytes(std::vector<uint8_t>(
-                vBlockBody.begin() + LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET,
-                vBlockBody.begin() + LLP::FalconConstants::FULL_BLOCK_MERKLE_OFFSET +
-                    LLP::FalconConstants::MERKLE_ROOT_SIZE));
-            result.nonce = ReadUint64LE(vBlockBody, LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET);
-            result.timestamp = ReadUint64LE(vPayload, nTimestampOffset);
-            result.nSignatureLength = nSignatureLength;
-            result.nChannel = nChannel;
-            result.nUnifiedHeight = convert::bytes2uint(
-                vBlockBody, LLP::FalconConstants::FULL_BLOCK_TRITIUM_HEIGHT_OFFSET);
-            return true;
+            return false;
         }
     }
 
@@ -216,6 +283,13 @@ namespace TAO::Ledger
             if (!success) {
                 delete pBlock;
                 debug::error(FUNCTION, "CreateBlock failed");
+                return nullptr;
+            }
+
+            if(pBlock->nBits == 0)
+            {
+                delete pBlock;
+                debug::error(FUNCTION, "CreateBlock produced zero difficulty template for channel ", nChannel);
                 return nullptr;
             }
             
