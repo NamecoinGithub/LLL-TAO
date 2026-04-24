@@ -22,12 +22,15 @@ ________________________________________________________________________________
 #include <LLC/hash/SK.h>
 
 #include <LLP/include/falcon_constants.h>
+#include <LLP/include/version.h>
 
 #include <TAO/Ledger/include/stateless_block_utility.h>
+#include <TAO/Ledger/types/tritium.h>
 
 #include <Util/include/convert.h>
 #include <Util/include/hex.h>
 #include <Util/include/debug.h>
+#include <Util/templates/datastream.h>
 
 #include <openssl/sha.h>
 
@@ -371,11 +374,35 @@ static std::vector<uint8_t> BuildTritiumBlockBody(
         channelBytes.end(),
         block.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_CHANNEL_OFFSET);
 
-    for(size_t i = 0; i < LLP::FalconConstants::NONCE_SIZE; ++i)
-        block[LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET + i] =
-            static_cast<uint8_t>((nonce >> (8 * i)) & 0xff);
+    std::vector<uint8_t> nonceBytes = convert::uint2bytes64(nonce);
+    std::copy(
+        nonceBytes.begin(),
+        nonceBytes.end(),
+        block.begin() + LLP::FalconConstants::FULL_BLOCK_TRITIUM_NONCE_OFFSET);
 
     return block;
+}
+
+
+static std::vector<uint8_t> BuildCanonicalTritiumBlockBytes(
+    uint32_t nChannel,
+    const uint512_t& hashMerkle,
+    uint64_t nonce,
+    const std::vector<uint8_t>& offsets)
+{
+    TAO::Ledger::TritiumBlock block;
+    block.nVersion = 8;
+    block.hashMerkleRoot = hashMerkle;
+    block.nChannel = nChannel;
+    block.nHeight = 777777;
+    block.nBits = 0x1d00ffff;
+    block.nNonce = nonce;
+    block.nTime = 1700000000;
+    block.vOffsets = (nChannel == 1) ? offsets : std::vector<uint8_t>();
+
+    DataStream ssBlock(SER_NETWORK, LLP::PROTOCOL_VERSION);
+    ssBlock << block;
+    return ssBlock.Bytes();
 }
 
 
@@ -397,6 +424,51 @@ static FalconFullBlockFixture BuildFalconFullBlockFixture(
 
     std::vector<uint8_t> blockBytes = BuildTritiumBlockBody(nChannel, fixture.hashMerkle, fixture.nonce);
     blockBytes.insert(blockBytes.end(), offsets.begin(), offsets.end());
+
+    std::vector<uint8_t> message = blockBytes;
+    for(size_t i = 0; i < LLP::FalconConstants::TIMESTAMP_SIZE; ++i)
+        message.push_back(static_cast<uint8_t>((timestamp >> (8 * i)) & 0xff));
+
+    LLC::FLKey key;
+    key.MakeNewKey(version);
+    fixture.pubkey = key.GetPubKey();
+    REQUIRE(!fixture.pubkey.empty());
+
+    std::vector<uint8_t> signature;
+    REQUIRE(key.Sign(message, signature));
+    REQUIRE(!signature.empty());
+
+    fixture.payload = blockBytes;
+    for(size_t i = 0; i < LLP::FalconConstants::TIMESTAMP_SIZE; ++i)
+        fixture.payload.push_back(static_cast<uint8_t>((timestamp >> (8 * i)) & 0xff));
+
+    const uint16_t sigLen = static_cast<uint16_t>(signature.size());
+    fixture.payload.push_back(static_cast<uint8_t>(sigLen & 0xff));
+    fixture.payload.push_back(static_cast<uint8_t>((sigLen >> 8) & 0xff));
+    fixture.payload.insert(fixture.payload.end(), signature.begin(), signature.end());
+
+    return fixture;
+}
+
+
+static FalconFullBlockFixture BuildCanonicalFalconFullBlockFixture(
+    uint32_t nChannel,
+    const std::vector<uint8_t>& offsets,
+    uint64_t timestamp,
+    LLC::FalconVersion version)
+{
+    FalconFullBlockFixture fixture;
+    fixture.offsets = offsets;
+    fixture.timestamp = timestamp;
+    fixture.nonce = 0x1122334455667788ULL;
+
+    std::vector<uint8_t> merkleBytes(LLP::FalconConstants::MERKLE_ROOT_SIZE);
+    for(size_t i = 0; i < merkleBytes.size(); ++i)
+        merkleBytes[i] = static_cast<uint8_t>(0xD0 + (i & 0x0F));
+    fixture.hashMerkle.SetBytes(merkleBytes);
+
+    std::vector<uint8_t> blockBytes = BuildCanonicalTritiumBlockBytes(
+        nChannel, fixture.hashMerkle, fixture.nonce, offsets);
 
     std::vector<uint8_t> message = blockBytes;
     for(size_t i = 0; i < LLP::FalconConstants::TIMESTAMP_SIZE; ++i)
@@ -603,6 +675,23 @@ TEST_CASE("T22: Shared Falcon full-block parser handles Hash and Prime payloads"
         REQUIRE(result.timestamp == fixture.timestamp);
         REQUIRE(result.nSignatureLength == result.vSignature.size());
     }
+
+    SECTION("Canonical TritiumBlock payload preserves Prime offsets")
+    {
+        std::vector<uint8_t> offsets = {2, 4, 6, 8, 10, 12};
+        FalconFullBlockFixture fixture = BuildCanonicalFalconFullBlockFixture(
+            1, offsets, 1700000100, LLC::FalconVersion::FALCON_1024);
+
+        auto result = TAO::Ledger::ParseFalconWrappedSubmitBlock(fixture.payload);
+        REQUIRE(result.success);
+        REQUIRE(result.nChannel == 1);
+        REQUIRE(result.vBlockBytes.size() > LLP::FalconConstants::FULL_BLOCK_TRITIUM_MIN);
+        REQUIRE(result.vOffsets == offsets);
+        REQUIRE(result.hashMerkle == fixture.hashMerkle);
+        REQUIRE(result.nonce == fixture.nonce);
+        REQUIRE(result.timestamp == fixture.timestamp);
+        REQUIRE(result.nSignatureLength == result.vSignature.size());
+    }
 }
 
 
@@ -633,6 +722,17 @@ TEST_CASE("T23: Shared Falcon full-block verifier is lane-agnostic", "[stateless
         auto result = verifyForLane(fixture);
         REQUIRE(result.nChannel == 2);
         REQUIRE(result.vOffsets.empty());
+    }
+
+    SECTION("canonical TritiumBlock payload verifies across lanes")
+    {
+        FalconFullBlockFixture fixture = BuildCanonicalFalconFullBlockFixture(
+            2, {}, 1700000013, LLC::FalconVersion::FALCON_1024);
+
+        auto result = verifyForLane(fixture);
+        REQUIRE(result.nChannel == 2);
+        REQUIRE(result.vOffsets.empty());
+        REQUIRE(result.nonce == fixture.nonce);
     }
 }
 

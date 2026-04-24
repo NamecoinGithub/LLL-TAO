@@ -88,6 +88,17 @@ TEST_CASE("Packet::HasDataPayload() for reward binding packets", "[packet][rewar
 
 TEST_CASE("Packet::Header() validation for reward binding packets", "[packet][reward]")
 {
+    SECTION("Zero-length packet is not framed until the length field is physically read")
+    {
+        LLP::Packet packet;
+        packet.HEADER = 213;  // LLP::Miner::MINER_SET_REWARD
+        packet.LENGTH = 0;
+        packet.fLengthRead = false;
+
+        REQUIRE(packet.Header() == false);
+        REQUIRE(packet.Complete() == false);
+    }
+
     SECTION("MINER_SET_REWARD with LENGTH > 0 is valid header")
     {
         LLP::Packet packet;
