@@ -66,7 +66,7 @@ namespace LLP
         }
 
         /* Handle Reading Packet Length (32-bit, big-endian). */
-        if(nAvailable >= 4 && !INCOMING.IsNull() && !INCOMING.fLengthRead)
+        if(nAvailable >= 4 && !INCOMING.IsNull() && INCOMING.LENGTH == 0)
         {
             std::vector<uint8_t> BYTES(4, 0);
             if(Read(BYTES, 4) == 4)
