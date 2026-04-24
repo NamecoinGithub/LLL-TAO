@@ -436,15 +436,17 @@ namespace LLP
         // ═══════════════════════════════════════════════════════════════════════
         // DIFFICULTY CACHING (Performance Optimization)
         // ═══════════════════════════════════════════════════════════════════════
-        
-        /** Static difficulty cache (shared across all connections) 
-         *  Note: Each atomic is padded to prevent false sharing on cache lines
+
+        /** Per-channel difficulty cache entry — each channel carries its own
+         *  difficulty value AND its own freshness timestamp.  Using a single
+         *  shared timestamp (the old design) allowed a write to channel 2 to
+         *  mark channel 1's stale-or-zero value as fresh, producing the
+         *  "nBits = 0" template bug.  The struct is cache-line-padded to
+         *  prevent false sharing between channels.
          **/
-        static std::atomic<uint64_t> nDiffCacheTime;
-        
-        /** Padded cache values to prevent false sharing (64-byte cache line alignment) **/
         struct alignas(64) PaddedDifficultyCache {
             std::atomic<uint32_t> nDifficulty{0};
+            std::atomic<uint64_t> nCacheTime{0};
         };
         static PaddedDifficultyCache nDiffCacheValue[3];  // Per channel [0=PoS, 1=Prime, 2=Hash]
         
