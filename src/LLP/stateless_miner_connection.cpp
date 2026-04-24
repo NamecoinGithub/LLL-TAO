@@ -355,8 +355,8 @@ namespace LLP
     /* The block iterator to act as extra nonce. */
     std::atomic<uint32_t> StatelessMinerConnection::nBlockIterator(0);
     
-    /* Difficulty cache static variables with padding to prevent false sharing */
-    std::atomic<uint64_t> StatelessMinerConnection::nDiffCacheTime(0);
+    /* Difficulty cache: one entry per channel, each carrying its own freshness
+     * timestamp so a write to channel 2 cannot mark channel 1's value as fresh. */
     StatelessMinerConnection::PaddedDifficultyCache StatelessMinerConnection::nDiffCacheValue[3];
     
     /** Default Constructor **/
@@ -449,66 +449,89 @@ namespace LLP
             debug::error(FUNCTION, "Invalid channel ", nChannel, ", defaulting to Prime (1)");
             nChannel = 1;
         }
-        
-        /* Check if cache is still valid (within TTL)
-         * runtime::unifiedtimestamp() returns seconds, compare with precalculated TTL in seconds
-         * Note: Check for clock adjustments (nNow >= nCacheTime) to prevent underflow */
+
+        /* Per-channel cache check: each slot carries its own freshness timestamp so a
+         * write to channel N cannot mark a different channel's stale value as current.
+         *
+         * Note: Check for clock adjustments (nNow >= nCacheTime) to prevent underflow. */
         uint64_t nNow = runtime::unifiedtimestamp();
-        uint64_t nCacheTime = nDiffCacheTime.load(std::memory_order_acquire);
-        
-        if(nCacheTime > 0 && nNow >= nCacheTime && 
+        uint64_t nCacheTime = nDiffCacheValue[nChannel].nCacheTime.load(std::memory_order_acquire);
+
+        if(nCacheTime > 0 && nNow >= nCacheTime &&
            (nNow - nCacheTime) < MiningConstants::DIFFICULTY_CACHE_TTL_SECONDS)
         {
             /* Cache hit - return cached value */
             uint32_t nCachedDiff = nDiffCacheValue[nChannel].nDifficulty.load(std::memory_order_acquire);
-            debug::log(3, FUNCTION, "Difficulty cache HIT for channel ", nChannel, 
+            debug::log(3, FUNCTION, "Difficulty cache HIT for channel ", nChannel,
                       " (age: ", (nNow - nCacheTime), "s)");
             return nCachedDiff;
         }
-        
+
         /* Cache miss, expired, or clock adjusted backwards - recalculate */
         if(nCacheTime > 0 && nNow < nCacheTime)
         {
-            debug::log(2, FUNCTION, "⚠️  Clock adjustment detected (", nCacheTime, " → ", nNow, 
-                       ") - invalidating difficulty cache");
+            debug::log(2, FUNCTION, "⚠️  Clock adjustment detected (", nCacheTime, " → ", nNow,
+                       ") - invalidating difficulty cache for channel ", nChannel);
         }
-        
-        /* Cache miss or expired - recalculate
-         * Use compare-and-swap to ensure only one thread updates the cache.
-         * Other threads will either get the new value or retry with the updated cache. */
+
+        /* Guard: stateBest must be a valid, initialised chain state before we pass it
+         * into GetNextTargetRequired().  A default-constructed BlockState has nBits == 0
+         * (IsNull() == true) — proceeding with it produces undefined/zero difficulty. */
         TAO::Ledger::BlockState stateBest = TAO::Ledger::ChainState::tStateBest.load();
+        if(stateBest.IsNull())
+        {
+            debug::log(2, FUNCTION, "stateBest is null/uninitialized for channel ", nChannel,
+                      " — returning 0 (chain not yet ready)");
+            return 0;
+        }
+
         uint32_t nDiff = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-        
+
         /* Validate stateBest hasn't changed during calculation */
         TAO::Ledger::BlockState stateBestCheck = TAO::Ledger::ChainState::tStateBest.load();
         if(stateBest.nHeight != stateBestCheck.nHeight)
         {
             debug::log(3, FUNCTION, "Blockchain advanced during calculation - recalculating");
             stateBest = stateBestCheck;
+            /* Re-check null guard after reload */
+            if(stateBest.IsNull())
+            {
+                debug::log(2, FUNCTION, "stateBest became null after reload for channel ", nChannel);
+                return 0;
+            }
             nDiff = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
             nNow = runtime::unifiedtimestamp();  // Update timestamp after recalculation
         }
-        
-        /* Try to update cache atomically - only succeeds if timestamp hasn't changed
-         * (meaning no other thread beat us to it) */
-        uint64_t nExpectedTime = nCacheTime;
-        if(nDiffCacheTime.compare_exchange_strong(nExpectedTime, nNow, 
-                                                   std::memory_order_release, 
-                                                   std::memory_order_acquire))
+
+        /* Guard: never cache a zero difficulty — a zero nBits would produce invalid
+         * templates and the miner would receive "Prime Bits: 0" rejections. */
+        if(nDiff == 0)
         {
-            /* We won the race - update the cached difficulty value */
+            debug::log(2, FUNCTION, "GetNextTargetRequired returned 0 for channel ", nChannel,
+                      " — not caching, returning 0");
+            return 0;
+        }
+
+        /* Try to update the per-channel cache atomically — only one thread wins the
+         * CAS; losers read back the winner's fresher value to avoid redundant work. */
+        uint64_t nExpectedTime = nCacheTime;
+        if(nDiffCacheValue[nChannel].nCacheTime.compare_exchange_strong(nExpectedTime, nNow,
+                                                                         std::memory_order_release,
+                                                                         std::memory_order_acquire))
+        {
+            /* We won the race - update the cached difficulty value for this channel */
             nDiffCacheValue[nChannel].nDifficulty.store(nDiff, std::memory_order_release);
-            debug::log(3, FUNCTION, "Difficulty cache MISS for channel ", nChannel, 
+            debug::log(3, FUNCTION, "Difficulty cache MISS for channel ", nChannel,
                       " - recalculated: 0x", std::hex, nDiff, std::dec);
         }
         else
         {
-            /* Another thread updated the cache - use their value to avoid redundant work */
+            /* Another thread updated this channel's cache - use their value */
             nDiff = nDiffCacheValue[nChannel].nDifficulty.load(std::memory_order_acquire);
             debug::log(3, FUNCTION, "Difficulty cache race avoided for channel ", nChannel,
                       " - using concurrent update");
         }
-        
+
         return nDiff;
     }
 
@@ -4447,7 +4470,16 @@ namespace LLP
 
         /* Get difficulty */
         uint32_t nDifficulty = TAO::Ledger::GetNextTargetRequired(stateBest, nChannel);
-        
+
+        /* Guard: never push a template with zero difficulty — a zero nBits means
+         * any miner submission would be rejected with "Prime Bits: 0". */
+        if(nDifficulty == 0)
+        {
+            debug::error(FUNCTION, "GetNextTargetRequired returned 0 for channel ", nChannel,
+                        " — aborting push notification to avoid zero-difficulty template");
+            return;
+        }
+
         /* Build notification using unified builder */
         StatelessPacket notification = PushNotificationBuilder::BuildChannelNotification<StatelessPacket>(
             nChannel, ProtocolLane::STATELESS, stateBest, stateChannel, nDifficulty,

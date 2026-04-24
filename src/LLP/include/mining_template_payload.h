@@ -83,6 +83,17 @@ namespace LLP
             return result;
         }
 
+        /* Guard: a zero nBits means the difficulty is unresolved — any miner submission
+         * built from this template would be rejected.  Treat it as a transient failure
+         * and let the caller retry rather than propagating poison nBits to the miner. */
+        if(pBlock->nBits == 0)
+        {
+            debug::error(FUNCTION, strLaneLabel, ": block has nBits == 0 — INTERNAL_RETRY");
+            result.eReason = GetBlockPolicyReason::INTERNAL_RETRY;
+            result.nRetryAfterMs = MiningConstants::GET_BLOCK_THROTTLE_INTERVAL_MS;
+            return result;
+        }
+
         std::vector<uint8_t> vMetadata = RoundStateUtility::SerializeTemplateMetadata(
             static_cast<uint32_t>(stateBest.nHeight), nChannelHeight, pBlock->nBits);
 
