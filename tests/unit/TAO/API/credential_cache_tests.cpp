@@ -184,7 +184,13 @@ TEST_CASE("CredentialCache PostUseCheck detects epoch drift", "[tao][api][creden
 
 TEST_CASE("CredentialCache TTL constructor honors custom value", "[tao][api][credential_cache]")
 {
+    /* Pin the default value explicitly.  Future drift of DEFAULT_TTL_SECONDS
+     * must break this test, not silently regress cache hit rate.
+     * 600s is anchored to LLP::MAX_TEMPLATE_AGE_SECONDS. */
+    REQUIRE(CredentialCache::DEFAULT_TTL_SECONDS == 600);
+
     CredentialCache cacheDefault;
+    REQUIRE(cacheDefault.TTLSeconds() == 600);
     REQUIRE(cacheDefault.TTLSeconds() == CredentialCache::DEFAULT_TTL_SECONDS);
 
     CredentialCache cacheCustom(5);

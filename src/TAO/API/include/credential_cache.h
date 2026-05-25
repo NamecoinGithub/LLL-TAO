@@ -62,6 +62,14 @@ namespace TAO::API
      *    4. Bound `hashGenesis` of the refreshed credential differs from the
      *       fingerprint captured at populate time (covers same-id replacement).
      *
+     *  HOT-PATH INVARIANT: The cache-hit fast path performs exactly two
+     *  Authentication touches per call: `CurrentEpoch()` (lock-free atomic load)
+     *  and `Unlocked(MINING, hashSession)` (brief MUTEX hold).  It does NOT
+     *  call `Credentials()` — that runs only on the slow refresh path (cache
+     *  miss, epoch drift, lock-state change, identity change, TTL expiry).
+     *  This invariant is what gives the cache its ~400ms-per-call savings on
+     *  the steady-state PUSH→BLOCK_DATA cycle.
+     *
      *  The cache holds a `std::shared_ptr<TAO::Ledger::Credentials>` that
      *  independently owns a copy of the session's credential at populate time,
      *  so a concurrent session termination cannot dangle the cached pointer.
@@ -86,9 +94,22 @@ namespace TAO::API
         };
 
 
-        /** Default TTL: belt-and-braces refresh even when epoch unchanged.
-         *  60s is conservative versus the typical block interval. **/
-        static constexpr uint64_t DEFAULT_TTL_SECONDS = 60;
+        /** Default TTL: belt-and-braces backstop only.  Primary staleness
+         *  signals are the epoch bump and `Unlocked()` check — TTL exists
+         *  solely to bound damage from any missed invalidation hook.
+         *
+         *  Value 600s is anchored to `LLP::MAX_TEMPLATE_AGE_SECONDS`
+         *  (src/LLP/include/falcon_constants.h): the TTL must sit at or
+         *  above Nexus's natural inter-block silence ceiling so the
+         *  backstop only fires AFTER a template would have been discarded
+         *  anyway, and AFTER DEGRADED-mode recovery has already refreshed
+         *  the session via the normal credential resolution path.
+         *
+         *  Lower values (60s, 300s) collide with normal block droughts
+         *  and force redundant `Authentication::Credentials()` refreshes
+         *  on slots whose epoch + `Unlocked()` state prove nothing changed.
+         **/
+        static constexpr uint64_t DEFAULT_TTL_SECONDS = 600;
 
 
         /** Default constructor.  Cache starts empty. **/
@@ -348,22 +369,27 @@ namespace TAO::API
         /** IsSessionMiningReady
          *
          *  Mirrors the policy of LLP::IsDefaultSessionReady() but for an
-         *  arbitrary session-id.  Returns false if the session is missing or
-         *  not unlocked for MINING.  Never throws.  Does NOT call Unlock(),
-         *  Load(), or Create().
+         *  arbitrary session-id.  Returns false if the session is not
+         *  unlocked for MINING actions.  Never throws.
+         *
+         *  CRITICAL INVARIANT: this function MUST NOT call
+         *  `Authentication::Credentials()`.  That call is the exact ~400ms
+         *  hot-path cost the cache exists to eliminate, and it runs on
+         *  every Acquire() including cache hits.  Session-existence
+         *  defense-in-depth is provided by the epoch counter (terminate_session
+         *  bumps it; classify() detects drift via Reason::EPOCH_BUMP) and by
+         *  the slow-path Acquire() body which calls Credentials() exactly once
+         *  inside a try/catch on cache miss / epoch drift.
+         *
+         *  Permitted calls from this function: Authentication::Unlocked() only.
+         *  Forbidden: Credentials(), Insert(), Update(), Unlock(), terminate_session().
          *
          **/
         static bool IsSessionMiningReady(const uint256_t& hashSession)
         {
             try
             {
-                if(!Authentication::Unlocked(TAO::Ledger::PinUnlock::MINING, hashSession))
-                    return false;
-
-                /* Touch Credentials() to confirm the session entry exists.
-                 * If it doesn't, this throws and we return false. */
-                Authentication::Credentials(hashSession);
-                return true;
+                return Authentication::Unlocked(TAO::Ledger::PinUnlock::MINING, hashSession);
             }
             catch(...)
             {
