@@ -23,6 +23,7 @@ ________________________________________________________________________________
 #include <LLP/include/mining_constants.h>
 #include <LLP/include/mining_template_delivery.h>
 #include <LLP/include/get_block_policy.h>
+#include <TAO/API/include/credential_cache.h>
 #include <TAO/Ledger/types/block.h>
 #include <Legacy/types/coinbase.h>
 #include <atomic>
@@ -631,6 +632,15 @@ namespace LLP
          *  Protected by MUTEX. **/
         uint32_t   m_nCachedExtraNonce{0};
         uint1024_t m_hashLastExtraNonceTip;
+
+        /** Per-connection credential cache for the mining hot path.
+         *
+         *  Eliminates the steady-state Authentication::Credentials() lookup that
+         *  previously dominated [CBSM_TIMING] per-cycle measurements.  Cache lifetime
+         *  equals connection lifetime; invalidated by epoch bumps from
+         *  Authentication::Insert/Update/Terminate and by the 600 s TTL backstop.
+         **/
+        TAO::API::CredentialCache m_miningCredentialCache;
 
         /** 1-second rate-limit floor for GET_BLOCK fallback polling.
          *

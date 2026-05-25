@@ -126,6 +126,25 @@ namespace TAO
 
         /** CreateBlock
          *
+         *  Reference-overload variant of CreateBlock for callers that already hold a
+         *  live Credentials object (e.g. callers that own a shared_ptr from
+         *  TAO::API::CredentialCache::Acquire and want to avoid the
+         *  memory::encrypted_ptr wrap/unwrap dance).
+         *
+         *  This is the canonical body.  The encrypted_ptr overload below is a thin
+         *  forwarding wrapper that dereferences its user argument and calls this one.
+         *
+         *  All parameter semantics are identical to the encrypted_ptr overload.
+         *
+         **/
+        bool CreateBlock(const TAO::Ledger::Credentials& user, const SecureString& pin,
+                         const uint32_t nChannel, TAO::Ledger::TritiumBlock& block, const uint64_t nExtraNonce = 0,
+                         Legacy::Coinbase *pCoinbaseRecipients = nullptr,
+                         const uint256_t& hashDynamicGenesis = uint256_t(0));
+
+
+        /** CreateBlock
+         *
          *  Create a new block object from the chain.
          *
          *  This method does not create stake blocks. Channel 0 (Proof of Stake) generates invalid channel.

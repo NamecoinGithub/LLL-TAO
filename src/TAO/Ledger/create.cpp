@@ -813,7 +813,7 @@ namespace TAO::Ledger
 
 
     /* Create a new block object from the chain. */
-    bool CreateBlock(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
+    bool CreateBlock(const TAO::Ledger::Credentials& user, const SecureString& pin,
         const uint32_t nChannel, TAO::Ledger::TritiumBlock &rBlockRet, const uint64_t nExtraNonce, Legacy::Coinbase *pCoinbaseRecipients,
         const uint256_t& hashDynamicGenesis)
     {
@@ -822,7 +822,7 @@ namespace TAO::Ledger
          * finalization. Cached templates may be reused only as a base: when the
          * requested reward address differs from the cached finalization metadata,
          * the producer and merkle root are rebuilt below. */
-        const uint256_t hashGenesis = user->Genesis();
+        const uint256_t hashGenesis = user.Genesis();
 
         /* Only allow prime, hash, and private channels. */
         if(nChannel < 1 || nChannel > 3)
@@ -1002,14 +1002,14 @@ namespace TAO::Ledger
             UpdateProducerTimestamp(rBlockRet.producer);
 
             /* Sign the producer transaction. */
-            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
+            rBlockRet.producer.Sign(user.Generate(rBlockRet.producer.nSequence, pin));
 
             /* Double check our next hash if -safemode enabled. */
             if(config::GetBoolArg("-safemode", false))
             {
                 /* Re-calculate our next hash if safemode forcing not to use cache. */
                 const uint256_t hashNext =
-                    TAO::Ledger::Transaction::NextHash(user->Generate(rBlockRet.producer.nSequence + 1, pin, false), rBlockRet.producer.nNextType);
+                    TAO::Ledger::Transaction::NextHash(user.Generate(rBlockRet.producer.nSequence + 1, pin, false), rBlockRet.producer.nNextType);
 
                 /* Check that this next hash is what we are expecting. */
                 if(rBlockRet.producer.hashNext != hashNext)
@@ -1177,7 +1177,7 @@ namespace TAO::Ledger
             UpdateProducerTimestamp(rBlockRet.producer);
 
             /* Sign the producer transaction. */
-            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
+            rBlockRet.producer.Sign(user.Generate(rBlockRet.producer.nSequence, pin));
 
             /* Populate the block metadata */
             AddBlockData(tStateBest, nChannel, rBlockRet);
@@ -1221,6 +1221,16 @@ namespace TAO::Ledger
                    " nHeight=", rBlockRet.nHeight);
 
         return true;
+    }
+
+    bool CreateBlock(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
+        const uint32_t nChannel, TAO::Ledger::TritiumBlock &rBlockRet, const uint64_t nExtraNonce, Legacy::Coinbase *pCoinbaseRecipients,
+        const uint256_t& hashDynamicGenesis)
+    {
+        if(user.IsNull())
+            return debug::error(FUNCTION, "null credentials encrypted_ptr");
+
+        return CreateBlock(*user, pin, nChannel, rBlockRet, nExtraNonce, pCoinbaseRecipients, hashDynamicGenesis);
     }
 
 #ifdef UNIT_TESTS

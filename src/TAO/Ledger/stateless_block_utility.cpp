@@ -25,6 +25,7 @@ ________________________________________________________________________________
 #include <LLD/include/global.h>
 
 #include <TAO/API/include/global.h>
+#include <TAO/API/include/credential_cache.h>
 #include <TAO/API/types/authentication.h>
 
 #include <LLD/include/global.h>
@@ -41,6 +42,7 @@ ________________________________________________________________________________
 #include <Util/include/debug.h>
 #include <Util/include/runtime.h>
 #include <chrono>
+#include <memory>
 #include <sstream>
 
 /* Global TAO namespace. */
@@ -134,6 +136,16 @@ namespace TAO::Ledger
         const uint64_t nExtraNonce,
         const uint256_t& hashRewardAddress)
     {
+        return CreateBlockForStatelessMining(nChannel, nExtraNonce, hashRewardAddress, nullptr);
+    }
+
+
+    TritiumBlock* CreateBlockForStatelessMining(
+        const uint32_t nChannel,
+        const uint64_t nExtraNonce,
+        const uint256_t& hashRewardAddress,
+        TAO::API::CredentialCache* pCredentialCache)
+    {
         /* Early exit if shutdown is in progress */
         if(config::fShutdown.load())
         {
@@ -179,12 +191,53 @@ namespace TAO::Ledger
         
         try {
             const uint256_t hashSession = uint256_t(TAO::API::Authentication::SESSION::DEFAULT);
-            const auto& pCredentials = TAO::API::Authentication::Credentials(hashSession);
+
+            /* Strategy 2A hot-path credential resolution.
+             *
+             * If the caller owns a CredentialCache (per-connection state, lifetime ==
+             * miner connection), use Acquire().  This avoids the steady-state
+             * Authentication::Credentials() cost that [CBSM_TIMING] previously
+             * measured at ~400 ms per cycle on the test node.
+             *
+             * The cache hands back a shared_ptr<Credentials>.  We dereference it and
+             * pass straight to the new CreateBlock(const Credentials&, ...) overload —
+             * no encrypted_ptr wrap/unwrap, no heap copy, no scope-managed temporary.
+             *
+             * Callers without a cache (prewarmer worker threads, future call sites)
+             * fall through to the live encrypted_ptr — preserves pre-PR behaviour
+             * and pays the unmodified cost. */
+            std::shared_ptr<TAO::Ledger::Credentials> pCachedCreds;
+            const memory::encrypted_ptr<TAO::Ledger::Credentials>* pLiveCreds = nullptr;
+
+            bool fCacheHit = false;
+            TAO::API::CredentialCache::Reason eLastReason = TAO::API::CredentialCache::Reason::EMPTY;
+
+            if(pCredentialCache != nullptr)
+            {
+                pCachedCreds = pCredentialCache->Acquire(hashSession);
+                eLastReason  = pCredentialCache->LastReason();
+                fCacheHit    = (pCachedCreds != nullptr
+                             && eLastReason == TAO::API::CredentialCache::Reason::NONE);
+            }
+
+            if(!pCachedCreds)
+            {
+                /* Cache miss / no cache / Acquire returned null — fall back to live path. */
+                pLiveCreds = &TAO::API::Authentication::Credentials(hashSession);
+                if(pLiveCreds->IsNull())
+                {
+                    debug::error(FUNCTION, "Authentication::Credentials returned null encrypted_ptr"
+                                 " — session ", hashSession.SubString(), " unavailable");
+                    return nullptr;
+                }
+            }
 
             {
                 const int64_t nMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - tCbsmStart).count();
                 debug::log(1, FUNCTION, "[CBSM_TIMING] phase=credentials_resolved elapsed_ms=", nMs,
+                           " cache_hit=", (fCacheHit ? "true" : "false"),
+                           " last_reason=", uint8_t(eLastReason),
                            " reward=", hashRewardAddress.SubString());
             }
             
@@ -229,15 +282,26 @@ namespace TAO::Ledger
                            " reward=", hashRewardAddress.SubString());
             }
 
-            bool success = CreateBlock(
-                pCredentials,
-                strPIN,
-                nChannel,
-                *pBlock,
-                nExtraNonce,
-                nullptr,           // No coinbase recipients
-                hashRewardAddress  // Route reward events to miner's genesis
-            );
+            bool success = false;
+            if(pCachedCreds)
+            {
+                success = CreateBlock(*pCachedCreds, strPIN, nChannel, *pBlock,
+                                      nExtraNonce, nullptr, hashRewardAddress);
+            }
+            else
+            {
+                /* Live encrypted_ptr path — calls the encrypted_ptr wrapper overload,
+                 * which forwards to the same body as above. */
+                success = CreateBlock(*pLiveCreds, strPIN, nChannel, *pBlock,
+                                      nExtraNonce, nullptr, hashRewardAddress);
+            }
+
+            if(pCredentialCache != nullptr && !pCredentialCache->PostUseCheck())
+            {
+                debug::log(2, FUNCTION, "[CBSM_TIMING] cache_post_use_drift=true last_reason=",
+                           uint8_t(pCredentialCache->LastReason()),
+                           " reward=", hashRewardAddress.SubString());
+            }
 
             {
                 const int64_t nMs = std::chrono::duration_cast<std::chrono::milliseconds>(
