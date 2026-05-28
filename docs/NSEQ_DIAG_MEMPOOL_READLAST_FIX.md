@@ -204,3 +204,55 @@ BLOCK_ACCEPTED / BLOCK_REJECTED
 The mempool-aware `ReadLast()` in `ValidateVtxSigchainConsistency()` ensures the
 pre-check gate matches the state used during template creation, eliminating false
 rejections for valid blocks containing mempool-only vtx transactions.
+
+---
+
+## Regression Update — PR #<this PR>
+
+### Symptom
+
+The `FLAGS::MEMPOOL` fix above introduced a **second-order false-rejection** affecting
+the common case where a vtx transaction IS the latest mempool entry for its sigchain.
+
+Production logs showed:
+
+```
+mempool.hashLast = 01950ecac4a2e034d3f9
+tx               = 01950ecac4a2e034d3f9   ← IDENTICAL
+tx.hashPrevTx    = 01711a8736...
+→ tx.hashPrevTx != hashLast → BLOCK_REJECTED
+```
+
+The tx was being compared to itself. `mempool.Get(genesis)` returns the *latest*
+mempool entry for the sigchain. When `AddTransactions()` pulls that latest entry
+into the candidate block, `ValidateVtxSigchainConsistency` then asked mempool for
+the same thing and got the tx back — comparing it to its own `hashPrevTx` is
+guaranteed to fail.
+
+**Impact:** every block containing a non-genesis user vtx was rejected.
+
+### Fix — Composite C→B with hard invariant
+
+The corrected validator uses three sequential checks per vtx entry:
+
+1. **Hard invariant** — `tx.hashPrevTx == tx.GetHash()` is cryptographically
+   impossible (predecessor cannot equal self). Reject as MALFORMED with a
+   distinct error prefix so operators can grep MALFORMED separately from STALE.
+
+2. **Option C — self-match detection** — if `ReadLast(genesis, FLAGS::MEMPOOL)`
+   returns the tx being validated, mempool's "latest" is the tx itself.
+   `hashMempoolLast` is the wrong anchor; fall through.
+
+3. **Option B — disk-only fallback** — query `ReadLast(genesis)` (no flags) to
+   get the actual on-disk predecessor. Compare against that. If disk also has
+   no anchor, defer to `Connect()` (which has its own predecessor walk).
+
+This restores correct behavior for the common case (tx IS mempool's latest)
+while preserving the original `FLAGS::MEMPOOL` fix's intent (catch mempool-only
+predecessor races). Genuine staleness — where mempool has advanced PAST the
+tx in the block — is still detected via the standard mempool path.
+
+### Test coverage
+
+`tests/unit/TAO/Ledger/validate_vtx_consistency.cpp` extended with six invariant
+tests pinning each branch of the composite logic.

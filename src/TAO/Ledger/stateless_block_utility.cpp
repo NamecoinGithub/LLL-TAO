@@ -643,42 +643,100 @@ namespace TAO::Ledger
             if(!tx.IsFirst())
             {
                 uint512_t hashLast = 0;
+                bool fAnchorFound = false;
 
-                if(mapLast.count(tx.hashGenesis))
-                {
-                    /* A prior vtx entry for this genesis will have advanced
-                     * WriteLast() by the time Connect() reaches this tx. */
-                    hashLast = mapLast[tx.hashGenesis];
-                }
-                else
-                {
-                    /* No prior in-block entry: read mempool-aware last hash.
-                     * FLAGS::MEMPOOL checks the mempool first then falls back to
-                     * disk, matching the same state that CreateTransaction() and
-                     * TritiumBlock::Check() use when building/validating the
-                     * sigchain. */
-                    if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, TAO::Ledger::FLAGS::MEMPOOL))
-                    {
-                        /* Genesis not in mempool or on disk — skip; let
-                         * Connect() report the failure. */
-                        if(fSeqDiag)
-                            debug::log(0, FUNCTION,
-                                "[NSEQ_DIAG][ValidateVtxSigchainConsistency]"
-                                " ReadLast failed for genesis=", tx.hashGenesis.SubString(),
-                                " tx=", txpair.second.SubString(), " — skipping");
-                        continue;
-                    }
-                }
-
-                if(tx.hashPrevTx != hashLast)
+                /* HARD INVARIANT: A tx can NEVER be its own predecessor.  This is
+                 * cryptographically impossible (the predecessor must exist before
+                 * this tx) and would indicate a malformed transaction, not a race
+                 * condition with mempool state.  Reject with a distinct MALFORMED
+                 * tag so operators can grep this case separately from STALE races. */
+                if(tx.hashPrevTx == txpair.second)
                 {
                     debug::error(FUNCTION,
                         "ValidateVtxSigchainConsistency:"
-                        " vtx tx stale — sigchain advanced in mempool/disk since template creation:"
+                        " MALFORMED tx — hashPrevTx equals self (cryptographically impossible):"
                         " genesis=", tx.hashGenesis.SubString(),
                         " tx=", txpair.second.SubString(),
                         " tx.hashPrevTx=", tx.hashPrevTx.SubString(),
-                        " mempool.hashLast=", hashLast.SubString(),
+                        " tx.nSequence=", tx.nSequence);
+                    return false;
+                }
+
+                if(mapLast.count(tx.hashGenesis))
+                {
+                    /* A prior vtx entry for this genesis in this same block already
+                     * established the in-flight last hash.  Use it as the anchor —
+                     * mapLast is correctly the predecessor of this tx by construction. */
+                    hashLast = mapLast[tx.hashGenesis];
+                    fAnchorFound = true;
+                }
+                else
+                {
+                    /* No in-block predecessor: query mempool-aware ReadLast. */
+                    uint512_t hashMempoolLast = 0;
+                    const bool fMempoolReadOk =
+                        LLD::Ledger->ReadLast(tx.hashGenesis, hashMempoolLast,
+                                              TAO::Ledger::FLAGS::MEMPOOL);
+
+                    if(fMempoolReadOk && hashMempoolLast != txpair.second)
+                    {
+                        /* Mempool's latest is NOT this tx — it is genuinely the
+                         * predecessor anchor (or a newer staleness candidate).
+                         * Use it directly. */
+                        hashLast = hashMempoolLast;
+                        fAnchorFound = true;
+                    }
+                    else
+                    {
+                        /* Option C self-match: mempool's latest IS this tx, which is
+                         * the common case when AddTransactions() pulls the latest
+                         * mempool entry into the block.  hashMempoolLast cannot serve
+                         * as the predecessor anchor — fall through to Option B.
+                         *
+                         * Option B — disk-only ReadLast for the actual on-disk
+                         * predecessor.  No FLAGS::MEMPOOL so this hits BLOCK state. */
+                        uint512_t hashDiskLast = 0;
+                        if(LLD::Ledger->ReadLast(tx.hashGenesis, hashDiskLast))
+                        {
+                            hashLast = hashDiskLast;
+                            fAnchorFound = true;
+
+                            if(fSeqDiag)
+                                debug::log(0, FUNCTION,
+                                    "[NSEQ_DIAG][ValidateVtxSigchainConsistency]"
+                                    " mempool latest is self — falling through to disk anchor:"
+                                    " genesis=", tx.hashGenesis.SubString(),
+                                    " tx=", txpair.second.SubString(),
+                                    " disk_hashLast=", hashDiskLast.SubString());
+                        }
+                        else
+                        {
+                            /* Neither mempool (excluding self) nor disk has an
+                             * anchor.  Cannot pre-validate; defer to Connect()
+                             * which has its own predecessor walk and will report
+                             * the failure if real. */
+                            if(fSeqDiag)
+                                debug::log(0, FUNCTION,
+                                    "[NSEQ_DIAG][ValidateVtxSigchainConsistency]"
+                                    " no anchor available (mempool=self, disk=none) — deferring to Connect:"
+                                    " genesis=", tx.hashGenesis.SubString(),
+                                    " tx=", txpair.second.SubString());
+                            /* Skip this entry — do NOT reject. */
+                            mapLast[tx.hashGenesis] = txpair.second;
+                            continue;
+                        }
+                    }
+                }
+
+                if(fAnchorFound && tx.hashPrevTx != hashLast)
+                {
+                    debug::error(FUNCTION,
+                        "ValidateVtxSigchainConsistency:"
+                        " vtx tx STALE — sigchain advanced in mempool/disk since template creation:"
+                        " genesis=", tx.hashGenesis.SubString(),
+                        " tx=", txpair.second.SubString(),
+                        " tx.hashPrevTx=", tx.hashPrevTx.SubString(),
+                        " anchor.hashLast=", hashLast.SubString(),
                         " tx.nSequence=", tx.nSequence);
                     return false;
                 }
@@ -689,8 +747,9 @@ namespace TAO::Ledger
                         " vtx tx OK:"
                         " genesis=", tx.hashGenesis.SubString(),
                         " tx=", txpair.second.SubString(),
-                        " nSequence=", tx.nSequence,
-                        " hashPrevTx=", tx.hashPrevTx.SubString());
+                        " tx.hashPrevTx=", tx.hashPrevTx.SubString(),
+                        " anchor.hashLast=", hashLast.SubString(),
+                        " tx.nSequence=", tx.nSequence);
             }
 
             /* Track what WriteLast() will write for this genesis. */
