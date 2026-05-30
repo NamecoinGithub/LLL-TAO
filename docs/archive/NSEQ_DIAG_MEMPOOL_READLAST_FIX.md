@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Superseded (Reverted by PR #612).**
+> This document describes a mempool-first `ReadLast` approach that was later reverted.
+> Current canonical behavior is documented in [docs/reference/sigchain-last-resolution.md](../reference/sigchain-last-resolution.md).
+> See PR #612: <https://github.com/NamecoinGithub/LLL-TAO/pull/612>.
+
 # NSEQ Diagnostic: ValidateVtxSigchainConsistency — Mempool-Aware ReadLast Fix
 
 ## Summary
