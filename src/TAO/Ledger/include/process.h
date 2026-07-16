@@ -176,8 +176,8 @@ namespace TAO
 
 
         /** Maximum number of candidate-failure entries tracked in
-         *  mapCandidateActivationFailures before the map is cleared.  Same
-         *  intentional cheap DoS-guard rationale as MAX_MISSING_MAP_ENTRIES. **/
+         *  mapCandidateActivationFailures before an eviction occurs to bound
+         *  memory use (cheap DoS guard; the lowest-count entry is evicted). **/
         static const uint64_t MAX_CANDIDATE_FAILURE_MAP_ENTRIES = 1000;
 
 
