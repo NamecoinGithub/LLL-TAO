@@ -808,8 +808,8 @@ TEST_CASE("Candidate activation backoff suppresses candidate after N failures",
      * genesis state (nChainTrust = 0). */
     TAO::Ledger::BlockState stateCandidate;
     stateCandidate.nVersion    = 4;
-    stateCandidate.nChainTrust = 1;
-    stateCandidate.nHeight     = 1;
+    stateCandidate.nChainTrust = TAO::Ledger::ChainState::tStateBest.load().nChainTrust + 1;
+    stateCandidate.nHeight     = TAO::Ledger::ChainState::tStateBest.load().nHeight + 1;
     REQUIRE(LLD::Ledger->WriteBlock(hashBadCandidate, stateCandidate));
 
     /* Saturate the failure counter to the limit, simulating N previous
