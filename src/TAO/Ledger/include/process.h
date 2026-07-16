@@ -164,6 +164,34 @@ namespace TAO
         static const uint64_t MAX_CHECK_REJECT_MAP_ENTRIES = 10000;
 
 
+        /** Maximum number of consecutive AttemptPeerBestChainRecovery activation
+         *  failures for the same candidate best-chain hash before the candidate
+         *  is suppressed and a terminal diagnostic is emitted.  After reaching
+         *  this limit, the code logs a distinct "CANDIDATE_SUPPRESSED" warning,
+         *  skips further activation attempts for that hash, and signals that a
+         *  fresh sync/branch from a different peer is required.  The counter
+         *  resets on successful activation or when a genuinely different candidate
+         *  hash is evaluated (different map key). **/
+        static const uint32_t MAX_CANDIDATE_ACTIVATION_RETRIES = 5;
+
+
+        /** Maximum number of candidate-failure entries tracked in
+         *  mapCandidateActivationFailures before the map is cleared.  Same
+         *  intentional cheap DoS-guard rationale as MAX_MISSING_MAP_ENTRIES. **/
+        static const uint64_t MAX_CANDIDATE_FAILURE_MAP_ENTRIES = 1000;
+
+
+        /** Track consecutive AttemptPeerBestChainRecovery→ActivateCandidateBestChain
+         *  failures per candidate best-chain hash.  A fresh candidate hash starts
+         *  at zero (absent from the map).  The counter increments each time
+         *  ActivateCandidateBestChain returns false for that hash and is erased on
+         *  successful activation.  Once the count reaches
+         *  MAX_CANDIDATE_ACTIVATION_RETRIES, all further recovery attempts for
+         *  that hash are suppressed until a genuinely different chain tip is
+         *  presented. **/
+        extern std::map<uint1024_t, uint32_t> mapCandidateActivationFailures;
+
+
         /** Mutex to protect checking more than one block at a time. **/
         extern std::mutex PROCESSING_MUTEX;
 

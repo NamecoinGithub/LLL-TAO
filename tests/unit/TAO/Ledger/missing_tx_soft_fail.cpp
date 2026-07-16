@@ -774,3 +774,140 @@ TEST_CASE("Synchronization requires the advertised hash to be active",
 
     TAO::Ledger::ChainState::hashBestChain.store(hashBestBefore);
 }
+
+
+/* -------------------------------------------------------------------------
+ * Regression: Fork-choice retry backoff / circuit-breaker
+ *
+ * These tests guard against the Doom Loop observed in production where
+ * AttemptPeerBestChainRecovery re-attempted the same failing candidate
+ * hash indefinitely (once per second for 24+ hours) with no terminating
+ * condition.  The circuit-breaker added in this change suppresses further
+ * retry once the per-candidate consecutive-failure counter reaches
+ * MAX_CANDIDATE_ACTIVATION_RETRIES.
+ * -------------------------------------------------------------------------*/
+
+TEST_CASE("Candidate activation backoff suppresses candidate after N failures",
+    "[ledger][process][fork_choice]")
+{
+    LedgerGuard env;
+
+    /* Use a hash that is guaranteed to differ from the best-chain hash.
+     * The uint1024_t prefix is unique enough to avoid any collision with
+     * computed block hashes in the test environment. */
+    const uint1024_t hashBadCandidate(
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000CAFEBABE0000000001");
+
+    /* Guard: clean slate for this test. */
+    TAO::Ledger::mapCandidateActivationFailures.clear();
+
+    /* Write a block state for the candidate hash so ReadBlock() succeeds.
+     * Use nVersion = 4 (pre-Tritium) so IsHeavierThan() uses nChainTrust.
+     * Set nChainTrust = 1 so the candidate looks heavier than the default
+     * genesis state (nChainTrust = 0). */
+    TAO::Ledger::BlockState stateCandidate;
+    stateCandidate.nVersion    = 4;
+    stateCandidate.nChainTrust = 1;
+    stateCandidate.nHeight     = 1;
+    REQUIRE(LLD::Ledger->WriteBlock(hashBadCandidate, stateCandidate));
+
+    /* Saturate the failure counter to the limit, simulating N previous
+     * consecutive activation failures for this candidate hash. */
+    TAO::Ledger::mapCandidateActivationFailures[hashBadCandidate] =
+        TAO::Ledger::MAX_CANDIDATE_ACTIVATION_RETRIES;
+
+    /* AttemptPeerBestChainRecovery must return false immediately (circuit-
+     * breaker fires before FindCommonAncestor or ActivateCandidateBestChain
+     * are reached), so the counter must NOT be incremented further. */
+    REQUIRE_FALSE(TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashBadCandidate, 1u, "unit test circuit breaker"));
+
+    REQUIRE(TAO::Ledger::mapCandidateActivationFailures.count(hashBadCandidate) != 0);
+    REQUIRE(TAO::Ledger::mapCandidateActivationFailures.at(hashBadCandidate) ==
+        TAO::Ledger::MAX_CANDIDATE_ACTIVATION_RETRIES);
+
+    /* A genuinely different hash must start with a clean (absent) counter
+     * so the suppression of one candidate does not spill over. */
+    const uint1024_t hashDifferentCandidate(
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000CAFEBABE0000000002");
+    REQUIRE(TAO::Ledger::mapCandidateActivationFailures.count(hashDifferentCandidate) == 0);
+
+    LLD::Ledger->EraseBlock(hashBadCandidate);
+    TAO::Ledger::mapCandidateActivationFailures.clear();
+}
+
+
+/* -------------------------------------------------------------------------
+ * Regression: OrphanPool RemoveSubtree terminates and does not regrow
+ *
+ * This test replays the Doom Loop log scenario at the orphan-pool level:
+ * a subtree of orphan blocks that fails downstream activation is drained via
+ * RemoveSubtree(), and the pool is proven empty afterwards.  Re-delivering
+ * the same blocks (as a peer would do) allows re-insertion but a second
+ * RemoveSubtree() also terminates — proving the drain semantics are bounded
+ * and cannot loop indefinitely regardless of how many times the peer
+ * re-sends the same chain segment.
+ * -------------------------------------------------------------------------*/
+
+TEST_CASE("OrphanPool RemoveSubtree drains entire subtree and terminates on re-delivery",
+    "[ledger][process][orphan_pool]")
+{
+    TAO::Ledger::OrphanPool pool;
+
+    /* Build a three-level subtree rooted at hashRoot (the "bad candidate"
+     * from the incident log). */
+    const uint1024_t hashParentOfRoot(0xFEED0001);
+
+    PassBlock root;
+    root.nVersion      = 4;
+    root.hashPrevBlock = hashParentOfRoot;
+    root.nHeight       = 100;
+    root.nNonce        = 0xBAD1;
+    const uint1024_t hashRoot = root.GetHash();
+
+    PassBlock child;
+    child.nVersion      = 4;
+    child.hashPrevBlock = hashRoot;
+    child.nHeight       = 101;
+    child.nNonce        = 0xBAD2;
+    const uint1024_t hashChild = child.GetHash();
+
+    PassBlock grandchild;
+    grandchild.nVersion      = 4;
+    grandchild.hashPrevBlock  = hashChild;
+    grandchild.nHeight        = 102;
+    grandchild.nNonce         = 0xBAD3;
+    const uint1024_t hashGrandchild = grandchild.GetHash();
+
+    REQUIRE(pool.Insert(root));
+    REQUIRE(pool.Insert(child));
+    REQUIRE(pool.Insert(grandchild));
+    REQUIRE(pool.Size() == 3);
+
+    /* Simulate: activation fails for root; Process() calls RemoveSubtree(root).
+     * All three entries (root + child + grandchild) must be removed. */
+    const uint64_t nRemoved = pool.RemoveSubtree(hashRoot);
+    REQUIRE(nRemoved == 3);
+    REQUIRE(pool.Empty());
+    REQUIRE_FALSE(pool.Contains(hashRoot));
+    REQUIRE_FALSE(pool.Contains(hashChild));
+    REQUIRE_FALSE(pool.Contains(hashGrandchild));
+
+    /* Simulate peer re-delivering the same blocks (as observed in the Doom
+     * Loop incident where peers repeatedly re-sent the failing sync range).
+     * Re-insertion must succeed (removed entries can be re-added). */
+    REQUIRE(pool.Insert(root));
+    REQUIRE(pool.Insert(child));
+    REQUIRE(pool.Size() == 2);
+
+    /* A second RemoveSubtree must also terminate and fully drain. */
+    const uint64_t nRemoved2 = pool.RemoveSubtree(hashRoot);
+    REQUIRE(nRemoved2 == 2);
+    REQUIRE(pool.Empty());
+}
