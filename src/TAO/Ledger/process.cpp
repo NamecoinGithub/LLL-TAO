@@ -189,6 +189,11 @@ namespace TAO
         std::map<uint1024_t, uint64_t> mapLastOrphanRequest;
 
 
+        /* Track consecutive ActivateCandidateBestChain failures per candidate
+         * best-chain hash.  See declaration comment in include/process.h. */
+        std::map<uint1024_t, uint32_t> mapCandidateActivationFailures;
+
+
         namespace
         {
             /** LocalMinedBlockRecord
@@ -519,6 +524,27 @@ namespace TAO
             if(!statePeer.IsHeavierThan(stateBest))
                 return false;
 
+            /* Circuit breaker: if this candidate hash has already exceeded the
+             * consecutive-failure limit, suppress it immediately — skipping the
+             * expensive ancestry traversal — and signal that a fresh sync/branch
+             * from a different peer is required.  This terminates the Doom Loop
+             * pattern where a stored side-branch candidate fails
+             * ActivateCandidateBestChain every single retry and the error repeats
+             * indefinitely. */
+            {
+                const auto itFailures = mapCandidateActivationFailures.find(hashPeerBest);
+                if(itFailures != mapCandidateActivationFailures.end()
+                && itFailures->second >= MAX_CANDIDATE_ACTIVATION_RETRIES)
+                {
+                    return debug::error(FUNCTION, ANSI_COLOR_BRIGHT_RED,
+                        "=== CANDIDATE_SUPPRESSED ===", ANSI_COLOR_RESET,
+                        " candidate=", hashPeerBest.SubString(),
+                        " failures=", itFailures->second,
+                        " limit=", MAX_CANDIDATE_ACTIVATION_RETRIES,
+                        " — dropped; request a fresh branch from a different peer");
+                }
+            }
+
             TAO::Ledger::BlockState stateAncestor;
             uint32_t nConnectDepth = 0;
             uint32_t nDisconnectDepth = 0;
@@ -538,7 +564,44 @@ namespace TAO
                 " action=validated-activation");
 
             if(!ActivateCandidateBestChain(statePeer, pszSource, true))
+            {
+                /* Increment the per-candidate consecutive-failure counter.
+                 * When the map is at capacity, evict the entry with the lowest
+                 * failure count (most likely to be below the suppression limit,
+                 * and therefore the safest to discard) rather than clearing the
+                 * entire map — this preserves any entries that are already at or
+                 * near MAX_CANDIDATE_ACTIVATION_RETRIES and would be suppressed
+                 * on their next attempt. */
+                if(mapCandidateActivationFailures.size() >= MAX_CANDIDATE_FAILURE_MAP_ENTRIES)
+                {
+                    auto itEvict = mapCandidateActivationFailures.begin();
+                    for(auto it = mapCandidateActivationFailures.begin();
+                        it != mapCandidateActivationFailures.end(); ++it)
+                    {
+                        if(it->second < itEvict->second)
+                            itEvict = it;
+                    }
+                    mapCandidateActivationFailures.erase(itEvict);
+                }
+                const uint32_t nFailures = ++mapCandidateActivationFailures[hashPeerBest];
+
+                /* Log a distinct terminal warning when the limit is first reached
+                 * so operators can diagnose the condition in minutes rather than
+                 * hours of log archaeology. */
+                if(nFailures >= MAX_CANDIDATE_ACTIVATION_RETRIES)
+                    debug::error(FUNCTION, ANSI_COLOR_BRIGHT_RED,
+                        "=== CANDIDATE_ACTIVATION_LIMIT_REACHED ===", ANSI_COLOR_RESET,
+                        " candidate=", hashPeerBest.SubString(),
+                        " failures=", nFailures,
+                        " — will be suppressed on all future attempts;"
+                        " request a fresh branch from a different peer");
+
                 return debug::error(FUNCTION, "peer best recovery candidate validation failed");
+            }
+
+            /* Activation succeeded: clear the failure counter so a genuine future
+             * candidate starting from this hash can be evaluated without penalty. */
+            mapCandidateActivationFailures.erase(hashPeerBest);
 
             debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "=== PEER_BEST_RECOVERED ===", ANSI_COLOR_RESET,
                 " best=", ChainState::hashBestChain.load().SubString(),
