@@ -792,14 +792,12 @@ TEST_CASE("Candidate activation backoff suppresses candidate after N failures",
 {
     LedgerGuard env;
 
-    /* Use a hash that is guaranteed to differ from the best-chain hash.
-     * The uint1024_t prefix is unique enough to avoid any collision with
-     * computed block hashes in the test environment. */
-    const uint1024_t hashBadCandidate(
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000CAFEBABE0000000001");
+    /* Sentinel values chosen to be non-zero and distinct from any hash
+     * computed from default-initialized block fields in this test environment.
+     * hashBadCandidate (0xC0FFEE01) simulates the Doom Loop candidate hash;
+     * hashDifferentCandidate (0xC0FFEE02) verifies counter isolation. */
+    const uint1024_t hashBadCandidate(0xC0FFEE01);
+    const uint1024_t hashDifferentCandidate(0xC0FFEE02);
 
     /* Guard: clean slate for this test. */
     TAO::Ledger::mapCandidateActivationFailures.clear();
@@ -830,12 +828,7 @@ TEST_CASE("Candidate activation backoff suppresses candidate after N failures",
         TAO::Ledger::MAX_CANDIDATE_ACTIVATION_RETRIES);
 
     /* A genuinely different hash must start with a clean (absent) counter
-     * so the suppression of one candidate does not spill over. */
-    const uint1024_t hashDifferentCandidate(
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000000000000000000000"
-        "0000000000000000000000000000000000000000000000CAFEBABE0000000002");
+     * so the suppression of one candidate does not spill over to others. */
     REQUIRE(TAO::Ledger::mapCandidateActivationFailures.count(hashDifferentCandidate) == 0);
 
     LLD::Ledger->EraseBlock(hashBadCandidate);
@@ -899,15 +892,16 @@ TEST_CASE("OrphanPool RemoveSubtree drains entire subtree and terminates on re-d
     REQUIRE_FALSE(pool.Contains(hashChild));
     REQUIRE_FALSE(pool.Contains(hashGrandchild));
 
-    /* Simulate peer re-delivering the same blocks (as observed in the Doom
+    /* Simulate peer re-delivering the full subtree (as observed in the Doom
      * Loop incident where peers repeatedly re-sent the failing sync range).
-     * Re-insertion must succeed (removed entries can be re-added). */
+     * Re-insertion must succeed because entries were fully removed. */
     REQUIRE(pool.Insert(root));
     REQUIRE(pool.Insert(child));
-    REQUIRE(pool.Size() == 2);
+    REQUIRE(pool.Insert(grandchild));
+    REQUIRE(pool.Size() == 3);
 
-    /* A second RemoveSubtree must also terminate and fully drain. */
+    /* A second RemoveSubtree must also terminate and fully drain all 3. */
     const uint64_t nRemoved2 = pool.RemoveSubtree(hashRoot);
-    REQUIRE(nRemoved2 == 2);
+    REQUIRE(nRemoved2 == 3);
     REQUIRE(pool.Empty());
 }

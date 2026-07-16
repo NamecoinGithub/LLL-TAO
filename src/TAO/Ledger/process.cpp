@@ -566,10 +566,23 @@ namespace TAO
             if(!ActivateCandidateBestChain(statePeer, pszSource, true))
             {
                 /* Increment the per-candidate consecutive-failure counter.
-                 * Bound the map before inserting a new entry (same cheap DoS
-                 * guard rationale as MAX_MISSING_MAP_ENTRIES). */
+                 * When the map is at capacity, evict the entry with the lowest
+                 * failure count (most likely to be below the suppression limit,
+                 * and therefore the safest to discard) rather than clearing the
+                 * entire map — this preserves any entries that are already at or
+                 * near MAX_CANDIDATE_ACTIVATION_RETRIES and would be suppressed
+                 * on their next attempt. */
                 if(mapCandidateActivationFailures.size() >= MAX_CANDIDATE_FAILURE_MAP_ENTRIES)
-                    mapCandidateActivationFailures.clear();
+                {
+                    auto itEvict = mapCandidateActivationFailures.begin();
+                    for(auto it = mapCandidateActivationFailures.begin();
+                        it != mapCandidateActivationFailures.end(); ++it)
+                    {
+                        if(it->second < itEvict->second)
+                            itEvict = it;
+                    }
+                    mapCandidateActivationFailures.erase(itEvict);
+                }
                 const uint32_t nFailures = ++mapCandidateActivationFailures[hashPeerBest];
 
                 /* Log a distinct terminal warning when the limit is first reached
