@@ -162,6 +162,25 @@ namespace LLP
     std::atomic<uint64_t> GlobalGetBlockLimiter::nWindowStartMs{0};
 
 
+    /* ── Stale SYNC-block reception rate-limit state ──────────────────────────
+     * After a sync-node handoff the old peer may continue streaming an in-flight
+     * ACTION::LIST / SPECIFIER::SYNC response.  Those blocks are correctly
+     * rejected by the receiver-side guard BEFORE deserialization, but must never
+     * be logged per-packet — that would create a warning flood during full-chain
+     * sync.  These file-scope atomics are reset in Sync() on every new handoff
+     * so each new stale stream is diagnosed independently.
+     *
+     * STALE_SYNC_LOG_INTERVAL_SECONDS: minimum seconds between repeated summaries
+     * for the same burst of stale blocks from a replaced sync peer. */
+    static constexpr uint64_t STALE_SYNC_LOG_INTERVAL_SECONDS = 30;
+
+    /** Blocks suppressed (rejected without logging) since the last rate-limited log. */
+    static std::atomic<uint64_t> nStaleSyncSuppressedCount{0};
+
+    /** Unix timestamp of the last rate-limited stale-SYNC log line. */
+    static std::atomic<uint64_t> nStaleSyncLastLogTime{0};
+
+
     /** Default Constructor **/
     TritiumNode::TritiumNode()
     : BaseConnection<MessagePacket>()
@@ -3158,10 +3177,27 @@ namespace LLP
                         /* Check if this is an unsolicited sync block. */
                         if(nCurrentSession != TAO::Ledger::nSyncSession.load() || fSynchronized.load())
                         {
-                            debug::warning(FUNCTION,
-                                "ignoring unsolicited sync block from session ", std::hex,
-                                nCurrentSession, " sync_session=", TAO::Ledger::nSyncSession.load(),
-                                std::dec, " synchronized=", fSynchronized.load());
+                            /* Stale SYNC packets are expected after a sync-node handoff: the old
+                             * peer may have a large queued LIST/SYNC response already in-flight
+                             * whose enqueueing cannot be interrupted once started on the far side.
+                             * The block is correctly rejected here — BEFORE deserialization — so
+                             * there is no CPU cost beyond this check.
+                             *
+                             * Rate-limiting: log only on the first occurrence per stale burst,
+                             * then once every STALE_SYNC_LOG_INTERVAL_SECONDS with a suppressed-
+                             * count summary.  Never emit one warning per packet. */
+                            const uint64_t nTotal = ++nStaleSyncSuppressedCount;
+                            const uint64_t nNow   = runtime::timestamp();
+                            if(nTotal == 1 || nNow >= nStaleSyncLastLogTime.load() + STALE_SYNC_LOG_INTERVAL_SECONDS)
+                            {
+                                nStaleSyncLastLogTime.store(nNow);
+                                debug::log(1, FUNCTION,
+                                    "ignored ", nTotal, " stale SYNC block(s) from old session ",
+                                    std::hex, nCurrentSession,
+                                    " (active sync_session=", TAO::Ledger::nSyncSession.load(),
+                                    std::dec, " synchronized=", fSynchronized.load(), ")");
+                                nStaleSyncSuppressedCount.store(0);
+                            }
                             break;
                         }
 
@@ -4433,10 +4469,38 @@ namespace LLP
 
                     /* Make sure this is an active connection. */
                     if(pcurrent)
+                    {
+                        debug::log(1, FUNCTION,
+                            "old sync session ", std::hex, nSyncSession, std::dec,
+                            " teardown: unsubscribing LASTINDEX/BESTCHAIN");
+
+                        /* Remove sync-only subscriptions from the old peer.  This prevents
+                         * it from triggering additional ACTION::LIST requests via LASTINDEX
+                         * notifications once the new session becomes active.
+                         *
+                         * Note: a large in-flight LIST/SYNC response that B has already
+                         * started sending cannot be cancelled remotely — the serving loop
+                         * runs synchronously on B's DataThread and cannot observe an
+                         * UNSUBSCRIBE until after it finishes.  Those stale blocks will
+                         * arrive and be rejected cheaply by the receiver-side guard
+                         * (before deserialization), with a rate-limited summary log. */
                         pcurrent->Unsubscribe(SUBSCRIPTION::LASTINDEX | SUBSCRIPTION::BESTCHAIN);
+                    }
+
+                    /* Atomically clear the old sync session before activating the new one.
+                     * This closes the window where an in-flight LASTINDEX notification
+                     * from the old peer could pass the nCurrentSession == nSyncSession
+                     * guard and trigger a fresh ACTION::LIST/SYNC request on the stale
+                     * session.  Sync() will immediately overwrite this 0 with the new
+                     * session ID. */
+                    TAO::Ledger::nSyncSession.store(0);
                 }
 
-                /* Initiate the sync */
+                debug::log(0, FUNCTION,
+                    "switching sync session from ", std::hex, nSyncSession,
+                    " to ", pnode->nCurrentSession, std::dec);
+
+                /* Initiate the sync on the replacement peer. */
                 pnode->Sync();
 
                 return;
@@ -4467,7 +4531,14 @@ namespace LLP
     /* Initiates a chain synchronization from the peer. */
     void TritiumNode::Sync()
     {
-        debug::log(0, NODE, "New sync address set ", std::hex, nCurrentSession, ", syncing from ", TAO::Ledger::ChainState::hashBestChain.load().SubString());
+        debug::log(0, NODE, "New sync session ", std::hex, nCurrentSession,
+                   std::dec, " selected, syncing from ",
+                   TAO::Ledger::ChainState::hashBestChain.load().SubString());
+
+        /* Reset the stale-SYNC rate-limiter so blocks from the old peer are
+         * diagnosed independently from any previous handoff burst. */
+        nStaleSyncSuppressedCount.store(0);
+        nStaleSyncLastLogTime.store(0);
 
         /* Set the sync session-id. */
         TAO::Ledger::nSyncSession.store(nCurrentSession);
