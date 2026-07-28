@@ -20,7 +20,7 @@ ________________________________________________________________________________
  * Tests exercise the guard decision function directly via the publicly accessible
  * global atomics rather than instantiating real network connections.
  *
- * Problem context (PR #XXX):
+ * Problem context:
  *   After a sync-node switch the old peer's already-enqueued SYNC response cannot
  *   be cancelled server-side (the LIST/SYNC loop runs synchronously on the far
  *   node's DataThread).  The receiver-side guard

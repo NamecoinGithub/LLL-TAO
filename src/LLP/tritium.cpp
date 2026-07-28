@@ -3185,18 +3185,28 @@ namespace LLP
                              *
                              * Rate-limiting: log only on the first occurrence per stale burst,
                              * then once every STALE_SYNC_LOG_INTERVAL_SECONDS with a suppressed-
-                             * count summary.  Never emit one warning per packet. */
+                             * count summary.  Never emit one warning per packet.
+                             *
+                             * Thread safety:
+                             *   - operator++() is an atomic fetch_add, so nTotal is exact.
+                             *   - compare_exchange_strong ensures exactly one thread wins each
+                             *     log-slot, preventing duplicate log lines at interval boundaries.
+                             *   - exchange(0) atomically captures and resets the counter, so the
+                             *     reported count covers every increment since the previous reset. */
                             const uint64_t nTotal = ++nStaleSyncSuppressedCount;
                             const uint64_t nNow   = runtime::timestamp();
-                            if(nTotal == 1 || nNow >= nStaleSyncLastLogTime.load() + STALE_SYNC_LOG_INTERVAL_SECONDS)
+                            uint64_t nLast = nStaleSyncLastLogTime.load();
+                            if(nTotal == 1 || nNow >= nLast + STALE_SYNC_LOG_INTERVAL_SECONDS)
                             {
-                                nStaleSyncLastLogTime.store(nNow);
-                                debug::log(1, FUNCTION,
-                                    "ignored ", nTotal, " stale SYNC block(s) from old session ",
-                                    std::hex, nCurrentSession,
-                                    " (active sync_session=", TAO::Ledger::nSyncSession.load(),
-                                    std::dec, " synchronized=", fSynchronized.load(), ")");
-                                nStaleSyncSuppressedCount.store(0);
+                                if(nStaleSyncLastLogTime.compare_exchange_strong(nLast, nNow))
+                                {
+                                    const uint64_t nSuppressed = nStaleSyncSuppressedCount.exchange(0);
+                                    debug::log(1, FUNCTION,
+                                        "ignored ", nSuppressed, " stale SYNC block(s) from old session ",
+                                        std::hex, nCurrentSession,
+                                        " (active sync_session=", TAO::Ledger::nSyncSession.load(),
+                                        std::dec, " synchronized=", fSynchronized.load(), ")");
+                                }
                             }
                             break;
                         }
