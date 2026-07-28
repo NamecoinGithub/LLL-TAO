@@ -4481,7 +4481,7 @@ namespace LLP
                     if(pcurrent)
                     {
                         debug::log(1, FUNCTION,
-                            "old sync session ", std::hex, nSyncSession, std::dec,
+                            "old sync session ", std::hex, pcurrent->nCurrentSession, std::dec,
                             " teardown: unsubscribing LASTINDEX/BESTCHAIN");
 
                         /* Remove sync-only subscriptions from the old peer.  This prevents
