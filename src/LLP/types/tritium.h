@@ -819,8 +819,8 @@ namespace LLP
          *
          *  Open a bounded per-peer response window that authorises incoming raw
          *  TYPES::TRANSACTION messages expected as part of a SPECIFIER::TRANSACTIONS
-         *  block response.  Called immediately before queueing the corresponding
-         *  ACTION::GET or ACTION::LIST request to this peer.
+         *  block response.  Called only after the corresponding ACTION::GET or
+         *  ACTION::LIST request has been successfully queued to this peer.
          *
          *  Any previously active window on this peer is replaced.
          *

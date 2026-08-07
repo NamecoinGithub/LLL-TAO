@@ -2677,28 +2677,15 @@ namespace LLP
                                      * sending it here causes "unsolicited sync block" drops
                                      * and DISCONNECT::FORCE on an already-synced peer. */
                                     const uint1024_t hashTarget = TAO::Ledger::ChainState::hashBestChain.load();
-                                    const uint64_t nWindowRequest = !config::fClient.load()
-                                       ? OpenTxResponseWindow(TxResponseKind::LIST, hashTarget, hashBestChain)
-                                       : 0;
-                                    try
-                                    {
-                                    if(!PushMessage(ACTION::LIST,
+                                    if(PushMessage(ACTION::LIST,
                                        config::fClient.load() ? uint8_t(SPECIFIER::CLIENT) : uint8_t(SPECIFIER::TRANSACTIONS),
                                        uint8_t(TYPES::BLOCK),
                                        uint8_t(TYPES::LOCATOR),
                                        TAO::Ledger::Locator(hashTarget),
                                        uint1024_t(hashBestChain)
-                                    ))
+                                    ) && !config::fClient.load())
                                     {
-                                        if(nWindowRequest != 0)
-                                            RollbackTxResponseWindow(nWindowRequest);
-                                    }
-                                    }
-                                    catch(...)
-                                    {
-                                       if(nWindowRequest != 0)
-                                           RollbackTxResponseWindow(nWindowRequest);
-                                       throw;
+                                        OpenTxResponseWindow(TxResponseKind::LIST, hashTarget, hashBestChain);
                                     }
                                 }
                             }
@@ -2977,18 +2964,10 @@ namespace LLP
                                 {
                                     try
                                     {
-                                        const uint64_t nWindowRequest =
+                                        if(pnode->PushMessage(ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS),
+                                            uint8_t(TYPES::BLOCK), block.hashMissing))
+                                        {
                                             pnode->OpenTxResponseWindow(TxResponseKind::GET, block.hashMissing);
-                                        try
-                                        {
-                                            if(!pnode->PushMessage(ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS),
-                                                uint8_t(TYPES::BLOCK), block.hashMissing))
-                                                pnode->RollbackTxResponseWindow(nWindowRequest);
-                                        }
-                                        catch(...)
-                                        {
-                                            pnode->RollbackTxResponseWindow(nWindowRequest);
-                                            throw;
                                         }
                                     }
                                     catch(const std::exception& e)
@@ -3058,28 +3037,15 @@ namespace LLP
                                             TAO::Ledger::ChainState::hashBestChain.load();
                                         const uint1024_t hashStop =
                                             hashBestChain != 0 ? hashBestChain : hashBlock;
-                                        const uint64_t nWindowRequest = !config::fClient.load()
-                                            ? OpenTxResponseWindow(TxResponseKind::LIST, hashTarget, hashStop)
-                                            : 0;
-                                        try
-                                        {
-                                        if(!PushMessage(ACTION::LIST,
+                                        if(PushMessage(ACTION::LIST,
                                             config::fClient.load() ? uint8_t(SPECIFIER::CLIENT) : uint8_t(SPECIFIER::TRANSACTIONS),
                                             uint8_t(TYPES::BLOCK),
                                             uint8_t(TYPES::LOCATOR),
                                             TAO::Ledger::Locator(hashTarget),
                                             uint1024_t(hashStop)
-                                        ))
+                                        ) && !config::fClient.load())
                                         {
-                                            if(nWindowRequest != 0)
-                                                RollbackTxResponseWindow(nWindowRequest);
-                                        }
-                                        }
-                                        catch(...)
-                                        {
-                                            if(nWindowRequest != 0)
-                                                RollbackTxResponseWindow(nWindowRequest);
-                                            throw;
+                                            OpenTxResponseWindow(TxResponseKind::LIST, hashTarget, hashStop);
                                         }
                                     }
 
@@ -3132,28 +3098,15 @@ namespace LLP
 
                                     const uint1024_t hashLocator =
                                         TAO::Ledger::ChainState::hashBestChain.load();
-                                    const uint64_t nWindowRequest = !config::fClient.load()
-                                        ? OpenTxResponseWindow(TxResponseKind::LIST, hashLocator, hashTarget)
-                                        : 0;
-                                    try
-                                    {
-                                    if(!PushMessage(ACTION::LIST,
+                                    if(PushMessage(ACTION::LIST,
                                        config::fClient.load() ? uint8_t(SPECIFIER::CLIENT) : uint8_t(SPECIFIER::TRANSACTIONS),
                                         uint8_t(TYPES::BLOCK),
                                         uint8_t(TYPES::LOCATOR),
                                         TAO::Ledger::Locator(hashLocator),
                                         uint1024_t(hashTarget)
-                                    ))
+                                    ) && !config::fClient.load())
                                     {
-                                        if(nWindowRequest != 0)
-                                            RollbackTxResponseWindow(nWindowRequest);
-                                    }
-                                    }
-                                    catch(...)
-                                    {
-                                        if(nWindowRequest != 0)
-                                            RollbackTxResponseWindow(nWindowRequest);
-                                        throw;
+                                        OpenTxResponseWindow(TxResponseKind::LIST, hashLocator, hashTarget);
                                     }
                                 }
 
@@ -3167,20 +3120,12 @@ namespace LLP
                                     {
                                         try
                                         {
-                                            const uint64_t nWindowRequest =
-                                                pRandomNode->OpenTxResponseWindow(TxResponseKind::GET, hashBlock);
-                                            try
-                                            {
-                                            if(!pRandomNode->PushMessage(ACTION::GET,
+                                            if(pRandomNode->PushMessage(ACTION::GET,
                                                 uint8_t(SPECIFIER::TRANSACTIONS),
                                                 uint8_t(TYPES::BLOCK),
                                                 hashBlock))
-                                                    pRandomNode->RollbackTxResponseWindow(nWindowRequest);
-                                            }
-                                            catch(...)
                                             {
-                                                pRandomNode->RollbackTxResponseWindow(nWindowRequest);
-                                                throw;
+                                                pRandomNode->OpenTxResponseWindow(TxResponseKind::GET, hashBlock);
                                             }
                                         }
                                         catch(const std::exception& e)
