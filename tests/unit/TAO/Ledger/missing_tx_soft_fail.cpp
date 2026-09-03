@@ -1393,6 +1393,115 @@ TEST_CASE("AttemptPeerBestChainRecovery walks orphan pool for connectable ancest
 }
 
 
+TEST_CASE("Connectable incomplete orphan is retained and later redelivery drains descendants",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4100001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 210;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    MissingBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 211;
+    blockA.nNonce = 11001;
+    const uint1024_t hashA = blockA.GetHash();
+
+    PassBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 212;
+    blockB.nNonce = 11002;
+    const uint1024_t hashB = blockB.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashB, 212, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
+
+    /* Re-deliver the same block hash with its formerly missing data available. */
+    PassBlock resolvedA;
+    static_cast<TAO::Ledger::Block&>(resolvedA) = blockA;
+    REQUIRE(resolvedA.GetHash() == hashA);
+
+    uint8_t nStatus = 0;
+    TAO::Ledger::Process(resolvedA, nStatus);
+
+    REQUIRE((nStatus & TAO::Ledger::PROCESS::ACCEPTED) != 0);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
+TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4200001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 220;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    RejectBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 221;
+    blockA.nNonce = 12001;
+    const uint1024_t hashA = blockA.GetHash();
+
+    PassBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 222;
+    blockB.nNonce = 12002;
+    const uint1024_t hashB = blockB.GetHash();
+
+    PassBlock blockC;
+    blockC.nVersion = 4;
+    blockC.hashPrevBlock = hashB;
+    blockC.nHeight = 223;
+    blockC.nNonce = 12003;
+    const uint1024_t hashC = blockC.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapCheckRejects.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashC, 223, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapCheckRejects.clear();
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
 TEST_CASE("AttemptPeerBestChainRecovery requests branch sync when tip far ahead",
     "[ledger][process][a1]")
 {

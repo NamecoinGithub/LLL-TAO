@@ -96,6 +96,7 @@ namespace LLP
      * cheap clear-on-cap pattern already used for mapLastMissing. */
     static constexpr uint32_t CAP_WARNING_THROTTLE_MAX_ENTRIES = 256;
     static constexpr uint64_t CAP_WARNING_THROTTLE_SECONDS     = 60;
+    static std::mutex CAP_WARNING_THROTTLE_MUTEX;
     static std::map<uint1024_t, uint64_t> mapCapWarningLastTime;
 
     /* Per-stale-session throttled diagnostics for ignored SYNC blocks.
@@ -3011,6 +3012,7 @@ namespace LLP
                                     const uint64_t nNow = runtime::timestamp();
                                     bool fEmitWarning = false;
                                     {
+                                        LOCK(CAP_WARNING_THROTTLE_MUTEX);
                                         auto itW = mapCapWarningLastTime.find(hashBlock);
                                         if(itW == mapCapWarningLastTime.end()
                                         || nNow - itW->second >= CAP_WARNING_THROTTLE_SECONDS)

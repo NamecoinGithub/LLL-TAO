@@ -214,6 +214,60 @@ namespace TAO
 
         namespace
         {
+            void FinalizeExtractedOrphan(const TAO::Ledger::Block& block,
+                                         const uint8_t nStatus)
+            {
+                const uint1024_t hashBlock = block.GetHash();
+                if(nStatus & (PROCESS::ACCEPTED | PROCESS::DUPLICATE))
+                    return;
+
+                if(nStatus & (PROCESS::REJECTED | PROCESS::IGNORED))
+                {
+                    const uint64_t nPruned = mapOrphans.RemoveSubtree(hashBlock);
+                    mapLastMissing.erase(hashBlock);
+                    mapMissingBranchEscalations.erase(hashBlock);
+                    setUnrecoverableBlocks.erase(hashBlock);
+                    mapMissingTxCache.erase(hashBlock);
+                    mapLastMissingProcessTime.erase(hashBlock);
+
+                    debug::warning(FUNCTION, "pruned rejected connectable orphan subtree root=",
+                        hashBlock.SubString(), " descendants=", nPruned);
+                    return;
+                }
+
+                if(!LLD::Ledger->HasBlock(hashBlock) && !mapOrphans.Contains(hashBlock))
+                    mapOrphans.Insert(block);
+            }
+
+
+            class ExtractedOrphanGuard
+            {
+                const TAO::Ledger::Block& block;
+                const uint8_t& nStatus;
+                bool fActive;
+
+            public:
+                ExtractedOrphanGuard(const TAO::Ledger::Block& blockIn,
+                                     const uint8_t& nStatusIn)
+                : block(blockIn)
+                , nStatus(nStatusIn)
+                , fActive(false)
+                {
+                }
+
+                ~ExtractedOrphanGuard()
+                {
+                    if(fActive)
+                        FinalizeExtractedOrphan(block, nStatus);
+                }
+
+                void Activate()
+                {
+                    fActive = true;
+                }
+            };
+
+
             /** LocalMinedBlockRecord
              *
              *  Memory-only watch record for locally mined blocks that have been
@@ -651,6 +705,11 @@ namespace TAO
                             " height=", ChainState::nBestHeight.load(),
                             " source=orphan-pool-walkback");
                         return PeerBestRecoveryResult::PROGRESS;
+                    }
+
+                    {
+                        LOCK(PROCESSING_MUTEX);
+                        FinalizeExtractedOrphan(*pConnectable, nStatus);
                     }
 
                     return PeerBestRecoveryResult::SKIPPED;
@@ -1194,6 +1253,10 @@ namespace TAO
             /* Get the block's hash. */
             const uint1024_t hashBlock = block.GetHash();
 
+            /* If a retained orphan's parent has arrived, retry validation but
+             * guarantee that transient results restore the extracted root. */
+            ExtractedOrphanGuard extractedOrphan(block, nStatus);
+
             const auto incrementMissingEscalations = [](const uint1024_t& hash)
             {
                 if(mapMissingBranchEscalations.size() >= MAX_MISSING_ESCALATION_MAP_ENTRIES
@@ -1303,8 +1366,18 @@ namespace TAO
 
                 if(mapOrphans.Contains(hashBlock))
                 {
-                    nStatus |= PROCESS::ORPHAN;
-                    return;
+                    const TAO::Ledger::Block* pOrphan = mapOrphans.Get(hashBlock);
+                    if(!pOrphan || !LLD::Ledger->HasBlock(pOrphan->hashPrevBlock))
+                    {
+                        nStatus |= PROCESS::ORPHAN;
+                        return;
+                    }
+
+                    /* Its parent arrived since insertion. Remove the retained
+                     * copy and let this delivery run through validation. If it
+                     * remains incomplete, the caller/recovery path requeues it. */
+                    mapOrphans.Remove(hashBlock);
+                    extractedOrphan.Activate();
                 }
 
                 /* Check for orphan. */
