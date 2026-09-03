@@ -191,6 +191,7 @@ namespace LLD
             std::fstream stream(index, std::ios::out | std::ios::binary | std::ios::trunc);
             stream.write((char*)&vSpace[0], vSpace.size());
             stream.close();
+            fDirectoryDirty = true;
 
             /* Debug output showing generation of disk index. */
             debug::log(0, FUNCTION, "Generated Disk Index of ", vSpace.size(), " bytes");
@@ -231,6 +232,7 @@ namespace LLD
             std::fstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
             stream.write((char*)&vSpace[0], vSpace.size());
             stream.close();
+            fDirectoryDirty = true;
 
             /* Debug output showing generating of the hashmap file. */
             debug::log(0, FUNCTION, "Generated Disk Hash Map 0 of ", vSpace.size(), " bytes");
@@ -560,13 +562,12 @@ namespace LLD
     }
 
 
-    /* Reset durability tracking before applying a transaction. */
+    /* Reset file tracking while preserving unsynced directory metadata. */
     void BinaryHashMap::BeginDurabilityTracking()
     {
         LOCK(KEY_MUTEX);
 
         setDirtyFiles.clear();
-        fDirectoryDirty = false;
     }
 
 

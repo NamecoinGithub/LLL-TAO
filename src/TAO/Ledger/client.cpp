@@ -45,6 +45,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/mempool.h>
 
 #include <Util/include/string.h>
+#include <Util/include/signals.h>
 
 
 
@@ -694,7 +695,11 @@ namespace TAO
             if(LLD::Client->ReadBlock(ChainState::Genesis(), stateGenesis))
                 ChainState::tStateGenesis = stateGenesis;
             else
-                debug::error(FUNCTION, "failed to refresh committed genesis state");
+            {
+                ::Shutdown();
+                return debug::error(FUNCTION,
+                    "failed to refresh committed genesis state; shutdown requested");
+            }
 
             /* Set the best chain variables. */
             ChainState::tStateBest          = *this;
