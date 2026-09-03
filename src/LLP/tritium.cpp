@@ -2281,9 +2281,11 @@ namespace LLP
                 std::set<uint1024_t> setBlockInventoryGets;
 
                 /* Foreign BESTCHAIN tips seen in this NOTIFY.  Recovery is
-                 * deferred until after WritePacket(ssResponse) so the near-tip
-                 * inventory-owned gate can require a successfully queued GET. */
-                std::vector<std::pair<uint1024_t, uint32_t>> vPendingBestChainRecovery;
+                 * deferred until after the packet is fully parsed and
+                 * WritePacket(ssResponse) has run so policy uses the latest
+                 * BESTHEIGHT and the near-tip inventory-owned gate can require
+                 * a successfully queued GET. */
+                std::vector<uint1024_t> vPendingBestChainRecovery;
 
                 /* Set our max limits to 100 notifications per packet. */
                 uint32_t nLimits = 0;
@@ -2678,8 +2680,7 @@ namespace LLP
                             if(hashBestChain != 0
                             && hashBestChain != TAO::Ledger::ChainState::hashBestChain.load())
                             {
-                                vPendingBestChainRecovery.emplace_back(
-                                    hashBestChain, nCurrentHeight);
+                                vPendingBestChainRecovery.push_back(hashBestChain);
                             }
 
                             /* A sync peer is complete only when its advertised best
@@ -2779,12 +2780,12 @@ namespace LLP
 
                 /* Run deferred BESTCHAIN recovery now that inventory GET
                  * queueing outcome is known. */
-                for(const auto& pending : vPendingBestChainRecovery)
+                for(const auto& hashPending : vPendingBestChainRecovery)
                 {
                     const bool fMatchingBlockGet = fInventoryGetQueued
-                        && (setBlockInventoryGets.count(pending.first) != 0);
+                        && (setBlockInventoryGets.count(hashPending) != 0);
                     TAO::Ledger::RequestBestChainBranchRecovery(
-                        pending.first, pending.second, NODE.c_str(), this,
+                        hashPending, nCurrentHeight, NODE.c_str(), this,
                         /*pfBranchSyncQueued=*/nullptr, fMatchingBlockGet);
                 }
 
