@@ -64,28 +64,32 @@ namespace LLD
     }
 
 
-    static void ReleasePhysicalTransactions(const uint16_t nInstances)
+    static bool ReleasePhysicalTransactions(const uint16_t nInstances)
     {
+        bool fReleased = true;
+
         if(Logical && (nInstances & INSTANCES::LOGICAL))
-            Logical->TxnRelease();
+            fReleased = Logical->TxnRelease() && fReleased;
 
         if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->TxnRelease();
+            fReleased = Contract->TxnRelease() && fReleased;
 
         if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->TxnRelease();
+            fReleased = Register->TxnRelease() && fReleased;
 
         if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->TxnRelease();
+            fReleased = Ledger->TxnRelease() && fReleased;
 
         if(Client && (nInstances & INSTANCES::CLIENT))
-            Client->TxnRelease();
+            fReleased = Client->TxnRelease() && fReleased;
 
         if(Trust && (nInstances & INSTANCES::TRUST))
-            Trust->TxnRelease();
+            fReleased = Trust->TxnRelease() && fReleased;
 
         if(Legacy && (nInstances & INSTANCES::LEGACY))
-            Legacy->TxnRelease();
+            fReleased = Legacy->TxnRelease() && fReleased;
+
+        return fReleased;
     }
 
 
@@ -296,7 +300,8 @@ namespace LLD
 
             /* Clear either the fully applied journals or an incomplete transaction
              * that never reached a durable decision on every participant. */
-            ReleasePhysicalTransactions(INSTANCES::MERKLE);
+            if(!ReleasePhysicalTransactions(INSTANCES::MERKLE))
+                return debug::error(FUNCTION, "failed to durably release client transaction journals");
         }
 
         /* Regular mainnet mode recovery. */
@@ -357,7 +362,8 @@ namespace LLD
 
             /* Clear either the fully applied journals or an incomplete transaction
              * that never reached a durable decision on every participant. */
-            ReleasePhysicalTransactions(INSTANCES::CONSENSUS);
+            if(!ReleasePhysicalTransactions(INSTANCES::CONSENSUS))
+                return debug::error(FUNCTION, "failed to durably release consensus transaction journals");
         }
 
         return true;
@@ -708,7 +714,14 @@ namespace LLD
             Ledger->MemoryCommit();
 
         /* Release the checkpoint markers after every participant succeeds. */
-        ReleasePhysicalTransactions(nReleaseInstances);
+        if(!ReleasePhysicalTransactions(nReleaseInstances))
+        {
+            fTxnRecoveryRequired.store(true);
+            ReleaseTransactionOwnership();
+            ::Shutdown();
+            return debug::error(FUNCTION,
+                "failed to durably release transaction journals; shutdown requested");
+        }
         ReleaseTransactionOwnership();
 
         return fAllSucceeded;

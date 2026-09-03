@@ -23,17 +23,68 @@ ________________________________________________________________________________
 #include <Util/include/hex.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <set>
 
 #ifdef WIN32
 #include <io.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
 namespace LLD
 {
+    namespace
+    {
+        bool SyncFile(const std::string& strPath)
+        {
+            FILE* stream = std::fopen(strPath.c_str(), "rb+");
+            if(!stream)
+                return false;
+
+            #ifdef WIN32
+            const bool fSynced = (_commit(_fileno(stream)) == 0);
+            #else
+            const bool fSynced = (fsync(fileno(stream)) == 0);
+            #endif
+
+            return (std::fclose(stream) == 0 && fSynced);
+        }
+
+
+        bool SyncDirectory(const std::string& strPath)
+        {
+            std::error_code error;
+            std::filesystem::directory_iterator iterator(strPath, error);
+            if(error)
+                return false;
+
+            for(const auto& entry : iterator)
+            {
+                if(entry.is_regular_file(error) && !SyncFile(entry.path().string()))
+                    return false;
+
+                if(error)
+                    return false;
+            }
+
+            #ifdef WIN32
+            return true;
+            #else
+            const int nDirectory = open(strPath.c_str(), O_RDONLY);
+            if(nDirectory < 0)
+                return false;
+
+            const bool fSynced = (fsync(nDirectory) == 0);
+            return (close(nDirectory) == 0 && fSynced);
+            #endif
+        }
+    }
+
+
 
     /* The Database Constructor. To determine file location and the Bytes per Record. */
     template<class KeychainType, class CacheType>
@@ -710,7 +761,7 @@ namespace LLD
 
     /*  Release the transaction checkpoint. */
     template<class KeychainType, class CacheType>
-    void SectorDatabase<KeychainType, CacheType>::TxnRelease()
+    bool SectorDatabase<KeychainType, CacheType>::TxnRelease()
     {
         LOCK(TRANSACTION_MUTEX);
 
@@ -721,9 +772,23 @@ namespace LLD
         /** Set the transaction pointer to null also acting like a flag **/
         pTransaction = nullptr;
 
-        /* Delete the transaction journal file. */
-        std::ofstream stream(debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat"), std::ios::trunc);
-        stream.close();
+        /* Durably truncate the transaction journal. */
+        const std::string strJournal =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+        FILE* stream = std::fopen(strJournal.c_str(), "wb");
+        if(!stream)
+            return debug::error(FUNCTION, "failed to truncate journal file");
+
+        #ifdef WIN32
+        const bool fSynced = (_commit(_fileno(stream)) == 0);
+        #else
+        const bool fSynced = (fsync(fileno(stream)) == 0);
+        #endif
+
+        if(std::fclose(stream) != 0 || !fSynced)
+            return debug::error(FUNCTION, "failed to sync truncated journal file");
+
+        return true;
     }
 
 
@@ -745,10 +810,21 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to erase from keychain");
         }
 
+        /* Track every sector file changed by this transaction. */
+        std::set<uint16_t> setSectorFiles;
+
         /* Commit the sector data. */
         for(const auto& item : pTransaction->mapTransactions)
+        {
             if(!Force(item.first, item.second))
                 return debug::error(FUNCTION, "failed to commit sector data");
+
+            SectorKey cKey;
+            if(!pSectorKeys->Get(item.first, cKey))
+                return debug::error(FUNCTION, "failed to read committed sector key");
+
+            setSectorFiles.insert(cKey.nSectorFile);
+        }
 
         /* Commit keychain entries. */
         for(const auto& item : pTransaction->setKeychain)
@@ -780,6 +856,28 @@ namespace LLD
             if(!pSectorKeys->Put(cKey))
                 return debug::error(FUNCTION, "failed to write indexing entry");
         }
+
+        /* Make the applied data and keychain durable before its journal can be released. */
+        for(const uint16_t nSectorFile : setSectorFiles)
+        {
+            const std::string strPath = debug::safe_printstr(
+                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
+            if(!SyncFile(strPath))
+                return debug::error(FUNCTION, "failed to sync sector file");
+        }
+
+        #ifndef WIN32
+        const int nDataDirectory = open(strBaseLocation.c_str(), O_RDONLY);
+        if(nDataDirectory < 0)
+            return debug::error(FUNCTION, "failed to open sector directory");
+
+        const bool fDataDirectorySynced = (fsync(nDataDirectory) == 0);
+        if(close(nDataDirectory) != 0 || !fDataDirectorySynced)
+            return debug::error(FUNCTION, "failed to sync sector directory");
+        #endif
+
+        if(!SyncDirectory(debug::safe_printstr(config::GetDataDir(), strName, "/keychain/")))
+            return debug::error(FUNCTION, "failed to sync keychain files");
 
         /* Cleanup the transaction object. */
         delete pTransaction;

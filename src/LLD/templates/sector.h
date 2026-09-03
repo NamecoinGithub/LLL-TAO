@@ -831,7 +831,7 @@ namespace LLD
          *  Release the transaction checkpoint.
          *
          **/
-        void TxnRelease();
+        bool TxnRelease();
 
 
         /** TxnCommit
