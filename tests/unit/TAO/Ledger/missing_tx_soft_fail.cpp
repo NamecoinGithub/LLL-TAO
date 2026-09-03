@@ -42,8 +42,10 @@ ________________________________________________________________________________
 #include <Util/templates/datastream.h>
 
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstdint>
 #include <cstring>
@@ -2311,33 +2313,63 @@ TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
 #ifndef WIN32
     LedgerGuard env;
 
-    TAO::Ledger::mapOrphans.Clear();
-    TAO::Ledger::mapLastOrphanRequest.clear();
-
-    const uint32_t nSavedBestHeight =
-        TAO::Ledger::ChainState::nBestHeight.load();
-    const uint32_t nSavedMaxPeerHeight =
-        TAO::Ledger::ChainState::nMaxPeerHeight.load();
-    const uint64_t nSavedSyncSession = TAO::Ledger::nSyncSession.load();
-    const bool fSavedClient = config::fClient.load();
-
     const uint32_t nLocalHeight = 1000;
     const uint32_t nPeerHeight =
         nLocalHeight + TAO::Ledger::BESTCHAIN_NEAR_TIP_HEIGHT_SLACK + 1;
     const uint1024_t hashGapTip(0xBC01000000000007ULL);
 
-    TAO::Ledger::ChainState::nBestHeight.store(nLocalHeight);
-    TAO::Ledger::nSyncSession.store(0);
-    config::fClient.store(false);
+    struct RecoveryStateGuard
+    {
+        const uint32_t nBestHeight;
+        const uint32_t nMaxPeerHeight;
+        const uint64_t nSyncSession;
+        const bool fClient;
+        std::map<uint1024_t, uint64_t> mapLastOrphanRequest;
+
+        explicit RecoveryStateGuard(uint32_t nHeight)
+        : nBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
+        , nMaxPeerHeight(TAO::Ledger::ChainState::nMaxPeerHeight.load())
+        , nSyncSession(TAO::Ledger::nSyncSession.load())
+        , fClient(config::fClient.load())
+        , mapLastOrphanRequest(TAO::Ledger::mapLastOrphanRequest)
+        {
+            TAO::Ledger::ChainState::nBestHeight.store(nHeight);
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(nHeight);
+            TAO::Ledger::nSyncSession.store(0);
+            TAO::Ledger::mapLastOrphanRequest.clear();
+            config::fClient.store(false);
+        }
+
+        ~RecoveryStateGuard()
+        {
+            config::fClient.store(fClient);
+            TAO::Ledger::nSyncSession.store(nSyncSession);
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(nMaxPeerHeight);
+            TAO::Ledger::ChainState::nBestHeight.store(nBestHeight);
+            TAO::Ledger::mapLastOrphanRequest = std::move(mapLastOrphanRequest);
+        }
+    } stateGuard(nLocalHeight);
 
     REQUIRE_FALSE(LLD::Ledger->HasBlock(hashGapTip));
 
-    int fds[2] = {-1, -1};
-    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-    REQUIRE(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
+    struct SocketPairGuard
+    {
+        int fds[2] = {-1, -1};
+
+        ~SocketPairGuard()
+        {
+            if(fds[0] >= 0)
+                close(fds[0]);
+            if(fds[1] >= 0)
+                close(fds[1]);
+        }
+    } socketPair;
+
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, socketPair.fds) == 0);
+    REQUIRE(fcntl(socketPair.fds[1], F_SETFL, O_NONBLOCK) == 0);
 
     LLP::TritiumNode node;
-    node.fd = fds[1];
+    node.fd = socketPair.fds[1];
     node.events = POLLIN;
     node.nCurrentSession = 1;
     node.nCurrentHeight = nLocalHeight;
@@ -2353,7 +2385,7 @@ TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
     }
 
     std::vector<uint8_t> vDiscard(4096);
-    while(recv(fds[0], vDiscard.data(), vDiscard.size(), MSG_DONTWAIT) > 0)
+    while(recv(socketPair.fds[0], vDiscard.data(), vDiscard.size(), MSG_DONTWAIT) > 0)
         ;
 
     /* Dispatch order is BLOCK -> BESTCHAIN -> BESTHEIGHT.  Recovery must use
@@ -2384,7 +2416,8 @@ TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
         std::vector<uint8_t> buf(65536);
         for(;;)
         {
-            const ssize_t n = recv(fds[0], buf.data(), buf.size(), MSG_DONTWAIT);
+            const ssize_t n =
+                recv(socketPair.fds[0], buf.data(), buf.size(), MSG_DONTWAIT);
             if(n <= 0)
                 break;
             vSent.insert(vSent.end(), buf.begin(), buf.begin() + n);
@@ -2410,16 +2443,6 @@ TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
     vExpected.insert(vExpected.end(), vExpectedList.begin(), vExpectedList.end());
 
     REQUIRE(vSent == vExpected);
-
-    node.fd = -1;
-    close(fds[0]);
-    close(fds[1]);
-
-    config::fClient.store(fSavedClient);
-    TAO::Ledger::nSyncSession.store(nSavedSyncSession);
-    TAO::Ledger::ChainState::nMaxPeerHeight.store(nSavedMaxPeerHeight);
-    TAO::Ledger::ChainState::nBestHeight.store(nSavedBestHeight);
-    TAO::Ledger::mapLastOrphanRequest.clear();
 #else
     SUCCEED("packet-level socket regression is POSIX-only");
 #endif
