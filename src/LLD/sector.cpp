@@ -55,33 +55,6 @@ namespace LLD
         }
 
 
-        bool SyncDirectory(const std::string& strPath)
-        {
-            std::error_code error;
-            std::filesystem::directory_iterator iterator(strPath, error);
-            if(error)
-                return false;
-
-            for(const auto& entry : iterator)
-            {
-                if(entry.is_regular_file(error) && !SyncFile(entry.path().string()))
-                    return false;
-
-                if(error)
-                    return false;
-            }
-
-            #ifdef WIN32
-            return true;
-            #else
-            const int nDirectory = open(strPath.c_str(), O_RDONLY);
-            if(nDirectory < 0)
-                return false;
-
-            const bool fSynced = (fsync(nDirectory) == 0);
-            return (close(nDirectory) == 0 && fSynced);
-            #endif
-        }
     }
 
 
@@ -362,6 +335,8 @@ namespace LLD
                 return debug::error(FUNCTION, "only ", pstream->gcount(), "/", vData.size(), " bytes written");
 
             pstream->flush();
+            if(!*pstream)
+                return debug::error(FUNCTION, "failed to flush sector file");
 
             /* Records flushed indicator. */
             ++nRecordsFlushed;
@@ -437,6 +412,8 @@ namespace LLD
                     return debug::error(FUNCTION, "only ", pstream->gcount(), "/", vData.size(), " bytes written");
 
                 pstream->flush();
+                if(!*pstream)
+                    return debug::error(FUNCTION, "failed to flush sector file");
 
                 /* Get current size */
                 const uint64_t nSize =
@@ -802,6 +779,8 @@ namespace LLD
         if(!pTransaction)
             return false;
 
+        pSectorKeys->BeginDurabilityTracking();
+
         /* Erase data set to be removed. */
         for(const auto& item : pTransaction->setErasedData)
         {
@@ -867,16 +846,19 @@ namespace LLD
         }
 
         #ifndef WIN32
-        const int nDataDirectory = open(strBaseLocation.c_str(), O_RDONLY);
-        if(nDataDirectory < 0)
-            return debug::error(FUNCTION, "failed to open sector directory");
+        if(!setSectorFiles.empty())
+        {
+            const int nDataDirectory = open(strBaseLocation.c_str(), O_RDONLY);
+            if(nDataDirectory < 0)
+                return debug::error(FUNCTION, "failed to open sector directory");
 
-        const bool fDataDirectorySynced = (fsync(nDataDirectory) == 0);
-        if(close(nDataDirectory) != 0 || !fDataDirectorySynced)
-            return debug::error(FUNCTION, "failed to sync sector directory");
+            const bool fDataDirectorySynced = (fsync(nDataDirectory) == 0);
+            if(close(nDataDirectory) != 0 || !fDataDirectorySynced)
+                return debug::error(FUNCTION, "failed to sync sector directory");
+        }
         #endif
 
-        if(!SyncDirectory(debug::safe_printstr(config::GetDataDir(), strName, "/keychain/")))
+        if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
 
         /* Cleanup the transaction object. */

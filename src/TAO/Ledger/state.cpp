@@ -859,8 +859,8 @@ namespace TAO
                  * A future caller that forgets to open a transaction is self-healed here
                  * instead of silently hitting TxnCommit with no active transaction. */
                 const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-                if(fOwnedTxn)
-                    LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "failed to begin best-chain transaction");
 
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();

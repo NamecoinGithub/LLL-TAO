@@ -243,7 +243,8 @@ namespace TAO
                                 " REVERTING TO HARDCODED Ancestor ", iAncestor->first, " Hash ", iAncestor->second.SubString());
 
                             /* Set the best to older block. */
-                            LLD::TxnBegin();
+                            if(!LLD::TxnBegin())
+                                return debug::error(FUNCTION, "failed to begin checkpoint revert transaction");
 
                             /* Bug fix (call site #4): check return value before committing.
                              * A failed SetBest() must abort the transaction to avoid committing
@@ -286,7 +287,8 @@ namespace TAO
                 }
 
                 /* Set the best to older block. */
-                LLD::TxnBegin();
+                if(!LLD::TxnBegin())
+                    return debug::error(FUNCTION, "failed to begin rewind transaction");
 
                 /* Abort our transaction if we fail to rollback. */
                 if(!state.SetBest())

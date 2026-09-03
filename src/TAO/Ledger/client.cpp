@@ -606,7 +606,10 @@ namespace TAO
             /* Keep all client-chain link updates and the best pointer in one recoverable
              * transaction. Empty MERKLE participants provide a complete recovery decision. */
             if(!LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
-                LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+            {
+                if(!LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                    return debug::error(FUNCTION, "failed to begin client-chain transaction");
+            }
 
             /* Disconnect given blocks. */
             for(auto& state : vDisconnect)

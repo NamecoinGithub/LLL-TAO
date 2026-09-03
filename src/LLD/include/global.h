@@ -117,7 +117,7 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      */
-    void TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
     /** Txn Abort
@@ -125,7 +125,7 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      */
-    void TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
     /** Txn Commit
@@ -148,9 +148,12 @@ namespace LLD
         TransactionGuard(const TransactionGuard&) = delete;
         TransactionGuard& operator=(const TransactionGuard&) = delete;
 
+        explicit operator bool() const;
+
     private:
         const uint8_t nFlags;
         const uint16_t nInstances;
+        const bool fAcquired;
     };
 
 

@@ -311,7 +311,12 @@ int main(int argc, char** argv)
         }
         
         /* Initialize ChainState to access block data */
-        TAO::Ledger::ChainState::Initialize();
+        if(!TAO::Ledger::ChainState::Initialize())
+        {
+            LLD::Shutdown();
+            debug::Shutdown();
+            return 1;
+        }
         
         /* Run comprehensive forensic analysis */
         LLP::ForensicForkInfo info = LLP::ChannelStateManager::AnalyzeChannelHeightDiscrepancy();
@@ -338,7 +343,12 @@ int main(int argc, char** argv)
         }
         
         /* Initialize ChainState to access block data */
-        TAO::Ledger::ChainState::Initialize();
+        if(!TAO::Ledger::ChainState::Initialize())
+        {
+            LLD::Shutdown();
+            debug::Shutdown();
+            return 1;
+        }
         
         /* Get and output statistics */
         std::string strStats = LLP::ChannelStateManager::GetChannelHeightStatistics();
@@ -390,7 +400,13 @@ int main(int argc, char** argv)
 
 
             /* Initialize ChainState. */
-            TAO::Ledger::ChainState::Initialize();
+            if(!TAO::Ledger::ChainState::Initialize())
+            {
+                TAO::Ledger::Dispatch::Shutdown();
+                LLD::Shutdown();
+                debug::Shutdown();
+                return 1;
+            }
 
 
             /* Run our LLD indexing operations. */

@@ -21,7 +21,15 @@ ________________________________________________________________________________
 #include <Util/include/debug.h>
 #include <Util/include/hex.h>
 
+#include <cstdio>
 #include <iomanip>
+
+#ifdef WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace LLD
 {
@@ -37,6 +45,8 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (32)
     , HASHMAP_KEY_ALLOCATION (static_cast<uint16_t>(HASHMAP_MAX_KEY_SIZE + 13))
     , nFlags                 (nFlagsIn)
+    , setDirtyFiles          ( )
+    , fDirectoryDirty        (false)
     , RECORD_MUTEX           (1024)
     {
         Initialize();
@@ -54,6 +64,8 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (map.HASHMAP_MAX_KEY_SIZE)
     , HASHMAP_KEY_ALLOCATION (map.HASHMAP_KEY_ALLOCATION)
     , nFlags                 (map.nFlags)
+    , setDirtyFiles          ( )
+    , fDirectoryDirty        (false)
     , RECORD_MUTEX           (map.RECORD_MUTEX.size())
     {
         Initialize();
@@ -71,6 +83,8 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (std::move(map.HASHMAP_MAX_KEY_SIZE))
     , HASHMAP_KEY_ALLOCATION (std::move(map.HASHMAP_KEY_ALLOCATION))
     , nFlags                 (std::move(map.nFlags))
+    , setDirtyFiles          (std::move(map.setDirtyFiles))
+    , fDirectoryDirty        (map.fDirectoryDirty)
     , RECORD_MUTEX           (map.RECORD_MUTEX.size())
     {
         Initialize();
@@ -88,6 +102,8 @@ namespace LLD
         HASHMAP_MAX_KEY_SIZE   = map.HASHMAP_MAX_KEY_SIZE;
         HASHMAP_KEY_ALLOCATION = map.HASHMAP_KEY_ALLOCATION;
         nFlags                 = map.nFlags;
+        setDirtyFiles.clear();
+        fDirectoryDirty        = false;
 
         Initialize();
 
@@ -106,6 +122,8 @@ namespace LLD
         HASHMAP_MAX_KEY_SIZE   = std::move(map.HASHMAP_MAX_KEY_SIZE);
         HASHMAP_KEY_ALLOCATION = std::move(map.HASHMAP_KEY_ALLOCATION);
         nFlags                 = std::move(map.nFlags);
+        setDirtyFiles          = std::move(map.setDirtyFiles);
+        fDirectoryDirty        = map.fDirectoryDirty;
 
         Initialize();
 
@@ -396,7 +414,11 @@ namespace LLD
                     pstream->seekp (nFilePos, std::ios::beg);
                     pstream->write((char*)&ssKey.Bytes()[0], ssKey.size());
                     pstream->flush();
+                    if(!*pstream)
+                        return debug::error(FUNCTION, "failed to flush hashmap file");
 
+                    setDirtyFiles.insert(debug::safe_printstr(
+                        strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i));
 
                     /* Debug Output of Sector Key Information. */
                     if(config::nVerbose >= 4)
@@ -430,8 +452,15 @@ namespace LLD
             for(uint32_t i = 0; i < HASHMAP_TOTAL_BUCKETS; ++i)
                 stream.write((char*)&vSpace[0], vSpace.size());
 
-            //stream.flush();
+            stream.flush();
+            if(!stream)
+                return debug::error(FUNCTION, "failed to initialize hashmap file");
+
             stream.close();
+            if(!stream)
+                return debug::error(FUNCTION, "failed to close hashmap file");
+
+            fDirectoryDirty = true;
         }
 
         /* Read the State and Size of Sector Header. */
@@ -465,6 +494,10 @@ namespace LLD
         pstream->seekp (nFilePos, std::ios::beg);
         pstream->write((char*)&ssKey.Bytes()[0], ssKey.size());
         pstream->flush();
+        if(!*pstream)
+            return debug::error(FUNCTION, "failed to flush hashmap file");
+
+        setDirtyFiles.insert(file);
 
         /* Check index file handle is open. */
         if(!pindex->is_open())
@@ -482,6 +515,10 @@ namespace LLD
         /* Write the index into hashmap. */
         pindex->write((char*)&vBucket[0], vBucket.size());
         pindex->flush();
+        if(!*pindex)
+            return debug::error(FUNCTION, "failed to flush hashmap index");
+
+        setDirtyFiles.insert(debug::safe_printstr(strBaseLocation, "_hashmap.index"));
 
         /* Debug Output of Sector Key Information. */
         if(config::nVerbose >= 4)
@@ -520,6 +557,56 @@ namespace LLD
             /* Set to next. */
             pnode = pnode->pnext;
         }
+    }
+
+
+    /* Reset durability tracking before applying a transaction. */
+    void BinaryHashMap::BeginDurabilityTracking()
+    {
+        LOCK(KEY_MUTEX);
+
+        setDirtyFiles.clear();
+        fDirectoryDirty = false;
+    }
+
+
+    /* Sync only files touched while applying the current transaction. */
+    bool BinaryHashMap::SyncTouchedFiles()
+    {
+        LOCK(KEY_MUTEX);
+
+        for(const auto& strPath : setDirtyFiles)
+        {
+            FILE* stream = std::fopen(strPath.c_str(), "rb+");
+            if(!stream)
+                return false;
+
+            #ifdef WIN32
+            const bool fSynced = (_commit(_fileno(stream)) == 0);
+            #else
+            const bool fSynced = (fsync(fileno(stream)) == 0);
+            #endif
+
+            if(std::fclose(stream) != 0 || !fSynced)
+                return false;
+        }
+
+        #ifndef WIN32
+        if(fDirectoryDirty)
+        {
+            const int nDirectory = open(strBaseLocation.c_str(), O_RDONLY);
+            if(nDirectory < 0)
+                return false;
+
+            const bool fSynced = (fsync(nDirectory) == 0);
+            if(close(nDirectory) != 0 || !fSynced)
+                return false;
+        }
+        #endif
+
+        setDirtyFiles.clear();
+        fDirectoryDirty = false;
+        return true;
     }
 
 
@@ -577,6 +664,11 @@ namespace LLD
                 std::vector<uint8_t> vEmpty(HASHMAP_KEY_ALLOCATION, 0);
                 pstream->write((char*) &vEmpty[0], vEmpty.size());
                 pstream->flush();
+                if(!*pstream)
+                    return debug::error(FUNCTION, "failed to flush hashmap erase");
+
+                setDirtyFiles.insert(debug::safe_printstr(
+                    strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i));
 
                 /* Debug Output of Sector Key Information. */
                 if(config::nVerbose >= 4)

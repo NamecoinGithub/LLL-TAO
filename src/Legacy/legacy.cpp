@@ -589,6 +589,8 @@ namespace Legacy
 
         /* Start the database transaction. */
         LLD::TransactionGuard transaction;
+        if(!transaction)
+            return debug::error(FUNCTION, "failed to begin block transaction");
 
         /* Write the transactions. */
         for(const auto& tx : vtx)

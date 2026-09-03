@@ -22,6 +22,7 @@ ________________________________________________________________________________
 #include <cstdint>
 #include <string>
 #include <fstream>
+#include <set>
 #include <vector>
 #include <mutex>
 
@@ -75,6 +76,12 @@ namespace LLD
 
         /** The keychain flags. **/
         uint8_t nFlags;
+
+        /** Files modified since durability tracking began. **/
+        std::set<std::string> setDirtyFiles;
+
+        /** Whether a new hashmap file requires directory metadata syncing. **/
+        bool fDirectoryDirty;
 
 
         /* The key level locking hashmap. */
@@ -175,6 +182,14 @@ namespace LLD
          *
          **/
         void Flush();
+
+
+        /** Reset the files tracked for the next durable transaction apply. **/
+        void BeginDurabilityTracking();
+
+
+        /** Sync only files modified by the current durable transaction apply. **/
+        bool SyncTouchedFiles();
 
 
         /** Restore

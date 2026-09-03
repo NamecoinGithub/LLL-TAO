@@ -757,7 +757,8 @@ namespace TAO::Ledger
         mempool.List(vMempool);
 
         /* Start a ACID transaction (to be disposed). */
-        LLD::TxnBegin(FLAGS::MINER);
+        if(!LLD::TxnBegin(FLAGS::MINER))
+            return;
 
         /* Loop through the list of transactions. */
         std::set<uint512_t> setDependents;

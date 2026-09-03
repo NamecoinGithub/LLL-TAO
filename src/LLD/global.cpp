@@ -404,7 +404,7 @@ namespace LLD
 
 
     /* Global handler for all LLD instances. */
-    void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
         const bool fCoordinated =
             (nFlags != TAO::Ledger::FLAGS::MINER && nFlags != TAO::Ledger::FLAGS::SANITIZE);
@@ -417,7 +417,7 @@ namespace LLD
             if(fTxnOwner)
             {
                 debug::error(FUNCTION, "nested transaction begin refused");
-                return;
+                return false;
             }
 
             #ifdef UNIT_TESTS
@@ -436,7 +436,7 @@ namespace LLD
             {
                 TRANSACTION_COORDINATOR.unlock();
                 debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
-                return;
+                return false;
             }
 
             fTxnOwner = true;
@@ -447,7 +447,7 @@ namespace LLD
         if(fTxnRecoveryRequired.load())
         {
             debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
-            return;
+            return false;
         }
 
         /* Start the contract DB transaction. */
@@ -464,7 +464,7 @@ namespace LLD
 
         /* Handle memory commits if in memory m ode. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return;
+            return true;
 
         /* Start the Logical DB transaction. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
@@ -493,29 +493,31 @@ namespace LLD
         /* Start the legacy DB transaction. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
             Legacy->TxnBegin();
+
+        return true;
     }
 
 
     /* Global handler for all LLD instances. */
-    void TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
+    bool TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
         /* MINER and SANITIZE own independent overlays and are not coordinated. */
         if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
         {
             ReleaseMemoryTransactions(nFlags, nInstances);
-            return;
+            return true;
         }
 
         /* A redundant outer abort after SetBest() consumed the transaction is a
          * safe no-op, and another thread must never release the owner's state. */
         if(!fTxnOwner)
-            return;
+            return true;
 
         const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
         if(fMemoryOnly != fTxnMemoryOnly)
         {
             debug::error(FUNCTION, "transaction mode does not match current owner");
-            return;
+            return false;
         }
 
         const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
@@ -525,16 +527,23 @@ namespace LLD
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
         {
             ReleaseTransactionOwnership();
-            return;
+            return true;
         }
 
         /* Once a fully checkpointed apply fails, its physical journals are the
          * recovery source of truth and must never be truncated by a caller's
          * ordinary failure cleanup. */
-        if(!fTxnRecoveryRequired.load())
-            ReleasePhysicalTransactions(nReleaseInstances);
+        if(!fTxnRecoveryRequired.load() && !ReleasePhysicalTransactions(nReleaseInstances))
+        {
+            fTxnRecoveryRequired.store(true);
+            ReleaseTransactionOwnership();
+            ::Shutdown();
+            return debug::error(FUNCTION,
+                "failed to durably release aborted transaction journals; shutdown requested");
+        }
 
         ReleaseTransactionOwnership();
+        return true;
     }
 
 
@@ -731,14 +740,21 @@ namespace LLD
     TransactionGuard::TransactionGuard(const uint8_t nFlagsIn, const uint16_t nInstancesIn)
     : nFlags(nFlagsIn)
     , nInstances(nInstancesIn)
+    , fAcquired(TxnBegin(nFlags, nInstances))
     {
-        TxnBegin(nFlags, nInstances);
     }
 
 
     TransactionGuard::~TransactionGuard()
     {
-        TxnAbort(nFlags, nInstances);
+        if(fAcquired)
+            TxnAbort(nFlags, nInstances);
+    }
+
+
+    TransactionGuard::operator bool() const
+    {
+        return fAcquired;
     }
 
 

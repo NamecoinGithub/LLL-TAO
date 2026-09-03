@@ -540,7 +540,13 @@ namespace TAO
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
             if(fTransaction)
-                LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            {
+                if(!LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                {
+                    ChainState::fChainReorg.store(false);
+                    return debug::error(FUNCTION, "failed to begin candidate activation transaction");
+                }
+            }
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())
