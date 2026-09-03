@@ -834,13 +834,13 @@ namespace TAO
             /* Watch for genesis. */
             if(!ChainState::tStateGenesis)
             {
-                /* Write the best chain pointer. */
-                if(!LLD::Ledger->WriteBestChain(hash))
-                    return debug::error(FUNCTION, "failed to write best chain");
-
                 /* Write the block to disk. */
                 if(!LLD::Ledger->WriteBlock(hash, *this))
                     return debug::error(FUNCTION, "block state already exists");
+
+                /* Publish the best pointer only after its target exists on disk. */
+                if(!LLD::Ledger->WriteBestChain(hash))
+                    return debug::error(FUNCTION, "failed to write best chain");
 
                 /* Set the genesis block. */
                 ChainState::tStateGenesis = *this;
@@ -1118,10 +1118,18 @@ namespace TAO
                             " was blocked for the duration");
                 }
 
-                /* All disk writes (disconnect + connect) are complete. Commit the transaction
-                 * durably before touching mempool or in-memory ChainState atomics.  This is the
-                 * transactional boundary: everything above is rollback-safe; everything below is
-                 * in-memory-only and runs only after the durable commit succeeds.
+                /* Stage the best-chain pointer with the disconnect/connect writes so the durable
+                 * transition cannot commit without its authoritative tip. */
+                if(!LLD::Ledger->WriteBestChain(hash))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    return debug::error(FUNCTION, "failed to stage best chain pointer");
+                }
+
+                /* All disk writes (disconnect + connect + best pointer) are complete. Commit the
+                 * transaction durably before touching mempool or in-memory ChainState atomics.
+                 * This is the transactional boundary: everything above is rollback-safe;
+                 * everything below is in-memory-only and runs only after durable commit succeeds.
                  *
                  * Self-containment: when fOwnedTxn=true SetBest() opened this transaction itself
                  * (the caller had no active transaction).  When fOwnedTxn=false an outer caller
@@ -1246,6 +1254,13 @@ namespace TAO
                         " mempool_conflict_deps=", TAO::Ledger::mempool.ConflictDependents(),
                         " mempool_size=", TAO::Ledger::mempool.Size());
 
+                /* Refresh the committed genesis next pointer without exposing a staged update. */
+                BlockState stateGenesis;
+                if(LLD::Ledger->ReadBlock(ChainState::Genesis(), stateGenesis))
+                    ChainState::tStateGenesis = stateGenesis;
+                else
+                    debug::error(FUNCTION, "failed to refresh committed genesis state");
+
                 /* Set the best chain variables. */
                 ChainState::tStateBest          = *this; //XXX: we are not getting all the data from connect, consider using pointer
                 ChainState::hashBestChain      = hash;
@@ -1268,10 +1283,6 @@ namespace TAO
 
                 /* Set our chain cache update now. */
                 TAO::API::nBlockCounter.store(nHeight);
-
-                /* Write the best chain pointer. */
-                if(!LLD::Ledger->WriteBestChain(hash))
-                    return debug::error(FUNCTION, "failed to write best chain");
 
                 /* Reset contract meters. */
                 nTotalContracts = 0;
@@ -1566,9 +1577,6 @@ namespace TAO
                 if(!LLD::Ledger->WriteBlock(hashPrevBlock, prev))
                     return debug::error(FUNCTION, "failed to update previous block state");
 
-                /* If we just updated hashNextBlock for genesis block, update the in-memory genesis */
-                if(hashPrevBlock == ChainState::Genesis())
-                    ChainState::tStateGenesis = prev;
             }
 
             return true;

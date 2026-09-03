@@ -25,11 +25,12 @@ ________________________________________________________________________________
 namespace LLP
 {
 
-    /* Static dedup-key storage — one per PoW channel.
-     * Layout: high-32 bits = unified height, low-32 bits = first 4 bytes of hashBestChain.
-     * Initial value 0 ensures first real dispatch always proceeds. */
-    std::atomic<uint64_t> MinerPushDispatcher::s_nPrimeDedup{0};
-    std::atomic<uint64_t> MinerPushDispatcher::s_nHashDedup{0};
+    /* Full committed-tip dedup state, serialized so both channel reservations
+     * remain one event even when callers race. */
+    std::mutex MinerPushDispatcher::s_dedupMutex;
+    MinerPushDispatcher::DedupKey MinerPushDispatcher::s_primeDedup;
+    MinerPushDispatcher::DedupKey MinerPushDispatcher::s_hashDedup;
+    uint64_t MinerPushDispatcher::s_nNextGeneration{0};
 
     /* Per-lane async queue storage and synchronisation primitives. */
     std::queue<MinerPushDispatcher::PushEvent> MinerPushDispatcher::s_statelessQueue;
@@ -45,31 +46,25 @@ namespace LLP
     std::atomic<bool>                            MinerPushDispatcher::s_legacyRunning{false};
 
 
-    /* Pack (height, hashPrefix4) into a single 64-bit dedup key. */
-    static inline uint64_t make_dedup_key(uint32_t nHeight, uint32_t nHashPrefix4)
-    {
-        return (static_cast<uint64_t>(nHeight) << 32) | static_cast<uint64_t>(nHashPrefix4);
-    }
-
-
     /* Reserve one channel's push key exactly once across both async workers.
      *
      * Dedup belongs before the lane split.  If each lane deduplicates independently,
      * the first lane to win the CAS can suppress the other lane, or a lane without
      * a CAS can over-broadcast duplicate events. */
-    bool MinerPushDispatcher::ReserveChannelPush(std::atomic<uint64_t>& nDedupKey,
-                                                 uint64_t nNewKey,
+    bool MinerPushDispatcher::ReserveChannelPush(DedupKey& tDedupKey,
                                                  const char* strChannel,
                                                  uint32_t nHeight,
+                                                 const uint1024_t& hashBestChain,
                                                  uint32_t hashPrefix4)
     {
-        uint64_t nOld = nDedupKey.load(std::memory_order_acquire);
-        while(nOld != nNewKey)
+        if(!tDedupKey.fInitialized
+        || tDedupKey.nHeight != nHeight
+        || tDedupKey.hashBestChain != hashBestChain)
         {
-            if(nDedupKey.compare_exchange_weak(nOld, nNewKey,
-                                               std::memory_order_release,
-                                               std::memory_order_acquire))
-                return true;
+            tDedupKey.nHeight = nHeight;
+            tDedupKey.hashBestChain = hashBestChain;
+            tDedupKey.fInitialized = true;
+            return true;
         }
 
         debug::log(1, FUNCTION,
@@ -92,11 +87,34 @@ namespace LLP
 
         const uint32_t hashPrefix4 =
             static_cast<uint32_t>(hashBestChain.Get64(0) & 0xffffffffULL);
-        const uint64_t nNewKey = make_dedup_key(nHeight, hashPrefix4);
 
-        event.fPrime = ReserveChannelPush(s_nPrimeDedup, nNewKey, "Prime", nHeight, hashPrefix4);
-        event.fHash = ReserveChannelPush(s_nHashDedup, nNewKey, "Hash", nHeight, hashPrefix4);
+        std::lock_guard<std::mutex> lock(s_dedupMutex);
+        event.fPrime = ReserveChannelPush(
+            s_primeDedup, "Prime", nHeight, hashBestChain, hashPrefix4);
+        event.fHash = ReserveChannelPush(
+            s_hashDedup, "Hash", nHeight, hashBestChain, hashPrefix4);
+        if(event.fPrime || event.fHash)
+            event.nGeneration = ++s_nNextGeneration;
+
         return event;
+    }
+
+
+    /* Keep at most one pending event per lane. Intermediate committed tips are
+     * obsolete once a newer generation is waiting to refresh miners. */
+    bool MinerPushDispatcher::EnqueueLatest(std::queue<PushEvent>& queue,
+                                            std::mutex& mutex,
+                                            const PushEvent& event)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(!queue.empty() && queue.back().nGeneration >= event.nGeneration)
+            return false;
+
+        while(!queue.empty())
+            queue.pop();
+
+        queue.emplace(event);
+        return true;
     }
 
 
@@ -260,20 +278,14 @@ namespace LLP
 
             if(fStatelessUp)
             {
-                {
-                    std::lock_guard<std::mutex> lock(s_statelessMutex);
-                    s_statelessQueue.emplace(event);
-                }
-                s_statelessCV.notify_one();
+                if(EnqueueLatest(s_statelessQueue, s_statelessMutex, event))
+                    s_statelessCV.notify_one();
             }
 
             if(fLegacyUp)
             {
-                {
-                    std::lock_guard<std::mutex> lock(s_legacyMutex);
-                    s_legacyQueue.emplace(event);
-                }
-                s_legacyCV.notify_one();
+                if(EnqueueLatest(s_legacyQueue, s_legacyMutex, event))
+                    s_legacyCV.notify_one();
             }
 
             return;

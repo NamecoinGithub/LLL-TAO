@@ -28,6 +28,7 @@ ________________________________________________________________________________
 #include <chrono>
 #include <algorithm>
 #include <numeric>
+#include <queue>
 #include <random>
 
 /* ===========================================================================
@@ -134,10 +135,27 @@ namespace
         return result;
     }
 
-    /* --- Dedup key builder (mirrors DispatchPushEvent logic) ------------- */
-    uint64_t MakeDedupKey(uint32_t nHeight, uint32_t hashPrefix4)
+    /* --- Full-tip dedup state (mirrors DispatchPushEvent logic) ----------- */
+    struct SimDedupKey
     {
-        return (static_cast<uint64_t>(nHeight) << 32) | hashPrefix4;
+        uint32_t nHeight{0};
+        uint1024_t hashBestChain;
+        bool fInitialized{false};
+    };
+
+    bool ReserveDedupKey(SimDedupKey& key,
+                         uint32_t nHeight,
+                         const uint1024_t& hashBestChain)
+    {
+        if(key.fInitialized
+        && key.nHeight == nHeight
+        && key.hashBestChain == hashBestChain)
+            return false;
+
+        key.nHeight = nHeight;
+        key.hashBestChain = hashBestChain;
+        key.fInitialized = true;
+        return true;
     }
 
     /* --- Decode big-endian uint32_t from payload bytes -------------------- */
@@ -293,61 +311,57 @@ TEST_CASE("Burst Mode — Channel filtering with 1000 miners", "[burst_mode][pus
  *  Section 2: Deduplication Under Rapid Burst Events
  * =========================================================================== */
 
-TEST_CASE("Burst Mode — Dedup key uniqueness across heights", "[burst_mode][dedup][llp]")
+TEST_CASE("Burst Mode — Dedup uses the full committed tip", "[burst_mode][dedup][llp]")
 {
-    /* Simulate rapid SetBest() events at consecutive heights with same hash prefix */
-    const uint32_t hashPrefix = 0xDEADBEEF;
+    const uint1024_t hashA(0x00000001DEADBEEFULL);
+    const uint1024_t hashB(0x00000002DEADBEEFULL);
 
     SECTION("Different heights produce different dedup keys")
     {
-        uint64_t key1 = MakeDedupKey(1000, hashPrefix);
-        uint64_t key2 = MakeDedupKey(1001, hashPrefix);
-        uint64_t key3 = MakeDedupKey(1002, hashPrefix);
-
-        REQUIRE(key1 != key2);
-        REQUIRE(key2 != key3);
-        REQUIRE(key1 != key3);
+        SimDedupKey key;
+        REQUIRE(ReserveDedupKey(key, 1000, hashA));
+        REQUIRE(ReserveDedupKey(key, 1001, hashA));
     }
 
-    SECTION("Same height + same hash prefix produces identical dedup key")
+    SECTION("Same height and full hash is suppressed")
     {
-        uint64_t keyA = MakeDedupKey(5000, 0xAABBCCDD);
-        uint64_t keyB = MakeDedupKey(5000, 0xAABBCCDD);
-        REQUIRE(keyA == keyB);
+        SimDedupKey key;
+        REQUIRE(ReserveDedupKey(key, 5000, hashA));
+        REQUIRE_FALSE(ReserveDedupKey(key, 5000, hashA));
     }
 
-    SECTION("Same height + different hash prefix produces different dedup keys")
+    SECTION("Same height and same 32-bit prefix but different full hash dispatches")
     {
-        uint64_t keyA = MakeDedupKey(5000, 0xAABBCCDD);
-        uint64_t keyB = MakeDedupKey(5000, 0xEEFF0011);
-        REQUIRE(keyA != keyB);
+        REQUIRE((hashA.Get64(0) & 0xffffffffULL) == (hashB.Get64(0) & 0xffffffffULL));
+
+        SimDedupKey key;
+        REQUIRE(ReserveDedupKey(key, 5000, hashA));
+        REQUIRE(ReserveDedupKey(key, 5000, hashB));
     }
 }
 
 TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst", "[burst_mode][dedup][llp]")
 {
-    /* Simulate a fork-resolution burst: 10 rapid SetBest() events, some with
-     * the same (height, hashPrefix) pair that should be deduplicated. */
-    std::atomic<uint64_t> dedupState{0};
+    SimDedupKey dedupState;
 
     struct DispatchAttempt
     {
         uint32_t nHeight;
-        uint32_t hashPrefix;
+        uint1024_t hashBestChain;
         bool     fExpectedSend;
     };
 
     std::vector<DispatchAttempt> vBurst = {
-        { 1000, 0xAAAAAAAA, true  },  /* First at height 1000: dispatches */
-        { 1000, 0xAAAAAAAA, false },  /* Duplicate: suppressed */
-        { 1000, 0xAAAAAAAA, false },  /* Duplicate: suppressed */
-        { 1001, 0xBBBBBBBB, true  },  /* New height: dispatches */
-        { 1001, 0xBBBBBBBB, false },  /* Duplicate: suppressed */
-        { 1002, 0xCCCCCCCC, true  },  /* New height: dispatches */
-        { 1002, 0xCCCCCCCC, false },  /* Duplicate: suppressed */
-        { 1002, 0xCCCCCCCC, false },  /* Duplicate: suppressed */
-        { 1002, 0xCCCCCCCC, false },  /* Duplicate: suppressed */
-        { 1003, 0xDDDDDDDD, true  },  /* New height: dispatches */
+        { 1000, uint1024_t(0xAAAAAAAA), true  },
+        { 1000, uint1024_t(0xAAAAAAAA), false },
+        { 1000, uint1024_t(0xAAAAAAAA), false },
+        { 1001, uint1024_t(0xBBBBBBBB), true  },
+        { 1001, uint1024_t(0xBBBBBBBB), false },
+        { 1002, uint1024_t(0xCCCCCCCC), true  },
+        { 1002, uint1024_t(0xCCCCCCCC), false },
+        { 1002, uint1024_t(0xCCCCCCCC), false },
+        { 1002, uint1024_t(0xCCCCCCCC), false },
+        { 1003, uint1024_t(0xDDDDDDDD), true  },
     };
 
     uint32_t nDispatched = 0;
@@ -355,25 +369,44 @@ TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst"
 
     for (const auto& attempt : vBurst)
     {
-        uint64_t newKey = MakeDedupKey(attempt.nHeight, attempt.hashPrefix);
-        uint64_t expected = dedupState.load();
-
-        /* CAS: only first call with a new key value wins */
-        if (expected != newKey && dedupState.compare_exchange_strong(expected, newKey))
+        if(ReserveDedupKey(dedupState, attempt.nHeight, attempt.hashBestChain))
         {
             ++nDispatched;
-            REQUIRE(attempt.fExpectedSend == true);
+            REQUIRE(attempt.fExpectedSend);
         }
         else
         {
             ++nSuppressed;
-            REQUIRE(attempt.fExpectedSend == false);
+            REQUIRE_FALSE(attempt.fExpectedSend);
         }
     }
 
     REQUIRE(nDispatched == 4);
     REQUIRE(nSuppressed == 6);
     REQUIRE((nDispatched + nSuppressed) == vBurst.size());
+}
+
+
+TEST_CASE("Burst Mode — Dispatcher retains only the newest pending generation",
+          "[burst_mode][push_queue][llp]")
+{
+    std::queue<uint64_t> pending;
+    const auto enqueueLatest = [&](uint64_t nGeneration)
+    {
+        if(!pending.empty() && pending.back() >= nGeneration)
+            return;
+
+        while(!pending.empty())
+            pending.pop();
+        pending.push(nGeneration);
+    };
+
+    enqueueLatest(1);
+    enqueueLatest(3);
+    enqueueLatest(2);
+
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending.front() == 3);
 }
 
 
@@ -674,22 +707,22 @@ TEST_CASE("Burst Mode — Full broadcast simulation with 750 miners and fork-res
     }
 
     /* Simulate 5 rapid SetBest() events (fork-resolution burst) */
-    std::atomic<uint64_t> dedupPrime{0};
-    std::atomic<uint64_t> dedupHash{0};
+    SimDedupKey dedupPrime;
+    SimDedupKey dedupHash;
 
     struct BlockEvent
     {
         uint32_t nHeight;
-        uint32_t hashPrefix;
+        uint1024_t hashBestChain;
     };
 
     /* 5 events: 3 unique heights (heights 100, 101, 102), 2 duplicates */
     const std::vector<BlockEvent> vEvents = {
-        { 100, 0x11111111 },
-        { 100, 0x11111111 },  /* duplicate */
-        { 101, 0x22222222 },
-        { 102, 0x33333333 },
-        { 102, 0x33333333 },  /* duplicate */
+        { 100, uint1024_t(0x11111111) },
+        { 100, uint1024_t(0x11111111) },  /* duplicate */
+        { 101, uint1024_t(0x22222222) },
+        { 102, uint1024_t(0x33333333) },
+        { 102, uint1024_t(0x33333333) },  /* duplicate */
     };
 
     uint32_t nTotalPrimeNotifications = 0;
@@ -698,17 +731,10 @@ TEST_CASE("Burst Mode — Full broadcast simulation with 750 miners and fork-res
 
     for (const auto& event : vEvents)
     {
-        /* Prime channel dedup */
-        uint64_t primeKey = MakeDedupKey(event.nHeight, event.hashPrefix);
-        uint64_t prevPrime = dedupPrime.load();
-        bool fPrimeNew = (prevPrime != primeKey) &&
-                         dedupPrime.compare_exchange_strong(prevPrime, primeKey);
-
-        /* Hash channel dedup */
-        uint64_t hashKey = MakeDedupKey(event.nHeight, event.hashPrefix);
-        uint64_t prevHash = dedupHash.load();
-        bool fHashNew = (prevHash != hashKey) &&
-                        dedupHash.compare_exchange_strong(prevHash, hashKey);
+        const bool fPrimeNew =
+            ReserveDedupKey(dedupPrime, event.nHeight, event.hashBestChain);
+        const bool fHashNew =
+            ReserveDedupKey(dedupHash, event.nHeight, event.hashBestChain);
 
         if (fPrimeNew)
         {

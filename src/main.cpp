@@ -303,7 +303,12 @@ int main(int argc, char** argv)
         debug::log(0, FUNCTION, "Starting forensic fork analysis...");
         
         /* Initialize LLD to access blockchain data */
-        LLD::Initialize();
+        if(!LLD::Initialize())
+        {
+            LLD::Shutdown();
+            debug::Shutdown();
+            return 1;
+        }
         
         /* Initialize ChainState to access block data */
         TAO::Ledger::ChainState::Initialize();
@@ -325,7 +330,12 @@ int main(int argc, char** argv)
         debug::log(0, FUNCTION, "Retrieving channel height statistics...");
         
         /* Initialize LLD to access blockchain data */
-        LLD::Initialize();
+        if(!LLD::Initialize())
+        {
+            LLD::Shutdown();
+            debug::Shutdown();
+            return 1;
+        }
         
         /* Initialize ChainState to access block data */
         TAO::Ledger::ChainState::Initialize();
@@ -367,86 +377,92 @@ int main(int argc, char** argv)
     if(!fFailed)
     {
         /* Initialize LLD. */
-        LLD::Initialize();
-
-
-        /* Initialize dispatch relays. */
-        TAO::Ledger::Dispatch::Initialize();
-
-
-        /* Initialize ChainState. */
-        TAO::Ledger::ChainState::Initialize();
-
-
-        /* Run our LLD indexing operations. */
-        LLD::Indexing();
-
-
-        /* Initialize Legacy Environment. */
-        if(!Legacy::Initialize())
+        if(!LLD::Initialize())
         {
             config::fShutdown.store(true);
             fFailed = true;
         }
 
-
-        /* Initialize the Lower Level Protocol. */
-        LLP::Initialize();
-
-
-        /* Startup performance metric. */
-        debug::log(0, FUNCTION, "Started up in ", timer.ElapsedMilliseconds(), "ms");
-
-
-        /* Set the initialized flags. */
-        config::fInitialized.store(true);
-
-
-        /* Kick off our startup thread for post-startup processing. */
-        std::thread tStartup = std::thread(Startup);
-
-
-        /* Initialize generator thread. */
-        std::thread thread;
-        if(config::fHybrid.load())
-            thread = std::thread(TAO::Ledger::ThreadGenerator);
-
-
-        /* Wait for shutdown. */
-        if(!config::GetBoolArg(std::string("-gdb")))
+        if(!fFailed)
         {
-            std::mutex SHUTDOWN_MUTEX;
-            std::unique_lock<std::mutex> SHUTDOWN_LOCK(SHUTDOWN_MUTEX);
-            SHUTDOWN.wait(SHUTDOWN_LOCK, []{ return config::fShutdown.load(); });
+            /* Initialize dispatch relays. */
+            TAO::Ledger::Dispatch::Initialize();
+
+
+            /* Initialize ChainState. */
+            TAO::Ledger::ChainState::Initialize();
+
+
+            /* Run our LLD indexing operations. */
+            LLD::Indexing();
+
+
+            /* Initialize Legacy Environment. */
+            if(!Legacy::Initialize())
+            {
+                config::fShutdown.store(true);
+                fFailed = true;
+            }
+
+
+            /* Initialize the Lower Level Protocol. */
+            LLP::Initialize();
+
+
+            /* Startup performance metric. */
+            debug::log(0, FUNCTION, "Started up in ", timer.ElapsedMilliseconds(), "ms");
+
+
+            /* Set the initialized flags. */
+            config::fInitialized.store(true);
+
+
+            /* Kick off our startup thread for post-startup processing. */
+            std::thread tStartup = std::thread(Startup);
+
+
+            /* Initialize generator thread. */
+            std::thread thread;
+            if(config::fHybrid.load())
+                thread = std::thread(TAO::Ledger::ThreadGenerator);
+
+
+            /* Wait for shutdown. */
+            if(!config::GetBoolArg(std::string("-gdb")))
+            {
+                std::mutex SHUTDOWN_MUTEX;
+                std::unique_lock<std::mutex> SHUTDOWN_LOCK(SHUTDOWN_MUTEX);
+                SHUTDOWN.wait(SHUTDOWN_LOCK, []{ return config::fShutdown.load(); });
+            }
+
+
+            /* GDB mode waits for keyboard input to initiate clean shutdown. */
+            else
+            {
+                getchar();
+                config::fShutdown = true;
+            }
+
+
+            /* Wait for our startup thread to finish. */
+            tStartup.join();
+
+
+            /* Stop stake minter if running. Minter ignores request if not running, so safe to just call both */
+            TAO::Ledger::StakeMinter::GetInstance().Stop();
+
+
+            /* Wait for the private condition. */
+            if(config::fHybrid.load())
+            {
+                TAO::Ledger::PRIVATE_CONDITION.notify_all();
+                thread.join();
+            }
+
+
+            /* Shutdown dispatch. */
+            TAO::Ledger::Dispatch::Shutdown();
         }
-
-
-        /* GDB mode waits for keyboard input to initiate clean shutdown. */
-        else
-        {
-            getchar();
-            config::fShutdown = true;
-        }
-
-
-        /* Wait for our startup thread to finish. */
-        tStartup.join();
-
-
-        /* Stop stake minter if running. Minter ignores request if not running, so safe to just call both */
-        TAO::Ledger::StakeMinter::GetInstance().Stop();
-
-
-        /* Wait for the private condition. */
-        if(config::fHybrid.load())
-        {
-            TAO::Ledger::PRIVATE_CONDITION.notify_all();
-            thread.join();
-        }
-
-
-        /* Shutdown dispatch. */
-        TAO::Ledger::Dispatch::Shutdown();
     }
 
 

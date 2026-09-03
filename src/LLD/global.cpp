@@ -15,6 +15,10 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
+#include <Util/include/signals.h>
+
+#include <mutex>
+
 namespace LLD
 {
     /* The LLD global instance pointers. */
@@ -30,9 +34,71 @@ namespace LLD
     TrustDB*      Trust;
     LegacyDB*     Legacy;
 
+    /* A failed apply after every journal reached its durable commit marker must
+     * preserve those journals for startup recovery and stop further mutation. */
+    static std::atomic<bool> fTxnRecoveryRequired{false};
+
+
+    /* Serialize every transaction that uses the shared pMemory/pTransaction
+     * objects. MINER and SANITIZE use separate in-memory overlays. */
+    static std::mutex TRANSACTION_COORDINATOR;
+    static thread_local bool fTxnOwner = false;
+    static thread_local bool fTxnMemoryOnly = false;
+    static thread_local uint16_t nTxnOwnerInstances = 0;
+
+
+    static void ReleaseMemoryTransactions(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        if(Contract && (nInstances & INSTANCES::CONTRACT))
+            Contract->MemoryRelease(nFlags);
+
+        if(Register && (nInstances & INSTANCES::REGISTER))
+            Register->MemoryRelease(nFlags);
+
+        if(Ledger && (nInstances & INSTANCES::LEDGER))
+            Ledger->MemoryRelease(nFlags);
+    }
+
+
+    static void ReleasePhysicalTransactions(const uint16_t nInstances)
+    {
+        if(Logical && (nInstances & INSTANCES::LOGICAL))
+            Logical->TxnRelease();
+
+        if(Contract && (nInstances & INSTANCES::CONTRACT))
+            Contract->TxnRelease();
+
+        if(Register && (nInstances & INSTANCES::REGISTER))
+            Register->TxnRelease();
+
+        if(Ledger && (nInstances & INSTANCES::LEDGER))
+            Ledger->TxnRelease();
+
+        if(Client && (nInstances & INSTANCES::CLIENT))
+            Client->TxnRelease();
+
+        if(Trust && (nInstances & INSTANCES::TRUST))
+            Trust->TxnRelease();
+
+        if(Legacy && (nInstances & INSTANCES::LEGACY))
+            Legacy->TxnRelease();
+    }
+
+
+    static void ReleaseTransactionOwnership()
+    {
+        if(!fTxnOwner)
+            return;
+
+        fTxnOwner = false;
+        fTxnMemoryOnly = false;
+        nTxnOwnerInstances = 0;
+        TRANSACTION_COORDINATOR.unlock();
+    }
+
 
     /*  Initialize the global LLD instances. */
-    void Initialize()
+    bool Initialize()
     {
         debug::log(0, FUNCTION, "Initializing LLD");
 
@@ -101,8 +167,10 @@ namespace LLD
         }
 
         /* Handle database recovery mode. */
-        TxnRecovery();
+        if(!TxnRecovery())
+            return false;
 
+        return true;
     }
 
 
@@ -169,7 +237,7 @@ namespace LLD
 
 
     /* Check the transactions for recovery. */
-    void TxnRecovery()
+    bool TxnRecovery()
     {
         /* Flag to determine if there are any failures. */
         bool fRecovery = true;
@@ -199,24 +267,32 @@ namespace LLD
                 debug::log(0, FUNCTION, "all transactions are complete, recovering...");
 
                 /* Commit Contract DB transaction. */
-                if(Contract)
-                    Contract->TxnCommit();
+                if(Contract && !Contract->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Contract DB recovery commit failed");
 
                 /* Commit Register DB transaction. */
-                if(Register)
-                    Register->TxnCommit();
-
-                /* Commit the Client DB transaction. */
-                if(Client)
-                    Client->TxnCommit();
+                if(fRecovery && Register && !Register->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Register DB recovery commit failed");
 
                 /* Commit the Logical DB transaction. */
-                if(Logical)
-                    Logical->TxnCommit();
+                if(fRecovery && Logical && !Logical->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Logical DB recovery commit failed");
+
+                /* Commit the authoritative Client DB last. */
+                if(fRecovery && Client && !Client->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Client DB recovery commit failed");
+
+                if(!fRecovery)
+                {
+                    fTxnRecoveryRequired.store(true);
+                    return debug::error(FUNCTION,
+                        "client transaction recovery failed; journals retained for restart");
+                }
             }
 
-            /* Abort all the transactions. */
-            TxnAbort(TAO::Ledger::FLAGS::BLOCK, INSTANCES::MERKLE);
+            /* Clear either the fully applied journals or an incomplete transaction
+             * that never reached a durable decision on every participant. */
+            ReleasePhysicalTransactions(INSTANCES::MERKLE);
         }
 
         /* Regular mainnet mode recovery. */
@@ -248,31 +324,39 @@ namespace LLD
                 debug::log(0, FUNCTION, "all transactions are complete, recovering...");
 
                 /* Commit contract DB transaction. */
-                if(Contract)
-                    Contract->TxnCommit();
+                if(Contract && !Contract->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Contract DB recovery commit failed");
 
                 /* Commit register DB transaction. */
-                if(Register)
-                    Register->TxnCommit();
-
-                /* Commit ledger DB transaction. */
-                if(Ledger)
-                    Ledger->TxnCommit();
+                if(fRecovery && Register && !Register->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Register DB recovery commit failed");
 
                 /* Commit the trust DB transaction. */
-                if(Trust)
-                    Trust->TxnCommit();
+                if(fRecovery && Trust && !Trust->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Trust DB recovery commit failed");
 
                 /* Commit the legacy DB transaction. */
-                if(Legacy)
-                    Legacy->TxnCommit();
+                if(fRecovery && Legacy && !Legacy->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Legacy DB recovery commit failed");
+
+                /* Commit the authoritative Ledger DB last. */
+                if(fRecovery && Ledger && !Ledger->TxnCommit())
+                    fRecovery = debug::error(FUNCTION, "Ledger DB recovery commit failed");
+
+                if(!fRecovery)
+                {
+                    fTxnRecoveryRequired.store(true);
+                    return debug::error(FUNCTION,
+                        "consensus transaction recovery failed; journals retained for restart");
+                }
             }
 
-            /* Abort all the transactions. */
-            TxnAbort(TAO::Ledger::FLAGS::BLOCK, INSTANCES::CONSENSUS);
+            /* Clear either the fully applied journals or an incomplete transaction
+             * that never reached a durable decision on every participant. */
+            ReleasePhysicalTransactions(INSTANCES::CONSENSUS);
         }
 
-
+        return true;
     }
 
 
@@ -283,9 +367,18 @@ namespace LLD
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
             return false;
 
+        /* An open transaction on another thread is not owned by this caller.
+         * TxnBegin() will wait for it rather than joining or replacing it. */
+        if(!fTxnOwner)
+            return false;
+
         /* Check each database instance that would be opened by TxnBegin(nFlags, nInstances).
          * Any single instance having pTransaction != nullptr means a transaction is open. */
+        if(Logical  && (nInstances & INSTANCES::LOGICAL)  && Logical->HasTransaction())
+            return true;
         if(Ledger   && (nInstances & INSTANCES::LEDGER)   && Ledger->HasTransaction())
+            return true;
+        if(Client   && (nInstances & INSTANCES::CLIENT)   && Client->HasTransaction())
             return true;
         if(Contract && (nInstances & INSTANCES::CONTRACT) && Contract->HasTransaction())
             return true;
@@ -303,6 +396,40 @@ namespace LLD
     /* Global handler for all LLD instances. */
     void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
+        const bool fCoordinated =
+            (nFlags != TAO::Ledger::FLAGS::MINER && nFlags != TAO::Ledger::FLAGS::SANITIZE);
+
+        if(fCoordinated)
+        {
+            /* Existing callers intentionally flatten ownership through SetBest(),
+             * which checks HasOpenTransaction() before beginning. Refuse any other
+             * nested begin rather than deleting the active transaction. */
+            if(fTxnOwner)
+            {
+                debug::error(FUNCTION, "nested transaction begin refused");
+                return;
+            }
+
+            TRANSACTION_COORDINATOR.lock();
+
+            if(fTxnRecoveryRequired.load())
+            {
+                TRANSACTION_COORDINATOR.unlock();
+                debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
+                return;
+            }
+
+            fTxnOwner = true;
+            fTxnMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
+            nTxnOwnerInstances = nInstances;
+        }
+
+        if(fTxnRecoveryRequired.load())
+        {
+            debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
+            return;
+        }
+
         /* Start the contract DB transaction. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
             Contract->MemoryBegin(nFlags);
@@ -352,49 +479,42 @@ namespace LLD
     /* Global handler for all LLD instances. */
     void TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
-        /* Abort the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->MemoryRelease(nFlags);
+        /* MINER and SANITIZE own independent overlays and are not coordinated. */
+        if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+        {
+            ReleaseMemoryTransactions(nFlags, nInstances);
+            return;
+        }
 
-        /* Abort the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->MemoryRelease(nFlags);
-
-        /* Abort the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->MemoryRelease(nFlags);
-
-        /* Handle memory commits if in memory m ode. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+        /* A redundant outer abort after SetBest() consumed the transaction is a
+         * safe no-op, and another thread must never release the owner's state. */
+        if(!fTxnOwner)
             return;
 
-        /* Abort the Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
-            Logical->TxnRelease();
+        const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
+        if(fMemoryOnly != fTxnMemoryOnly)
+        {
+            debug::error(FUNCTION, "transaction mode does not match current owner");
+            return;
+        }
 
-        /* Abort the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->TxnRelease();
+        const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
+        ReleaseMemoryTransactions(nFlags, nReleaseInstances);
 
-        /* Abort the register DB transaction. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->TxnRelease();
+        /* Handle memory commits if in memory mode. */
+        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
+        {
+            ReleaseTransactionOwnership();
+            return;
+        }
 
-        /* Abort the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->TxnRelease();
+        /* Once a fully checkpointed apply fails, its physical journals are the
+         * recovery source of truth and must never be truncated by a caller's
+         * ordinary failure cleanup. */
+        if(!fTxnRecoveryRequired.load())
+            ReleasePhysicalTransactions(nReleaseInstances);
 
-        /* Abort the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
-            Client->TxnRelease();
-
-        /* Abort the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
-            Trust->TxnRelease();
-
-        /* Abort the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
-            Legacy->TxnRelease();
+        ReleaseTransactionOwnership();
     }
 
 
@@ -406,59 +526,83 @@ namespace LLD
         if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
             return true;
 
-        /* Commit the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->MemoryCommit();
+        if(!fTxnOwner)
+            return false;
 
-        /* Commit the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->MemoryCommit();
+        const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
+        if(fMemoryOnly != fTxnMemoryOnly)
+            return debug::error(FUNCTION, "transaction mode does not match current owner");
 
-        /* Commit the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->MemoryCommit();
+        const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
 
-        /* Handle memory commits if in memory mode — intentional short-circuit, not a failure. */
+        /* Memory-pool transactions have no physical journal. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
+        {
+            if(Contract && (nInstances & INSTANCES::CONTRACT))
+                Contract->MemoryCommit();
+            if(Register && (nInstances & INSTANCES::REGISTER))
+                Register->MemoryCommit();
+            if(Ledger && (nInstances & INSTANCES::LEDGER))
+                Ledger->MemoryCommit();
+
+            ReleaseTransactionOwnership();
             return true;
+        }
+
+        if(fTxnRecoveryRequired.load())
+        {
+            ReleaseMemoryTransactions(nFlags, nReleaseInstances);
+            ReleaseTransactionOwnership();
+            return debug::error(FUNCTION, "transaction recovery is required; refusing to commit");
+        }
+
+        /* Every selected journal must reach its commit marker before any participant
+         * is applied. A checkpoint failure has no durable global decision and is
+         * therefore safe to abort in full. */
+        bool fCheckpointsComplete = true;
 
         /* Set a checkpoint for Logical DB. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
-            Logical->TxnCheckpoint();
+            fCheckpointsComplete = Logical->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for contract DB. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->TxnCheckpoint();
+            fCheckpointsComplete = Contract->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for register DB. */
         if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->TxnCheckpoint();
+            fCheckpointsComplete = Register->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for ledger DB. */
         if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->TxnCheckpoint();
+            fCheckpointsComplete = Ledger->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for client DB. */
         if(Client && (nInstances & INSTANCES::CLIENT))
-            Client->TxnCheckpoint();
+            fCheckpointsComplete = Client->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for trust DB. */
         if(Trust && (nInstances & INSTANCES::TRUST))
-            Trust->TxnCheckpoint();
+            fCheckpointsComplete = Trust->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for legacy DB. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
-            Legacy->TxnCheckpoint();
+            fCheckpointsComplete = Legacy->TxnCheckpoint() && fCheckpointsComplete;
 
+        if(!fCheckpointsComplete)
+        {
+            TxnAbort(nFlags, nReleaseInstances);
+            return debug::error(FUNCTION, "transaction checkpoint failed; all staged changes aborted");
+        }
 
-        /* Aggregate the per-instance TxnCommit() results.  All selected
-         * instances are attempted regardless of individual failures — do NOT
-         * short-circuit on the first failure, so that state doesn't diverge
-         * further than necessary if one instance fails. */
+        /* Apply participants in a deterministic order, with the database carrying
+         * the authoritative best-chain pointer last. Stop on the first failure;
+         * the complete journals are retained so startup can roll the decision
+         * forward before the node resumes. */
         bool fAllSucceeded = true;
 
         /* Commit Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(fAllSucceeded && Logical && (nInstances & INSTANCES::LOGICAL))
         {
             if(!Logical->TxnCommit())
             {
@@ -468,7 +612,7 @@ namespace LLD
         }
 
         /* Commit contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(fAllSucceeded && Contract && (nInstances & INSTANCES::CONTRACT))
         {
             if(!Contract->TxnCommit())
             {
@@ -478,7 +622,7 @@ namespace LLD
         }
 
         /* Commit register DB transaction. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(fAllSucceeded && Register && (nInstances & INSTANCES::REGISTER))
         {
             if(!Register->TxnCommit())
             {
@@ -487,28 +631,8 @@ namespace LLD
             }
         }
 
-        /* Commit ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-        {
-            if(!Ledger->TxnCommit())
-            {
-                debug::error(FUNCTION, "Ledger DB commit failed");
-                fAllSucceeded = false;
-            }
-        }
-
-        /* Commit the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
-        {
-            if(!Client->TxnCommit())
-            {
-                debug::error(FUNCTION, "Client DB commit failed");
-                fAllSucceeded = false;
-            }
-        }
-
         /* Commit the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(fAllSucceeded && Trust && (nInstances & INSTANCES::TRUST))
         {
             if(!Trust->TxnCommit())
             {
@@ -518,7 +642,7 @@ namespace LLD
         }
 
         /* Commit the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(fAllSucceeded && Legacy && (nInstances & INSTANCES::LEGACY))
         {
             if(!Legacy->TxnCommit())
             {
@@ -527,44 +651,51 @@ namespace LLD
             }
         }
 
+        /* Commit the authoritative full-node pointer last. */
+        if(fAllSucceeded && Ledger && (nInstances & INSTANCES::LEDGER))
+        {
+            if(!Ledger->TxnCommit())
+            {
+                debug::error(FUNCTION, "Ledger DB commit failed");
+                fAllSucceeded = false;
+            }
+        }
 
-        /* Release the checkpoint markers for all selected instances.
-         * TxnRelease runs unconditionally after TxnCommit, regardless of commit
-         * outcome.  On success, SectorDatabase::TxnCommit() already nulled
-         * pTransaction; on failure it may still be set and TxnRelease will clean
-         * it up here.  Leaving a failed transaction intact for retry is not
-         * supported at the LLD layer — callers that receive false should abort
-         * their higher-level operation and rebuild rather than retrying the same
-         * transaction object.
-         *
-         * Note: TxnRelease is called for every selected instance below,
-         * regardless of whether that instance's TxnCommit succeeded or failed. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
-            Logical->TxnRelease();
+        /* Commit the authoritative client pointer last in MERKLE mode. */
+        if(fAllSucceeded && Client && (nInstances & INSTANCES::CLIENT))
+        {
+            if(!Client->TxnCommit())
+            {
+                debug::error(FUNCTION, "Client DB commit failed");
+                fAllSucceeded = false;
+            }
+        }
 
-        /* Release the contract DB transaction. */
+        if(!fAllSucceeded)
+        {
+            /* Physical state may now be partially applied. Keep every journal for
+             * deterministic roll-forward and stop the process before publication
+             * or another transaction can build on the partial state. */
+            ReleaseMemoryTransactions(nFlags, nReleaseInstances);
+
+            fTxnRecoveryRequired.store(true);
+            ReleaseTransactionOwnership();
+            ::Shutdown();
+            return debug::error(FUNCTION,
+                "durable transaction apply failed; journals retained and shutdown requested");
+        }
+
+        /* Publish the in-memory database deltas only after durable apply succeeds. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->TxnRelease();
-
-        /* Release the register DB transaction. */
+            Contract->MemoryCommit();
         if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->TxnRelease();
-
-        /* Release the ledger DB transaction. */
+            Register->MemoryCommit();
         if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->TxnRelease();
+            Ledger->MemoryCommit();
 
-        /* Release the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
-            Client->TxnRelease();
-
-        /* Release the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
-            Trust->TxnRelease();
-
-        /* Release the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
-            Legacy->TxnRelease();
+        /* Release the checkpoint markers after every participant succeeds. */
+        ReleasePhysicalTransactions(nReleaseInstances);
+        ReleaseTransactionOwnership();
 
         return fAllSucceeded;
     }

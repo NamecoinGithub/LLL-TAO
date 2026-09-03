@@ -675,7 +675,13 @@ namespace LLD
         /* Write to the file.  */
         const std::vector<uint8_t>& vBytes = pTransaction->ssJournal.Bytes();
         stream.write((char*)&vBytes[0], vBytes.size());
+        stream.flush();
+        if(!stream.good())
+            return debug::error(FUNCTION, "failed to flush journal file");
+
         stream.close();
+        if(stream.fail())
+            return debug::error(FUNCTION, "failed to close journal file");
 
         return true;
     }

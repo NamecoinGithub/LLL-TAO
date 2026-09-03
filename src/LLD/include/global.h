@@ -65,8 +65,10 @@ namespace LLD
      *
      *  Initialize the global LLD instances.
      *
+     *  @return True if initialization and journal recovery succeeded.
+     *
      **/
-    void Initialize();
+    bool Initialize();
 
 
     /** Indexing
@@ -89,8 +91,11 @@ namespace LLD
      *
      *  Check the transactions for recovery.
      *
+     *  @return True if no recovery was needed or every recovered database
+     *          committed successfully.
+     *
      **/
-    void TxnRecovery();
+    bool TxnRecovery();
 
 
     /** HasOpenTransaction
@@ -123,8 +128,7 @@ namespace LLD
      *
      *  Global handler for all LLD instances.
      *
-     *  @return true if every selected per-DB commit succeeded, false if any failed.
-     *          All selected instances are attempted regardless of individual failures.
+     *  @return True if every selected checkpoint and per-DB commit succeeded.
      *
      */
     bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);

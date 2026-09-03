@@ -23,10 +23,8 @@ ________________________________________________________________________________
  *  2. LLD::TxnCommit() returns true when all selected instances have active
  *     transactions that complete successfully.
  *
- *  3. All selected instances are attempted even when an earlier one fails — no
- *     short-circuit — confirmed by verifying that a later-selected instance with
- *     a valid transaction still has its data committed after the overall return
- *     value is false.
+ *  3. No participant is applied unless every selected journal reaches its
+ *     checkpoint, preventing a missing participant from producing a partial commit.
  *
  * Tests 1-3 below use inline simulation / ordering-assertion infrastructure so
  * that they compile and run without a live LLD database or full chain state —
@@ -55,8 +53,12 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unit/catch2/catch.hpp>
@@ -120,6 +122,54 @@ namespace
         }
     };
 
+
+    struct LogicalGuard
+    {
+        bool ownedLogical{false};
+
+        LogicalGuard()
+        {
+            if(!LLD::Logical)
+            {
+                LLD::Logical = new LLD::LogicalDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLogical = true;
+            }
+        }
+
+        ~LogicalGuard()
+        {
+            if(ownedLogical)
+            {
+                delete LLD::Logical;
+                LLD::Logical = nullptr;
+            }
+        }
+    };
+
+
+    struct ClientGuard
+    {
+        bool ownedClient{false};
+
+        ClientGuard()
+        {
+            if(!LLD::Client)
+            {
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedClient = true;
+            }
+        }
+
+        ~ClientGuard()
+        {
+            if(ownedClient)
+            {
+                delete LLD::Client;
+                LLD::Client = nullptr;
+            }
+        }
+    };
+
 } /* anonymous namespace */
 
 
@@ -170,55 +220,109 @@ TEST_CASE("LLD::TxnCommit returns true when all selected instances have active t
 
 
 /* ===========================================================================
- * TEST 3 — Aggregation: one failure → overall false, no short-circuit
+ * TEST 3 — Checkpoint barrier: one missing participant aborts every participant
  * ===========================================================================
  * We begin a transaction on Ledger but NOT on Trust, then commit both
- * (INSTANCES::LEDGER | INSTANCES::TRUST).  Trust returns false (no pTransaction),
- * Ledger returns true.  The aggregated result must be false.
- *
- * To confirm no short-circuit: after the call we verify that Ledger's
- * transaction was actually committed (a new TxnBegin on Ledger succeeds without
- * error, proving the previous transaction's pTransaction was nulled by its
- * TxnCommit and not left dangling by a short-circuit that skipped Ledger).
+ * (INSTANCES::LEDGER | INSTANCES::TRUST). Trust cannot checkpoint, so the
+ * coordinator must abort before applying Ledger and return false.
  */
-TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
+TEST_CASE("LLD::TxnCommit checkpoint barrier prevents partial apply",
           "[lld][txncommit]")
 {
     LedgerGuard ledgerGuard;
     TrustGuard  trustGuard;
 
-    SECTION("Ledger succeeds, Trust has no transaction → overall false")
+    SECTION("Trust has no transaction → overall false")
     {
         /* Open a transaction only on Ledger. */
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
 
-        /* Commit both Ledger and Trust. Trust has no active transaction → returns
-         * false. Ledger has an active transaction → returns true.
-         * Aggregated result must be false. */
+        /* Trust has no active transaction, so the checkpoint set is incomplete. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
         REQUIRE_FALSE(fResult);
     }
 
-    SECTION("No short-circuit: Ledger data committed despite Trust failure")
+    SECTION("Ledger data is not applied when Trust cannot checkpoint")
     {
-        /* Open a transaction on Ledger and commit a write inside it. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        const std::pair<std::string, uint32_t> keyTest =
+            std::make_pair(std::string("txn-checkpoint-barrier"), 1);
+        LLD::Ledger->Erase(keyTest);
 
-        /* Commit both (Trust has no active transaction → will return false,
-         * but Ledger MUST still be committed — no short-circuit allowed). */
+        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        const bool fWrite = LLD::Ledger->Write(keyTest, uint32_t(42));
+
+        /* Trust has no transaction, so no selected database may be applied. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
-        REQUIRE_FALSE(fResult); /* overall false because Trust failed */
+        const bool fApplied = LLD::Ledger->Exists(keyTest);
 
-        /* After the call, opening a fresh transaction on Ledger must succeed
-         * cleanly.  If TxnCommit had short-circuited before reaching Ledger,
-         * Ledger->pTransaction would still be set (left over from TxnBegin) and
-         * TxnRelease would not have run for it.  TxnBegin internally deletes any
-         * stale pTransaction, so we verify by immediately committing the empty new
-         * transaction — this must return true (a valid empty transaction). */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
-        const bool fSecondCommit = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER);
-        REQUIRE(fSecondCommit);
+        REQUIRE(fWrite);
+        REQUIRE_FALSE(fResult);
+        REQUIRE_FALSE(fApplied);
+
+        LLD::Ledger->Erase(keyTest);
     }
+}
+
+
+TEST_CASE("LLD transaction coordinator serializes shared transaction state",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool fContenderStarted = false;
+    std::atomic<bool> fContenderAcquired{false};
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+    std::thread contender([&]()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            fContenderStarted = true;
+        }
+        condition.notify_one();
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        fContenderAcquired.store(true);
+        LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        condition.wait(lock, [&](){ return fContenderStarted; });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    const bool fAcquiredBeforeRelease = fContenderAcquired.load();
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    contender.join();
+
+    REQUIRE_FALSE(fAcquiredBeforeRelease);
+    REQUIRE(fContenderAcquired.load());
+}
+
+
+TEST_CASE("LLD::HasOpenTransaction covers every MERKLE database",
+          "[lld][txncommit][merkle]")
+{
+    LogicalGuard logicalGuard;
+    ClientGuard clientGuard;
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+    const bool fLogicalDetected =
+        LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+    const bool fClientDetected =
+        LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+
+    REQUIRE(fLogicalDetected);
+    REQUIRE(fClientDetected);
 }
 
 
@@ -325,6 +429,26 @@ namespace
         }
     };
 
+
+    struct BestChainDiskGuard
+    {
+        bool hadBest{false};
+        uint1024_t hashBest;
+
+        BestChainDiskGuard()
+        : hadBest(LLD::Ledger->ReadBestChain(hashBest))
+        {
+        }
+
+        ~BestChainDiskGuard()
+        {
+            if(hadBest)
+                LLD::Ledger->WriteBestChain(hashBest);
+            else
+                LLD::Ledger->Erase(std::string("hashbestchain"));
+        }
+    };
+
 } /* anonymous namespace */
 
 
@@ -344,6 +468,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 {
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
 
     /* ---- Minimal genesis block written to disk ---- */
     TAO::Ledger::BlockState genesis;
@@ -564,6 +689,7 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
 {
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
 
     /* ---- Minimal genesis (nNonce distinct from earlier tests in this file to avoid hash collisions) ---- */
     TAO::Ledger::BlockState genesis;
@@ -619,6 +745,10 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     /* ---- (d) ChainState must have advanced to the candidate ---- */
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()   == 1u);
+
+    uint1024_t hashBestOnDisk;
+    REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+    REQUIRE(hashBestOnDisk == hashCandidate);
 
     /* Cleanup */
     LLD::Ledger->EraseBlock(hashCandidate);

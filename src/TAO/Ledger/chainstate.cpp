@@ -250,14 +250,16 @@ namespace TAO
                              * partial / inconsistent disk writes. */
                             if(!stateAncestor.SetBest())
                             {
-                                debug::error(FUNCTION, "failed to revert to hardcoded ancestor checkpoint");
                                 LLD::TxnAbort();
+                                return debug::error(FUNCTION,
+                                    "failed to revert to hardcoded ancestor checkpoint");
                             }
                             /* SetBest() commits the transaction internally when it succeeds.
                              * Guard with HasOpenTransaction() so that the now-closed outer
                              * transaction is not misreported as a commit failure. */
                             else if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
-                                debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
+                                return debug::error(FUNCTION,
+                                    "disk commit failed after reverting to hardcoded ancestor checkpoint");
 
                             break;
                         }
@@ -292,6 +294,7 @@ namespace TAO
                     /* Debug Output. */
                     debug::log(0, FUNCTION, "-revertblocks=XXX failed to remove ", nRevertBlocks, " blocks");
                     LLD::TxnAbort();
+                    return false;
                 }
                 else
                 {
@@ -301,7 +304,7 @@ namespace TAO
                      * Guard with HasOpenTransaction() so that the now-closed outer
                      * transaction is not misreported as a commit failure. */
                     if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
-                        debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
+                        return debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
                 }
             }
 
