@@ -2305,6 +2305,127 @@ TEST_CASE("BESTCHAIN recovery skips near-tip unknown race",
 }
 
 
+TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
+    "[ledger][process][a1][bestchain][near-tip][notify-order]")
+{
+#ifndef WIN32
+    LedgerGuard env;
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
+
+    const uint32_t nSavedBestHeight =
+        TAO::Ledger::ChainState::nBestHeight.load();
+    const uint32_t nSavedMaxPeerHeight =
+        TAO::Ledger::ChainState::nMaxPeerHeight.load();
+    const uint64_t nSavedSyncSession = TAO::Ledger::nSyncSession.load();
+    const bool fSavedClient = config::fClient.load();
+
+    const uint32_t nLocalHeight = 1000;
+    const uint32_t nPeerHeight =
+        nLocalHeight + TAO::Ledger::BESTCHAIN_NEAR_TIP_HEIGHT_SLACK + 1;
+    const uint1024_t hashGapTip(0xBC01000000000007ULL);
+
+    TAO::Ledger::ChainState::nBestHeight.store(nLocalHeight);
+    TAO::Ledger::nSyncSession.store(0);
+    config::fClient.store(false);
+
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashGapTip));
+
+    int fds[2] = {-1, -1};
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    REQUIRE(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
+
+    LLP::TritiumNode node;
+    node.fd = fds[1];
+    node.events = POLLIN;
+    node.nCurrentSession = 1;
+    node.nCurrentHeight = nLocalHeight;
+    node.Subscribe(
+        LLP::TritiumNode::SUBSCRIPTION::BLOCK
+        | LLP::TritiumNode::SUBSCRIPTION::BESTCHAIN
+        | LLP::TritiumNode::SUBSCRIPTION::BESTHEIGHT);
+
+    while(node.Buffered() > 0)
+    {
+        if(node.Flush() <= 0)
+            break;
+    }
+
+    std::vector<uint8_t> vDiscard(4096);
+    while(recv(fds[0], vDiscard.data(), vDiscard.size(), MSG_DONTWAIT) > 0)
+        ;
+
+    /* Dispatch order is BLOCK -> BESTCHAIN -> BESTHEIGHT.  Recovery must use
+     * the final BESTHEIGHT rather than the stale height observed at BESTCHAIN. */
+    DataStream ssNotify(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssNotify
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << hashGapTip
+        << uint8_t(LLP::TritiumNode::TYPES::BESTCHAIN)
+        << hashGapTip
+        << uint8_t(LLP::TritiumNode::TYPES::BESTHEIGHT)
+        << nPeerHeight;
+    node.INCOMING =
+        LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, ssNotify);
+
+    REQUIRE(node.ProcessPacket());
+    REQUIRE(node.nCurrentHeight == nPeerHeight);
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashGapTip) == 1);
+
+    while(node.Buffered() > 0)
+    {
+        if(node.Flush() <= 0)
+            break;
+    }
+
+    std::vector<uint8_t> vSent;
+    {
+        std::vector<uint8_t> buf(65536);
+        for(;;)
+        {
+            const ssize_t n = recv(fds[0], buf.data(), buf.size(), MSG_DONTWAIT);
+            if(n <= 0)
+                break;
+            vSent.insert(vSent.end(), buf.begin(), buf.begin() + n);
+        }
+    }
+
+    DataStream ssExpectedGet(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssExpectedGet
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << hashGapTip;
+    std::vector<uint8_t> vExpected = LLP::TritiumNode::NewMessage(
+        LLP::TritiumNode::ACTION::GET, ssExpectedGet).GetBytes();
+
+    DataStream ssExpectedList(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssExpectedList
+        << uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << uint8_t(LLP::TritiumNode::TYPES::LOCATOR)
+        << TAO::Ledger::Locator(TAO::Ledger::ChainState::hashBestChain.load())
+        << uint1024_t(hashGapTip);
+    const std::vector<uint8_t> vExpectedList = LLP::TritiumNode::NewMessage(
+        LLP::TritiumNode::ACTION::LIST, ssExpectedList).GetBytes();
+    vExpected.insert(vExpected.end(), vExpectedList.begin(), vExpectedList.end());
+
+    REQUIRE(vSent == vExpected);
+
+    node.fd = -1;
+    close(fds[0]);
+    close(fds[1]);
+
+    config::fClient.store(fSavedClient);
+    TAO::Ledger::nSyncSession.store(nSavedSyncSession);
+    TAO::Ledger::ChainState::nMaxPeerHeight.store(nSavedMaxPeerHeight);
+    TAO::Ledger::ChainState::nBestHeight.store(nSavedBestHeight);
+    TAO::Ledger::mapLastOrphanRequest.clear();
+#else
+    SUCCEED("packet-level socket regression is POSIX-only");
+#endif
+}
+
+
 TEST_CASE("Process primary path does not force PrimeCheck on IBD (source guard)",
 "[ledger][process][primecheck]")
 {
