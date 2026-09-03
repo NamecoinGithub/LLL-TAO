@@ -25,6 +25,10 @@ ________________________________________________________________________________
 #include <LLD/types/trust.h>
 #include <LLD/types/contract.h>
 
+#ifdef UNIT_TESTS
+#include <functional>
+#endif
+
 namespace LLD
 {
     extern LogicalDB*    Logical;
@@ -132,6 +136,28 @@ namespace LLD
      *
      */
     bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+
+
+    /** Abort a transaction automatically if its scope exits before it is consumed. */
+    class TransactionGuard
+    {
+    public:
+        TransactionGuard(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+        ~TransactionGuard();
+
+        TransactionGuard(const TransactionGuard&) = delete;
+        TransactionGuard& operator=(const TransactionGuard&) = delete;
+
+    private:
+        const uint8_t nFlags;
+        const uint16_t nInstances;
+    };
+
+
+    #ifdef UNIT_TESTS
+    /** Install a test hook invoked after the coordinator is observed locked. */
+    void SetTxnCoordinatorWaitHook(const std::function<void()>& fnHook);
+    #endif
 }
 
 #endif

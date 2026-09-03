@@ -834,9 +834,15 @@ namespace TAO
             /* Watch for genesis. */
             if(!ChainState::tStateGenesis)
             {
-                /* Write the block to disk. */
-                if(!LLD::Ledger->WriteBlock(hash, *this))
-                    return debug::error(FUNCTION, "block state already exists");
+                /* Accept a retry only when the previously persisted block is identical. */
+                if(LLD::Ledger->HasBlock(hash))
+                {
+                    BlockState state;
+                    if(!LLD::Ledger->ReadBlock(hash, state) || state != *this)
+                        return debug::error(FUNCTION, "conflicting genesis block state already exists");
+                }
+                else if(!LLD::Ledger->WriteBlock(hash, *this))
+                    return debug::error(FUNCTION, "failed to write genesis block state");
 
                 /* Publish the best pointer only after its target exists on disk. */
                 if(!LLD::Ledger->WriteBestChain(hash))

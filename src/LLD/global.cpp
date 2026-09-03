@@ -46,6 +46,10 @@ namespace LLD
     static thread_local bool fTxnMemoryOnly = false;
     static thread_local uint16_t nTxnOwnerInstances = 0;
 
+    #ifdef UNIT_TESTS
+    static std::function<void()> fnTxnCoordinatorWaitHook;
+    #endif
+
 
     static void ReleaseMemoryTransactions(const uint8_t nFlags, const uint16_t nInstances)
     {
@@ -410,7 +414,17 @@ namespace LLD
                 return;
             }
 
+            #ifdef UNIT_TESTS
+            if(!TRANSACTION_COORDINATOR.try_lock())
+            {
+                if(fnTxnCoordinatorWaitHook)
+                    fnTxnCoordinatorWaitHook();
+
+                TRANSACTION_COORDINATOR.lock();
+            }
+            #else
             TRANSACTION_COORDINATOR.lock();
+            #endif
 
             if(fTxnRecoveryRequired.load())
             {
@@ -699,4 +713,26 @@ namespace LLD
 
         return fAllSucceeded;
     }
+
+
+    TransactionGuard::TransactionGuard(const uint8_t nFlagsIn, const uint16_t nInstancesIn)
+    : nFlags(nFlagsIn)
+    , nInstances(nInstancesIn)
+    {
+        TxnBegin(nFlags, nInstances);
+    }
+
+
+    TransactionGuard::~TransactionGuard()
+    {
+        TxnAbort(nFlags, nInstances);
+    }
+
+
+    #ifdef UNIT_TESTS
+    void SetTxnCoordinatorWaitHook(const std::function<void()>& fnHook)
+    {
+        fnTxnCoordinatorWaitHook = fnHook;
+    }
+    #endif
 }

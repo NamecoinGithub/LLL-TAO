@@ -271,19 +271,21 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
 
     std::mutex mutex;
     std::condition_variable condition;
-    bool fContenderStarted = false;
+    bool fContenderWaiting = false;
     std::atomic<bool> fContenderAcquired{false};
 
     LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
-
-    std::thread contender([&]()
+    LLD::SetTxnCoordinatorWaitHook([&]()
     {
         {
             std::lock_guard<std::mutex> lock(mutex);
-            fContenderStarted = true;
+            fContenderWaiting = true;
         }
         condition.notify_one();
+    });
 
+    std::thread contender([&]()
+    {
         LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
         fContenderAcquired.store(true);
         LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
@@ -291,14 +293,14 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
 
     {
         std::unique_lock<std::mutex> lock(mutex);
-        condition.wait(lock, [&](){ return fContenderStarted; });
+        condition.wait(lock, [&](){ return fContenderWaiting; });
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
     const bool fAcquiredBeforeRelease = fContenderAcquired.load();
 
     LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
     contender.join();
+    LLD::SetTxnCoordinatorWaitHook({});
 
     REQUIRE_FALSE(fAcquiredBeforeRelease);
     REQUIRE(fContenderAcquired.load());

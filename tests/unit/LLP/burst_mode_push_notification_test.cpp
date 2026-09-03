@@ -390,23 +390,26 @@ TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst"
 TEST_CASE("Burst Mode — Dispatcher retains only the newest pending generation",
           "[burst_mode][push_queue][llp]")
 {
-    std::queue<uint64_t> pending;
-    const auto enqueueLatest = [&](uint64_t nGeneration)
-    {
-        if(!pending.empty() && pending.back() >= nGeneration)
-            return;
+    std::queue<LLP::MinerPushDispatcher::PushEvent> pending;
+    std::mutex mutex;
+    uint64_t nAcceptedGeneration = 0;
 
-        while(!pending.empty())
-            pending.pop();
-        pending.push(nGeneration);
-    };
+    LLP::MinerPushDispatcher::PushEvent event;
+    event.nGeneration = 1;
+    REQUIRE(LLP::MinerPushDispatcher::EnqueueLatest(
+        pending, mutex, nAcceptedGeneration, event));
 
-    enqueueLatest(1);
-    enqueueLatest(3);
-    enqueueLatest(2);
+    event.nGeneration = 3;
+    REQUIRE(LLP::MinerPushDispatcher::EnqueueLatest(
+        pending, mutex, nAcceptedGeneration, event));
 
-    REQUIRE(pending.size() == 1);
-    REQUIRE(pending.front() == 3);
+    pending.pop();
+    event.nGeneration = 2;
+    REQUIRE_FALSE(LLP::MinerPushDispatcher::EnqueueLatest(
+        pending, mutex, nAcceptedGeneration, event));
+
+    REQUIRE(pending.empty());
+    REQUIRE(nAcceptedGeneration == 3);
 }
 
 

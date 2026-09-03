@@ -126,6 +126,10 @@ namespace LLP
 
     private:
 
+        #ifdef UNIT_TESTS
+    public:
+        #endif
+
         /** Accepted push event after channel-level dedup. */
         struct PushEvent
         {
@@ -163,11 +167,17 @@ namespace LLP
         /** Replace a lane's pending work only when this event is newer. */
         static bool EnqueueLatest(std::queue<PushEvent>& queue,
                                   std::mutex& mutex,
+                                  uint64_t& nAcceptedGeneration,
                                   const PushEvent& event);
+
+        #ifdef UNIT_TESTS
+    private:
+        #endif
 
         /* ── Stateless lane worker ──────────────────────────────────────────── */
         static std::queue<PushEvent>                      s_statelessQueue;
         static std::mutex                                   s_statelessMutex;
+        static uint64_t                                     s_nStatelessAcceptedGeneration;
         static std::condition_variable                      s_statelessCV;
         static std::thread                                  s_statelessThread;
         static std::atomic<bool>                            s_statelessRunning;
@@ -175,6 +185,7 @@ namespace LLP
         /* ── Legacy lane worker ─────────────────────────────────────────────── */
         static std::queue<PushEvent>                      s_legacyQueue;
         static std::mutex                                   s_legacyMutex;
+        static uint64_t                                     s_nLegacyAcceptedGeneration;
         static std::condition_variable                      s_legacyCV;
         static std::thread                                  s_legacyThread;
         static std::atomic<bool>                            s_legacyRunning;

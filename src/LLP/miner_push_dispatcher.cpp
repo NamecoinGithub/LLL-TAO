@@ -35,12 +35,14 @@ namespace LLP
     /* Per-lane async queue storage and synchronisation primitives. */
     std::queue<MinerPushDispatcher::PushEvent> MinerPushDispatcher::s_statelessQueue;
     std::mutex                                   MinerPushDispatcher::s_statelessMutex;
+    uint64_t                                     MinerPushDispatcher::s_nStatelessAcceptedGeneration{0};
     std::condition_variable                      MinerPushDispatcher::s_statelessCV;
     std::thread                                  MinerPushDispatcher::s_statelessThread;
     std::atomic<bool>                            MinerPushDispatcher::s_statelessRunning{false};
 
     std::queue<MinerPushDispatcher::PushEvent> MinerPushDispatcher::s_legacyQueue;
     std::mutex                                   MinerPushDispatcher::s_legacyMutex;
+    uint64_t                                     MinerPushDispatcher::s_nLegacyAcceptedGeneration{0};
     std::condition_variable                      MinerPushDispatcher::s_legacyCV;
     std::thread                                  MinerPushDispatcher::s_legacyThread;
     std::atomic<bool>                            MinerPushDispatcher::s_legacyRunning{false};
@@ -104,11 +106,14 @@ namespace LLP
      * obsolete once a newer generation is waiting to refresh miners. */
     bool MinerPushDispatcher::EnqueueLatest(std::queue<PushEvent>& queue,
                                             std::mutex& mutex,
+                                            uint64_t& nAcceptedGeneration,
                                             const PushEvent& event)
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if(!queue.empty() && queue.back().nGeneration >= event.nGeneration)
+        if(nAcceptedGeneration >= event.nGeneration)
             return false;
+
+        nAcceptedGeneration = event.nGeneration;
 
         while(!queue.empty())
             queue.pop();
@@ -278,13 +283,15 @@ namespace LLP
 
             if(fStatelessUp)
             {
-                if(EnqueueLatest(s_statelessQueue, s_statelessMutex, event))
+                if(EnqueueLatest(s_statelessQueue, s_statelessMutex,
+                                 s_nStatelessAcceptedGeneration, event))
                     s_statelessCV.notify_one();
             }
 
             if(fLegacyUp)
             {
-                if(EnqueueLatest(s_legacyQueue, s_legacyMutex, event))
+                if(EnqueueLatest(s_legacyQueue, s_legacyMutex,
+                                 s_nLegacyAcceptedGeneration, event))
                     s_legacyCV.notify_one();
             }
 

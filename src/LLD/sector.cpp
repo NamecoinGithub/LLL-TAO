@@ -22,8 +22,15 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 #include <Util/include/hex.h>
 
+#include <cstdio>
 #include <fstream>
 #include <functional>
+
+#ifdef WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace LLD
 {
@@ -668,19 +675,33 @@ namespace LLD
         pTransaction->ssJournal << std::string("commit");
 
         /* Create an append only stream. */
-        std::ofstream stream = std::ofstream(debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat"), std::ios::app | std::ios::binary);
-        if(!stream.is_open())
+        FILE* stream = std::fopen(
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat").c_str(), "ab");
+        if(!stream)
             return debug::error(FUNCTION, "failed to open journal file");
 
         /* Write to the file.  */
         const std::vector<uint8_t>& vBytes = pTransaction->ssJournal.Bytes();
-        stream.write((char*)&vBytes[0], vBytes.size());
-        stream.flush();
-        if(!stream.good())
+        if(std::fwrite(vBytes.data(), 1, vBytes.size(), stream) != vBytes.size()
+        || std::fflush(stream) != 0)
+        {
+            std::fclose(stream);
             return debug::error(FUNCTION, "failed to flush journal file");
+        }
 
-        stream.close();
-        if(stream.fail())
+        #ifdef WIN32
+        const bool fSynced = (_commit(_fileno(stream)) == 0);
+        #else
+        const bool fSynced = (fsync(fileno(stream)) == 0);
+        #endif
+
+        if(!fSynced)
+        {
+            std::fclose(stream);
+            return debug::error(FUNCTION, "failed to sync journal file");
+        }
+
+        if(std::fclose(stream) != 0)
             return debug::error(FUNCTION, "failed to close journal file");
 
         return true;
@@ -718,8 +739,11 @@ namespace LLD
 
         /* Erase data set to be removed. */
         for(const auto& item : pTransaction->setErasedData)
-            if(!pSectorKeys->Erase(item))
+        {
+            SectorKey cKey;
+            if(pSectorKeys->Get(item, cKey) && !pSectorKeys->Erase(item))
                 return debug::error(FUNCTION, "failed to erase from keychain");
+        }
 
         /* Commit the sector data. */
         for(const auto& item : pTransaction->mapTransactions)

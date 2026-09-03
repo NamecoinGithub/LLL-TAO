@@ -710,6 +710,11 @@ namespace TAO
                     {
                         LOCK(PROCESSING_MUTEX);
                         FinalizeExtractedOrphan(*pConnectable, nStatus);
+
+                        /* Permit one prompt redelivery after missing data arrives.
+                         * A still-incomplete retry records a fresh throttle time. */
+                        if(nStatus & PROCESS::INCOMPLETE)
+                            mapLastMissingProcessTime.erase(pConnectable->GetHash());
                     }
 
                     return PeerBestRecoveryResult::SKIPPED;
