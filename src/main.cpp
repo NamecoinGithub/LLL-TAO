@@ -515,5 +515,5 @@ int main(int argc, char** argv)
     debug::Shutdown();
 
 
-    return 0;
+    return fFailed ? 1 : 0;
 }

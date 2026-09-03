@@ -497,6 +497,12 @@ namespace TAO
             runtime::timer timer;
             timer.Start();
 
+            /* Keep the candidate block and any resulting chain transition in one
+             * recoverable transaction. SetBest() joins and commits this transaction. */
+            LLD::TransactionGuard transaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+            if(!transaction)
+                return debug::error(FUNCTION, "failed to begin client block transaction");
+
             /* Write the block to disk. */
             if(!LLD::Client->WriteBlock(GetHash(), *this))
                 return debug::error(FUNCTION, "block state failed to write");
@@ -538,6 +544,12 @@ namespace TAO
                         return debug::error(FUNCTION, "failed to set best chain");
                 }
             }
+
+            /* SetBest() commits the transaction when this block becomes best.
+             * Non-best candidates still need their block write committed here. */
+            if(LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE)
+            && !LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                return debug::error(FUNCTION, "disk transaction commit failed for client block");
 
             /* Debug output. */
             debug::log(TAO::Ledger::ChainState::Synchronizing() ? 4 : 0, FUNCTION, "ACCEPTED");
