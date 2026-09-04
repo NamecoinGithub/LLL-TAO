@@ -558,7 +558,7 @@ namespace LLD
         /* Special check if using MINER or SANITIZE flags — intentional short-circuit,
          * not a failure: callers use these flags to prevent accidental commits. */
         if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return true;
+            return TxnAbort(nFlags, nInstances);
 
         if(!fTxnOwner)
             return false;
