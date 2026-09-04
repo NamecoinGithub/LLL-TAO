@@ -138,21 +138,20 @@ namespace TAO
 
 
         /*Harden a checkpoint into the checkpoint chain.*/
-        bool HardenCheckpoint(const BlockState& state)
+        bool HardenCheckpoint(const BlockState& state, bool* pfHardened)
         {
+            if(pfHardened)
+                *pfHardened = false;
+
             /* Only Harden New Checkpoint if it Fits new timestamp. */
             if(!IsNewTimespan(state))
-                return false;
-
-            /* Notify nodes of the checkpoint. */
-            if(LLP::TRITIUM_SERVER && !ChainState::Synchronizing())
             {
-                LLP::TRITIUM_SERVER->Relay
-                (
-                    LLP::TritiumNode::ACTION::NOTIFY,
-                    uint8_t(LLP::TritiumNode::TYPES::CHECKPOINT),
-                    state.hashCheckpoint
-                );
+                BlockState stateCheckpoint;
+                if(ChainState::hashCheckpoint != 0
+                && !LLD::Ledger->ReadBlock(state.hashCheckpoint, stateCheckpoint))
+                    return debug::error(FUNCTION, "failed to read checkpoint");
+
+                return true;
             }
 
             /* Read the checkpoint block BEFORE updating atomics to avoid
@@ -165,6 +164,20 @@ namespace TAO
              * will already see the matching nCheckpointHeight. */
             ChainState::nCheckpointHeight = stateCheckpoint.nHeight;
             ChainState::hashCheckpoint    = state.hashCheckpoint;
+
+            /* Notify nodes only after the checkpoint has been published locally. */
+            if(LLP::TRITIUM_SERVER && !ChainState::Synchronizing())
+            {
+                LLP::TRITIUM_SERVER->Relay
+                (
+                    LLP::TritiumNode::ACTION::NOTIFY,
+                    uint8_t(LLP::TritiumNode::TYPES::CHECKPOINT),
+                    state.hashCheckpoint
+                );
+            }
+
+            if(pfHardened)
+                *pfHardened = true;
 
             /* Dump the Checkpoint if not Initializing. */
             if(config::nVerbose >= (ChainState::Synchronizing() ? 1 : 0))

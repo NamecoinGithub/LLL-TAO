@@ -408,6 +408,17 @@ namespace LLD
     {
         const bool fCoordinated =
             (nFlags != TAO::Ledger::FLAGS::MINER && nFlags != TAO::Ledger::FLAGS::SANITIZE);
+        const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
+        uint16_t nOwnedInstances = nInstances;
+        if(fCoordinated && !fMemoryOnly)
+        {
+            if(nInstances & (INSTANCES::CLIENT | INSTANCES::LOGICAL))
+                nOwnedInstances = INSTANCES::MERKLE;
+            else if(nInstances & (INSTANCES::LEDGER | INSTANCES::TRUST | INSTANCES::LEGACY))
+                nOwnedInstances = INSTANCES::CONSENSUS;
+            else
+                nOwnedInstances = config::fClient.load() ? INSTANCES::MERKLE : INSTANCES::CONSENSUS;
+        }
 
         if(fCoordinated)
         {
@@ -440,8 +451,8 @@ namespace LLD
             }
 
             fTxnOwner = true;
-            fTxnMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-            nTxnOwnerInstances = nInstances;
+            fTxnMemoryOnly = fMemoryOnly;
+            nTxnOwnerInstances = nOwnedInstances;
         }
 
         if(fTxnRecoveryRequired.load())
@@ -451,15 +462,15 @@ namespace LLD
         }
 
         /* Start the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
             Contract->MemoryBegin(nFlags);
 
         /* Start the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
             Register->MemoryBegin(nFlags);
 
         /* Start the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
             Ledger->MemoryBegin(nFlags);
 
         /* Handle memory commits if in memory m ode. */
@@ -467,31 +478,31 @@ namespace LLD
             return true;
 
         /* Start the Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
             Logical->TxnBegin();
 
         /* Start the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
             Contract->TxnBegin();
 
         /* Start the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
             Register->TxnBegin();
 
         /* Start the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
             Ledger->TxnBegin();
 
         /* Start the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
             Client->TxnBegin();
 
         /* Start the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
             Trust->TxnBegin();
 
         /* Start the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
             Legacy->TxnBegin();
 
         return true;

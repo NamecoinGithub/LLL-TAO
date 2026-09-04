@@ -1163,9 +1163,16 @@ namespace TAO
                 if(fCheckpointCandidate)
                 {
                     const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
-                    HardenCheckpoint(stateCheckpoint);
+                    bool fCheckpointHardened = false;
+                    if(!HardenCheckpoint(stateCheckpoint, &fCheckpointHardened))
+                    {
+                        ::Shutdown();
+                        return debug::error(FUNCTION,
+                            "post-commit checkpoint hardening failed; shutdown requested");
+                    }
+
                     const uint1024_t hashCheckpointAfter = ChainState::hashCheckpoint.load();
-                    if(hashCheckpointBefore != hashCheckpointAfter)
+                    if(fCheckpointHardened && hashCheckpointBefore != hashCheckpointAfter)
                     {
                         debug::log(0, FUNCTION, "Checkpoint hardened: ",
                             hashCheckpointBefore.SubString(), " -> ", hashCheckpointAfter.SubString(),

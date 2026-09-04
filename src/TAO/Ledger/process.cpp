@@ -214,6 +214,37 @@ namespace TAO
 
         namespace
         {
+            uint64_t PruneOrphanSubtree(const uint1024_t& hashRoot)
+            {
+                std::vector<uint1024_t> vHashes;
+                std::queue<uint1024_t> queueHashes;
+                queueHashes.push(hashRoot);
+
+                while(!queueHashes.empty())
+                {
+                    const uint1024_t hash = queueHashes.front();
+                    queueHashes.pop();
+                    vHashes.push_back(hash);
+
+                    const std::vector<uint1024_t> vChildren = mapOrphans.Children(hash);
+                    for(const auto& hashChild : vChildren)
+                        queueHashes.push(hashChild);
+                }
+
+                const uint64_t nPruned = mapOrphans.RemoveSubtree(hashRoot);
+                for(const auto& hash : vHashes)
+                {
+                    mapLastMissing.erase(hash);
+                    mapMissingBranchEscalations.erase(hash);
+                    setUnrecoverableBlocks.erase(hash);
+                    mapMissingTxCache.erase(hash);
+                    mapLastMissingProcessTime.erase(hash);
+                }
+
+                return nPruned;
+            }
+
+
             void FinalizeExtractedOrphan(const TAO::Ledger::Block& block,
                                          const uint8_t nStatus)
             {
@@ -223,12 +254,7 @@ namespace TAO
 
                 if(nStatus & (PROCESS::REJECTED | PROCESS::IGNORED))
                 {
-                    const uint64_t nPruned = mapOrphans.RemoveSubtree(hashBlock);
-                    mapLastMissing.erase(hashBlock);
-                    mapMissingBranchEscalations.erase(hashBlock);
-                    setUnrecoverableBlocks.erase(hashBlock);
-                    mapMissingTxCache.erase(hashBlock);
-                    mapLastMissingProcessTime.erase(hashBlock);
+                    const uint64_t nPruned = PruneOrphanSubtree(hashBlock);
 
                     debug::warning(FUNCTION, "pruned rejected connectable orphan subtree root=",
                         hashBlock.SubString(), " descendants=", nPruned);
@@ -1930,12 +1956,7 @@ namespace TAO
                          * through. */
                         if(!pOrphan->Check())
                         {
-                            const uint64_t nPruned = mapOrphans.RemoveSubtree(hashOrphan);
-                            mapLastMissing.erase(hashOrphan);
-                            mapMissingBranchEscalations.erase(hashOrphan);
-                            setUnrecoverableBlocks.erase(hashOrphan);
-                            mapMissingTxCache.erase(hashOrphan);
-                            mapLastMissingProcessTime.erase(hashOrphan);
+                            const uint64_t nPruned = PruneOrphanSubtree(hashOrphan);
                             debug::warning(FUNCTION, "removed invalid orphan subtree root=",
                                 hashOrphan.SubString(), " count=", nPruned);
                             continue;
@@ -2046,12 +2067,7 @@ namespace TAO
 
                         if(!pOrphan->Accept())
                         {
-                            const uint64_t nPruned = mapOrphans.RemoveSubtree(hashOrphan);
-                            mapLastMissing.erase(hashOrphan);
-                            mapMissingBranchEscalations.erase(hashOrphan);
-                            setUnrecoverableBlocks.erase(hashOrphan);
-                            mapMissingTxCache.erase(hashOrphan);
-                            mapLastMissingProcessTime.erase(hashOrphan);
+                            const uint64_t nPruned = PruneOrphanSubtree(hashOrphan);
                             debug::warning(FUNCTION, "removed rejected orphan subtree root=",
                                 hashOrphan.SubString(), " count=", nPruned);
                             continue;

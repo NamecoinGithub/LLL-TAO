@@ -1484,9 +1484,24 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
 
     TAO::Ledger::mapOrphans.Clear();
     TAO::Ledger::mapCheckRejects.clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapMissingBranchEscalations.clear();
+    TAO::Ledger::setUnrecoverableBlocks.clear();
+    TAO::Ledger::mapMissingTxCache.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
+
+    for(const auto& hash : {hashA, hashB, hashC})
+    {
+        TAO::Ledger::mapLastMissing[hash] = 1;
+        TAO::Ledger::mapMissingBranchEscalations[hash] = 1;
+        TAO::Ledger::mapMissingTxCache[hash] = {};
+        TAO::Ledger::mapLastMissingProcessTime[hash] = 1;
+    }
+    TAO::Ledger::setUnrecoverableBlocks.insert(hashB);
+    TAO::Ledger::setUnrecoverableBlocks.insert(hashC);
 
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashC, 223, "unit-test", nullptr);
@@ -1495,6 +1510,11 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
+    REQUIRE(TAO::Ledger::mapLastMissing.empty());
+    REQUIRE(TAO::Ledger::mapMissingBranchEscalations.empty());
+    REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
+    REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
+    REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());
 
     TAO::Ledger::mapOrphans.Clear();
     TAO::Ledger::mapCheckRejects.clear();

@@ -57,10 +57,12 @@ namespace TAO
          *
          *  @param[in] state The state object to check from.
          *
-         *  @returns true if a checkpoint was hardened.
+         *  @param[out] pfHardened Set true when a checkpoint was published.
+         *
+         *  @returns true if checkpoint evaluation and publication succeeded.
          *
          **/
-        bool HardenCheckpoint(const BlockState& state);
+        bool HardenCheckpoint(const BlockState& state, bool* pfHardened = nullptr);
 
 
         /** Checkpoint Height.

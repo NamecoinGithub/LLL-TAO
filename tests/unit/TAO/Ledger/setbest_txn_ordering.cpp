@@ -247,30 +247,43 @@ TEST_CASE("LLD::TxnCommit applies every instance owned by the transaction",
 }
 
 
+TEST_CASE("LLD::TxnBegin opens every crash-recovery participant",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE(LLD::Trust->HasTransaction());
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+}
+
+
 /* ===========================================================================
- * TEST 3 — Checkpoint barrier: one missing participant aborts every participant
+ * TEST 3 — Checkpoint barrier: an unowned participant aborts every participant
  * ===========================================================================
- * We begin a transaction on Ledger but NOT on Trust, then commit both
- * (INSTANCES::LEDGER | INSTANCES::TRUST). Trust cannot checkpoint, so the
- * coordinator must abort before applying Ledger and return false.
+ * We begin a consensus transaction on Ledger, then attempt to commit Logical
+ * as well. Logical belongs to the MERKLE recovery group and therefore has no
+ * transaction, so the coordinator must abort before applying Ledger.
  */
 TEST_CASE("LLD::TxnCommit checkpoint barrier prevents partial apply",
           "[lld][txncommit]")
 {
     LedgerGuard ledgerGuard;
-    TrustGuard  trustGuard;
+    LogicalGuard logicalGuard;
 
-    SECTION("Trust has no transaction → overall false")
+    SECTION("Logical has no transaction → overall false")
     {
         /* Open a transaction only on Ledger. */
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
 
-        /* Trust has no active transaction, so the checkpoint set is incomplete. */
-        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        /* Logical has no active transaction, so the checkpoint set is incomplete. */
+        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::LOGICAL);
         REQUIRE_FALSE(fResult);
     }
 
-    SECTION("Ledger data is not applied when Trust cannot checkpoint")
+    SECTION("Ledger data is not applied when Logical cannot checkpoint")
     {
         const std::pair<std::string, uint32_t> keyTest =
             std::make_pair(std::string("txn-checkpoint-barrier"), 1);
@@ -279,8 +292,8 @@ TEST_CASE("LLD::TxnCommit checkpoint barrier prevents partial apply",
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
         const bool fWrite = LLD::Ledger->Write(keyTest, uint32_t(42));
 
-        /* Trust has no transaction, so no selected database may be applied. */
-        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        /* Logical has no transaction, so no selected database may be applied. */
+        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::LOGICAL);
         const bool fApplied = LLD::Ledger->Exists(keyTest);
 
         REQUIRE(fWrite);
