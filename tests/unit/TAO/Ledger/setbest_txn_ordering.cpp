@@ -513,15 +513,19 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
 
     {
         std::unique_lock<std::mutex> lock(mutex);
-        condition.wait(lock, [&](){ return fContenderWaiting; });
+        condition.wait_for(lock, std::chrono::seconds(2),
+            [&](){ return fContenderWaiting; });
     }
 
+    const bool fSawContenderWaiting = fContenderWaiting;
     const bool fAcquiredBeforeRelease = fContenderAcquired.load();
 
     LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
-    contender.join();
+    if(contender.joinable())
+        contender.join();
     LLD::SetTxnCoordinatorWaitHook({});
 
+    REQUIRE(fSawContenderWaiting);
     REQUIRE_FALSE(fAcquiredBeforeRelease);
     REQUIRE(fContenderAcquired.load());
 }
@@ -1113,13 +1117,22 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
     ContractGuard contractGuard;
     RegisterGuard registerGuard;
 
-    /* Contract fails first after every journal has a commit marker, leaving the
-     * remaining complete journals available for the next restart. */
-    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
-    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(
-        std::make_pair(std::string("recovery-register"), 1), 11)));
-    REQUIRE(WriteRecoveryJournal("_TRUST", MakeWriteJournal(
-        std::make_pair(std::string("recovery-trust"), 1), 12)));
+    /* Apply earlier CONSENSUS participants successfully, then fail a later one
+     * so recovery stops after a real partial apply and retains every journal. */
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-contract"), 1);
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-register"), 1);
+    const std::pair<std::string, uint32_t> trustKey =
+        std::make_pair(std::string("recovery-trust"), 1);
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Trust->Erase(trustKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 10)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 11)));
+    REQUIRE(WriteRecoveryJournal("_TRUST", MakeFailingIndexJournal()));
     REQUIRE(WriteRecoveryJournal("_LEGACY", MakeWriteJournal(
         std::make_pair(std::string("recovery-legacy"), 1), 13)));
     REQUIRE(WriteRecoveryJournal("_LEDGER", MakeWriteJournal(
@@ -1139,6 +1152,10 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
 
     REQUIRE_FALSE(LLD::TxnRecovery());
 
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE_FALSE(LLD::Trust->Exists(trustKey));
+
     REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
     REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
     REQUIRE(JournalSize("_TRUST") == nTrustJournal);
@@ -1151,6 +1168,9 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
     REQUIRE(LLD::Trust->TxnRelease());
     REQUIRE(LLD::Legacy->TxnRelease());
     REQUIRE(LLD::Ledger->TxnRelease());
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
 }
 
 
@@ -1163,11 +1183,21 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
     ContractGuard contractGuard;
     RegisterGuard registerGuard;
 
-    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
-    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(
-        std::make_pair(std::string("recovery-merkle-register"), 1), 21)));
-    REQUIRE(WriteRecoveryJournal("_API", MakeWriteJournal(
-        std::make_pair(std::string("recovery-logical"), 1), 22)));
+    /* Apply earlier MERKLE participants successfully, then fail a later one. */
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-merkle-contract"), 1);
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-merkle-register"), 1);
+    const std::pair<std::string, uint32_t> logicalKey =
+        std::make_pair(std::string("recovery-logical"), 1);
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Logical->Erase(logicalKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 20)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
+    REQUIRE(WriteRecoveryJournal("_API", MakeFailingIndexJournal()));
     REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
         std::make_pair(std::string("recovery-client"), 1), 23)));
 
@@ -1183,6 +1213,10 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
 
     REQUIRE_FALSE(LLD::TxnRecovery());
 
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE_FALSE(LLD::Logical->Exists(logicalKey));
+
     REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
     REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
     REQUIRE(JournalSize("_API") == nLogicalJournal);
@@ -1193,4 +1227,7 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
     REQUIRE(LLD::Register->TxnRelease());
     REQUIRE(LLD::Logical->TxnRelease());
     REQUIRE(LLD::Client->TxnRelease());
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
 }
