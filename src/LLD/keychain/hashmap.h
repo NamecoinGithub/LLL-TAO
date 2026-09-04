@@ -207,11 +207,13 @@ namespace LLD
         /** Erase
          *
          *  Erase a key from the disk hashmaps.
+         *  Missing keys succeed so replayed erasures stay idempotent, while
+         *  keychain I/O failures still return false.
          *  TODO: This should be optimized further.
          *
          *  @param[in] vKey the key to erase.
          *
-         *  @return True if the key was erased, false otherwise.
+         *  @return True if the key was erased or already absent, false on I/O failure.
          *
          **/
         bool Erase(const std::vector<uint8_t> &vKey);

@@ -647,20 +647,38 @@ namespace LLD
             std::fstream* pstream;
             if(!fileCache->Get(i, pstream))
             {
+                const std::string filename = debug::safe_printstr(
+                    strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i);
+
                 /* Set the new stream pointer. */
-                pstream = new std::fstream(
-                  debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i),
-                  std::ios::in | std::ios::out | std::ios::binary);
+                pstream = new std::fstream(filename, std::ios::in | std::ios::out | std::ios::binary);
+                if(!pstream->is_open())
+                {
+                    delete pstream;
+                    return debug::error(FUNCTION, "couldn't open hashmap object at: ",
+                        filename, " (", strerror(errno), ")");
+                }
 
                 /* If file not found add to LRU cache. */
                 fileCache->Put(i, pstream);
             }
 
+            /* Check that file is open. */
+            if(!pstream->is_open())
+                pstream->open(debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i),
+                    std::ios::in | std::ios::out | std::ios::binary);
+
+            if(!pstream->is_open())
+                return debug::error(FUNCTION, "couldn't open hashmap object at bucket file ", i);
+
             /* Seek to the hashmap index in file. */
-            pstream->seekg (nFilePos, std::ios::beg);
+            pstream->clear();
+            pstream->seekg(nFilePos, std::ios::beg);
 
             /* Read the bucket binary data from file stream */
             pstream->read((char*) &vBucket[0], vBucket.size());
+            if(!*pstream)
+                return debug::error(FUNCTION, "failed to read hashmap bucket");
 
             /* Check if this bucket has the key */
             if(std::equal(vBucket.begin() + 13, vBucket.begin() + 13 + vKeyCompressed.size(), vKeyCompressed.begin()))
@@ -671,9 +689,10 @@ namespace LLD
                 ssKey >> cKey;
 
                 /* Seek to the hashmap index in file. */
-                pstream->seekp (nFilePos, std::ios::beg);
+                pstream->clear();
+                pstream->seekp(nFilePos, std::ios::beg);
 
-                /* Read the bucket binary data from file stream */
+                /* Write an empty bucket over the erased key. */
                 std::vector<uint8_t> vEmpty(HASHMAP_KEY_ALLOCATION, 0);
                 pstream->write((char*) &vEmpty[0], vEmpty.size());
                 pstream->flush();
@@ -699,7 +718,8 @@ namespace LLD
             }
         }
 
-        return false;
+        /* Missing keys are already erased; treat that as successful idempotent apply. */
+        return true;
     }
 
 

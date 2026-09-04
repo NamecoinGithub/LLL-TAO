@@ -160,6 +160,10 @@ namespace LLD
     #ifdef UNIT_TESTS
     /** Install a test hook invoked after the coordinator is observed locked. */
     void SetTxnCoordinatorWaitHook(const std::function<void()>& fnHook);
+
+    /** Clear the recovery-required latch so unit tests can continue after a
+     *  forced partial-apply failure. */
+    void ResetTxnRecoveryRequired();
     #endif
 }
 

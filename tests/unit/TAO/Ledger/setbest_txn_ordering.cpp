@@ -42,6 +42,10 @@ ________________________________________________________________________________
 
 /* Real-code test headers (Gap 2 tests below) */
 #include <LLD/include/global.h>
+#include <LLD/include/version.h>
+#include <LLD/types/contract.h>
+#include <LLD/types/register.h>
+#include <LLD/types/legacy.h>
 #include <LLD/types/trust.h>
 
 #include <TAO/Ledger/include/chainstate.h>
@@ -53,10 +57,12 @@ ________________________________________________________________________________
 
 #include <Util/include/args.h>
 #include <Util/include/filesystem.h>
+#include <Util/templates/datastream.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -197,7 +203,151 @@ namespace
         }
     };
 
-} /* anonymous namespace */
+
+    struct ContractGuard
+    {
+        bool ownedContract{false};
+
+        ContractGuard()
+        {
+            if(!LLD::Contract)
+            {
+                LLD::Contract = new LLD::ContractDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedContract = true;
+            }
+        }
+
+        ~ContractGuard()
+        {
+            if(ownedContract)
+            {
+                delete LLD::Contract;
+                LLD::Contract = nullptr;
+            }
+        }
+    };
+
+
+    struct RegisterGuard
+    {
+        bool ownedRegister{false};
+
+        RegisterGuard()
+        {
+            if(!LLD::Register)
+            {
+                LLD::Register = new LLD::RegisterDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedRegister = true;
+            }
+        }
+
+        ~RegisterGuard()
+        {
+            if(ownedRegister)
+            {
+                delete LLD::Register;
+                LLD::Register = nullptr;
+            }
+        }
+    };
+
+
+    struct LegacyGuard
+    {
+        bool ownedLegacy{false};
+
+        LegacyGuard()
+        {
+            if(!LLD::Legacy)
+            {
+                LLD::Legacy = new LLD::LegacyDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLegacy = true;
+            }
+        }
+
+        ~LegacyGuard()
+        {
+            if(ownedLegacy)
+            {
+                delete LLD::Legacy;
+                LLD::Legacy = nullptr;
+            }
+        }
+    };
+
+
+    /* Write a complete recovery journal with a durable commit marker. */
+    bool WriteRecoveryJournal(const std::string& strName, const DataStream& ssJournal)
+    {
+        const std::string strPath =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
+        FILE* stream = std::fopen(strPath.c_str(), "wb");
+        if(!stream)
+            return false;
+
+        const std::vector<uint8_t>& vBytes = ssJournal.Bytes();
+        const bool fWrote =
+            std::fwrite(vBytes.data(), 1, vBytes.size(), stream) == vBytes.size()
+            && std::fflush(stream) == 0;
+
+        return (std::fclose(stream) == 0 && fWrote);
+    }
+
+
+    /* Build a journal that applies a simple key/value write. */
+    DataStream MakeWriteJournal(const std::pair<std::string, uint32_t>& key,
+                                const uint32_t nValue)
+    {
+        DataStream ssKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssKey << key;
+
+        DataStream ssData(SER_LLD, LLD::DATABASE_VERSION);
+        ssData << std::string("NONE");
+        ssData << nValue;
+
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("write") << ssKey.Bytes() << ssData.Bytes();
+        ssJournal << std::string("commit");
+        return ssJournal;
+    }
+
+
+    /* Build a journal whose apply path fails while still reaching commit. */
+    DataStream MakeFailingIndexJournal()
+    {
+        const std::vector<uint8_t> vKey = { 0x01, 0x02, 0x03, 0x04 };
+        const std::vector<uint8_t> vMissing = { 0xde, 0xad, 0xbe, 0xef };
+
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("index") << vKey << vMissing;
+        ssJournal << std::string("commit");
+        return ssJournal;
+    }
+
+
+    uint64_t JournalSize(const std::string& strName)
+    {
+        const std::string strPath =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
+        FILE* stream = std::fopen(strPath.c_str(), "rb");
+        if(!stream)
+            return 0;
+
+        if(std::fseek(stream, 0, SEEK_END) != 0)
+        {
+            std::fclose(stream);
+            return 0;
+        }
+
+        const long nSize = std::ftell(stream);
+        std::fclose(stream);
+        return nSize > 0 ? static_cast<uint64_t>(nSize) : 0;
+    }
+
+
+    } /* anonymous namespace */
 
 
 /* ===========================================================================
@@ -951,4 +1101,104 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         LLD::Client->WriteBestChain(savedBest);
     else
         LLD::Client->Erase(std::string("hashbestchain"));
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS apply failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-register"), 1);
+    LLD::Register->Erase(registerKey);
+
+    /* Contract fails first after every journal has a commit marker, leaving the
+     * remaining complete journals available for the next restart. */
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 11)));
+    REQUIRE(WriteRecoveryJournal("_TRUST", MakeWriteJournal(
+        std::make_pair(std::string("recovery-trust"), 1), 12)));
+    REQUIRE(WriteRecoveryJournal("_LEGACY", MakeWriteJournal(
+        std::make_pair(std::string("recovery-legacy"), 1), 13)));
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeWriteJournal(
+        std::make_pair(std::string("recovery-ledger"), 1), 14)));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    const uint64_t nTrustJournal = JournalSize("_TRUST");
+    const uint64_t nLegacyJournal = JournalSize("_LEGACY");
+    const uint64_t nLedgerJournal = JournalSize("_LEDGER");
+
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+    REQUIRE(nTrustJournal > 0);
+    REQUIRE(nLegacyJournal > 0);
+    REQUIRE(nLedgerJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE_FALSE(LLD::Register->Exists(registerKey));
+
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+    REQUIRE(JournalSize("_TRUST") == nTrustJournal);
+    REQUIRE(JournalSize("_LEGACY") == nLegacyJournal);
+    REQUIRE(JournalSize("_LEDGER") == nLedgerJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Trust->TxnRelease());
+    REQUIRE(LLD::Legacy->TxnRelease());
+    REQUIRE(LLD::Ledger->TxnRelease());
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply failure",
+          "[lld][txncommit][recovery][merkle]")
+{
+    ClientModeGuard modeGuard;
+    ClientGuard clientGuard;
+    LogicalGuard logicalGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-merkle-register"), 1);
+    LLD::Register->Erase(registerKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
+    REQUIRE(WriteRecoveryJournal("_API", MakeWriteJournal(
+        std::make_pair(std::string("recovery-logical"), 1), 22)));
+    REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
+        std::make_pair(std::string("recovery-client"), 1), 23)));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    const uint64_t nLogicalJournal = JournalSize("_API");
+    const uint64_t nClientJournal = JournalSize("_CLIENT");
+
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+    REQUIRE(nLogicalJournal > 0);
+    REQUIRE(nClientJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE_FALSE(LLD::Register->Exists(registerKey));
+
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+    REQUIRE(JournalSize("_API") == nLogicalJournal);
+    REQUIRE(JournalSize("_CLIENT") == nClientJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Logical->TxnRelease());
+    REQUIRE(LLD::Client->TxnRelease());
 }

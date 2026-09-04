@@ -774,5 +774,11 @@ namespace LLD
     {
         fnTxnCoordinatorWaitHook = fnHook;
     }
+
+
+    void ResetTxnRecoveryRequired()
+    {
+        fTxnRecoveryRequired.store(false);
+    }
     #endif
 }

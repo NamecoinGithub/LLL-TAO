@@ -808,11 +808,11 @@ namespace LLD
 
         pSectorKeys->BeginDurabilityTracking();
 
-        /* Erase data set to be removed. */
+        /* Erase data set to be removed. Erase is idempotent for missing keys
+         * and still propagates keychain I/O failures. */
         for(const auto& item : pTransaction->setErasedData)
         {
-            SectorKey cKey;
-            if(pSectorKeys->Get(item, cKey) && !pSectorKeys->Erase(item))
+            if(!pSectorKeys->Erase(item))
                 return debug::error(FUNCTION, "failed to erase from keychain");
         }
 
