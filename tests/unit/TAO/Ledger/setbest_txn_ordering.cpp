@@ -46,7 +46,9 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/include/genesis_block.h>
 #include <TAO/Ledger/types/mempool.h>
+#include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
 
 #include <Util/include/args.h>
@@ -167,6 +169,31 @@ namespace
                 delete LLD::Client;
                 LLD::Client = nullptr;
             }
+        }
+    };
+
+
+    struct ClientModeGuard
+    {
+        bool savedClient;
+        bool savedHybrid;
+        bool savedTestNet;
+
+        ClientModeGuard()
+        : savedClient(config::fClient.load())
+        , savedHybrid(config::fHybrid.load())
+        , savedTestNet(config::fTestNet.load())
+        {
+            config::fClient.store(true);
+            config::fHybrid.store(false);
+            config::fTestNet.store(false);
+        }
+
+        ~ClientModeGuard()
+        {
+            config::fClient.store(savedClient);
+            config::fHybrid.store(savedHybrid);
+            config::fTestNet.store(savedTestNet);
         }
     };
 
@@ -834,4 +861,94 @@ TEST_CASE("Accept() Case B: outer TxnBegin without SetBest, HasOpenTransaction t
 
     /* After commit, no transaction should remain open */
     REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+}
+
+
+TEST_CASE("Client SetBest commits or rolls back the block, links, and best pointer atomically",
+          "[ledger][client][setbest_txn][real]")
+{
+    ClientModeGuard modeGuard;
+    ClientGuard clientGuard;
+    LogicalGuard logicalGuard;
+    ChainStateGuard chainGuard;
+
+    const TAO::Ledger::ClientBlock genesis(TAO::Ledger::TritiumGenesis());
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(hashGenesis == TAO::Ledger::ChainState::Genesis());
+
+    TAO::Ledger::ClientBlock savedGenesis;
+    const bool hadGenesis = LLD::Client->ReadBlock(hashGenesis, savedGenesis);
+    uint1024_t savedBest;
+    const bool hadBest = LLD::Client->ReadBestChain(savedBest);
+
+    REQUIRE(LLD::Client->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Client->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis = genesis;
+    TAO::Ledger::ChainState::tStateBest = genesis;
+    TAO::Ledger::ChainState::hashBestChain = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight.store(genesis.nHeight);
+
+    TAO::Ledger::ClientBlock candidate(genesis);
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.hashNextBlock = 0;
+    candidate.nHeight = genesis.nHeight + 1;
+    candidate.nTime = genesis.nTime + 1;
+    candidate.nNonce++;
+    candidate.nChannelWeight[0]++;
+    const uint1024_t hashCandidate = candidate.GetHash();
+
+    SECTION("success commits every client-chain record before publication")
+    {
+        REQUIRE(candidate.Index());
+
+        TAO::Ledger::ClientBlock committedCandidate;
+        REQUIRE(LLD::Client->ReadBlock(hashCandidate, committedCandidate));
+        REQUIRE(committedCandidate == candidate);
+
+        TAO::Ledger::ClientBlock committedGenesis;
+        REQUIRE(LLD::Client->ReadBlock(hashGenesis, committedGenesis));
+        REQUIRE(committedGenesis.hashNextBlock == hashCandidate);
+
+        uint1024_t hashBest;
+        REQUIRE(LLD::Client->ReadBestChain(hashBest));
+        REQUIRE(hashBest == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+    }
+
+    SECTION("checkpoint failure rolls back every record and leaves ChainState unpublished")
+    {
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE));
+        REQUIRE(LLD::Client->WriteBlock(hashCandidate, candidate));
+
+        /* Remove one recovery-group participant to force the real checkpoint
+         * barrier to reject the transition before any staged record is applied. */
+        REQUIRE(LLD::Logical->TxnRelease());
+        REQUIRE_FALSE(candidate.SetBest());
+
+        TAO::Ledger::ClientBlock missingCandidate;
+        REQUIRE_FALSE(LLD::Client->ReadBlock(hashCandidate, missingCandidate));
+
+        TAO::Ledger::ClientBlock unchangedGenesis;
+        REQUIRE(LLD::Client->ReadBlock(hashGenesis, unchangedGenesis));
+        REQUIRE(unchangedGenesis.hashNextBlock == 0);
+
+        uint1024_t hashBest;
+        REQUIRE(LLD::Client->ReadBestChain(hashBest));
+        REQUIRE(hashBest == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+    }
+
+    LLD::Client->EraseBlock(hashCandidate);
+    if(hadGenesis)
+        LLD::Client->WriteBlock(hashGenesis, savedGenesis);
+    else
+        LLD::Client->EraseBlock(hashGenesis);
+
+    if(hadBest)
+        LLD::Client->WriteBestChain(savedBest);
+    else
+        LLD::Client->Erase(std::string("hashbestchain"));
 }
