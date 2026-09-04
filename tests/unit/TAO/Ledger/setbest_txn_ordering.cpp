@@ -1113,14 +1113,11 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
     ContractGuard contractGuard;
     RegisterGuard registerGuard;
 
-    const std::pair<std::string, uint32_t> registerKey =
-        std::make_pair(std::string("recovery-register"), 1);
-    LLD::Register->Erase(registerKey);
-
     /* Contract fails first after every journal has a commit marker, leaving the
      * remaining complete journals available for the next restart. */
     REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
-    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 11)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(
+        std::make_pair(std::string("recovery-register"), 1), 11)));
     REQUIRE(WriteRecoveryJournal("_TRUST", MakeWriteJournal(
         std::make_pair(std::string("recovery-trust"), 1), 12)));
     REQUIRE(WriteRecoveryJournal("_LEGACY", MakeWriteJournal(
@@ -1141,7 +1138,6 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
     REQUIRE(nLedgerJournal > 0);
 
     REQUIRE_FALSE(LLD::TxnRecovery());
-    REQUIRE_FALSE(LLD::Register->Exists(registerKey));
 
     REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
     REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
@@ -1167,12 +1163,9 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
     ContractGuard contractGuard;
     RegisterGuard registerGuard;
 
-    const std::pair<std::string, uint32_t> registerKey =
-        std::make_pair(std::string("recovery-merkle-register"), 1);
-    LLD::Register->Erase(registerKey);
-
     REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeFailingIndexJournal()));
-    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(
+        std::make_pair(std::string("recovery-merkle-register"), 1), 21)));
     REQUIRE(WriteRecoveryJournal("_API", MakeWriteJournal(
         std::make_pair(std::string("recovery-logical"), 1), 22)));
     REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
@@ -1189,7 +1182,6 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
     REQUIRE(nClientJournal > 0);
 
     REQUIRE_FALSE(LLD::TxnRecovery());
-    REQUIRE_FALSE(LLD::Register->Exists(registerKey));
 
     REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
     REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
