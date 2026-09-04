@@ -39,11 +39,11 @@ namespace LLD
     static std::atomic<bool> fTxnRecoveryRequired{false};
 
 
-    /* Serialize every transaction that uses the shared pMemory/pTransaction
-     * objects. MINER and SANITIZE use separate in-memory overlays. */
+    /* Serialize every transaction that uses shared in-memory transaction objects. */
     static std::mutex TRANSACTION_COORDINATOR;
     static thread_local bool fTxnOwner = false;
     static thread_local bool fTxnMemoryOnly = false;
+    static thread_local uint8_t nTxnOwnerFlags = 0;
     static thread_local uint16_t nTxnOwnerInstances = 0;
 
     #ifdef UNIT_TESTS
@@ -100,6 +100,7 @@ namespace LLD
 
         fTxnOwner = false;
         fTxnMemoryOnly = false;
+        nTxnOwnerFlags = 0;
         nTxnOwnerInstances = 0;
         TRANSACTION_COORDINATOR.unlock();
     }
@@ -406,11 +407,10 @@ namespace LLD
     /* Global handler for all LLD instances. */
     bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
-        const bool fCoordinated =
-            (nFlags != TAO::Ledger::FLAGS::MINER && nFlags != TAO::Ledger::FLAGS::SANITIZE);
-        const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
+        const bool fMemoryOnly =
+            (nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE);
         uint16_t nOwnedInstances = nInstances;
-        if(fCoordinated && !fMemoryOnly)
+        if(!fMemoryOnly)
         {
             if(nInstances & (INSTANCES::CLIENT | INSTANCES::LOGICAL))
                 nOwnedInstances = INSTANCES::MERKLE;
@@ -420,7 +420,6 @@ namespace LLD
                 nOwnedInstances = config::fClient.load() ? INSTANCES::MERKLE : INSTANCES::CONSENSUS;
         }
 
-        if(fCoordinated)
         {
             /* Existing callers intentionally flatten ownership through SetBest(),
              * which checks HasOpenTransaction() before beginning. Refuse any other
@@ -452,6 +451,7 @@ namespace LLD
 
             fTxnOwner = true;
             fTxnMemoryOnly = fMemoryOnly;
+            nTxnOwnerFlags = nFlags;
             nTxnOwnerInstances = nOwnedInstances;
         }
 
@@ -512,20 +512,14 @@ namespace LLD
     /* Global handler for all LLD instances. */
     bool TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
-        /* MINER and SANITIZE own independent overlays and are not coordinated. */
-        if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-        {
-            ReleaseMemoryTransactions(nFlags, nInstances);
-            return true;
-        }
-
         /* A redundant outer abort after SetBest() consumed the transaction is a
          * safe no-op, and another thread must never release the owner's state. */
         if(!fTxnOwner)
             return true;
 
-        const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-        if(fMemoryOnly != fTxnMemoryOnly)
+        const bool fMemoryOnly =
+            (nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE);
+        if(fMemoryOnly != fTxnMemoryOnly || (fMemoryOnly && nFlags != nTxnOwnerFlags))
         {
             debug::error(FUNCTION, "transaction mode does not match current owner");
             return false;
@@ -535,7 +529,7 @@ namespace LLD
         ReleaseMemoryTransactions(nFlags, nReleaseInstances);
 
         /* Handle memory commits if in memory mode. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
+        if(fMemoryOnly)
         {
             ReleaseTransactionOwnership();
             return true;

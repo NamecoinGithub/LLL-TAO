@@ -482,7 +482,7 @@ TEST_CASE("LLD::TxnCommit checkpoint barrier prevents partial apply",
 }
 
 
-TEST_CASE("LLD transaction coordinator serializes shared transaction state",
+TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
           "[lld][txncommit][concurrency]")
 {
     LedgerGuard guard;
@@ -492,7 +492,7 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
     bool fContenderWaiting = false;
     std::atomic<bool> fContenderAcquired{false};
 
-    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
     LLD::SetTxnCoordinatorWaitHook([&]()
     {
         {
@@ -505,10 +505,10 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
     std::thread contender([&]()
     {
         const bool fAcquired =
-            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
         fContenderAcquired.store(fAcquired);
         if(fAcquired)
-            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
     });
 
     bool fSawContenderWaiting = false;
@@ -520,7 +520,7 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
 
     const bool fAcquiredBeforeRelease = fContenderAcquired.load();
 
-    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
     if(contender.joinable())
         contender.join();
     LLD::SetTxnCoordinatorWaitHook({});

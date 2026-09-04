@@ -190,8 +190,25 @@ namespace LLD
 
             /* Write the new disk index .*/
             std::fstream stream(index, std::ios::out | std::ios::binary | std::ios::trunc);
+            if(!stream)
+                throw debug::exception(FUNCTION, "failed to create disk index");
+
             stream.write((char*)&vSpace[0], vSpace.size());
+            stream.flush();
+            if(!stream)
+            {
+                stream.close();
+                filesystem::remove(index);
+                throw debug::exception(FUNCTION, "failed to initialize disk index");
+            }
+
             stream.close();
+            if(!stream)
+            {
+                filesystem::remove(index);
+                throw debug::exception(FUNCTION, "failed to close disk index");
+            }
+
             setDirtyFiles.insert(index);
             fDirectoryDirty = true;
 
@@ -232,8 +249,25 @@ namespace LLD
 
             /* Flush the empty keychain file to disk. */
             std::fstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
+            if(!stream)
+                throw debug::exception(FUNCTION, "failed to create disk hashmap");
+
             stream.write((char*)&vSpace[0], vSpace.size());
+            stream.flush();
+            if(!stream)
+            {
+                stream.close();
+                filesystem::remove(file);
+                throw debug::exception(FUNCTION, "failed to initialize disk hashmap");
+            }
+
             stream.close();
+            if(!stream)
+            {
+                filesystem::remove(file);
+                throw debug::exception(FUNCTION, "failed to close disk hashmap");
+            }
+
             setDirtyFiles.insert(file);
             fDirectoryDirty = true;
 
