@@ -314,9 +314,11 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
 
     std::thread contender([&]()
     {
-        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
-        fContenderAcquired.store(true);
-        LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        const bool fAcquired =
+            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        fContenderAcquired.store(fAcquired);
+        if(fAcquired)
+            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
     });
 
     {

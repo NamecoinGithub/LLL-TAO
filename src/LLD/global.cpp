@@ -715,11 +715,11 @@ namespace LLD
         }
 
         /* Publish the in-memory database deltas only after durable apply succeeds. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nReleaseInstances & INSTANCES::CONTRACT))
             Contract->MemoryCommit();
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nReleaseInstances & INSTANCES::REGISTER))
             Register->MemoryCommit();
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nReleaseInstances & INSTANCES::LEDGER))
             Ledger->MemoryCommit();
 
         /* Release the checkpoint markers after every participant succeeds. */

@@ -832,6 +832,11 @@ namespace TAO
             /* Get the hash. */
             uint1024_t hash = GetHash();
 
+            /* Open a transaction when the caller has not already opened one. */
+            const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                return debug::error(FUNCTION, "failed to begin best-chain transaction");
+
             /* Watch for genesis. */
             if(!ChainState::tStateGenesis)
             {
@@ -840,14 +845,26 @@ namespace TAO
                 {
                     BlockState state;
                     if(!LLD::Ledger->ReadBlock(hash, state) || state != *this)
+                    {
+                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "conflicting genesis block state already exists");
+                    }
                 }
                 else if(!LLD::Ledger->WriteBlock(hash, *this))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                     return debug::error(FUNCTION, "failed to write genesis block state");
+                }
 
                 /* Publish the best pointer only after its target exists on disk. */
                 if(!LLD::Ledger->WriteBestChain(hash))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                     return debug::error(FUNCTION, "failed to write best chain");
+                }
+
+                if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "failed to commit genesis chain state");
 
                 /* Set the genesis block. */
                 ChainState::tStateGenesis = *this;
@@ -859,10 +876,6 @@ namespace TAO
                  * and #3-#5 in chainstate.cpp all open a TxnBegin before calling SetBest()).
                  * A future caller that forgets to open a transaction is self-healed here
                  * instead of silently hitting TxnCommit with no active transaction. */
-                const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-                if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
-                    return debug::error(FUNCTION, "failed to begin best-chain transaction");
-
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();
                 BlockState longer = *this;
@@ -1027,6 +1040,11 @@ namespace TAO
                 /* Keep track of mempool transactions to delete. */
                 std::vector<std::pair<uint8_t, uint512_t>> vDelete;
 
+                #ifndef UNIT_TESTS
+                BlockState stateCheckpoint;
+                bool fCheckpointCandidate = false;
+                #endif
+
                 /* Reverse the blocks to connect to connect in ascending height. */
                 for(auto state = vConnect.rbegin(); state != vConnect.rend(); ++state)
                 {
@@ -1041,19 +1059,10 @@ namespace TAO
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
                     }
 
-                    /* Harden a checkpoint if there is any. */
+                    /* Stage checkpoint publication until the disk transaction commits. */
                     #ifndef UNIT_TESTS
-                    {
-                        const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
-                        HardenCheckpoint(Prev());
-                        const uint1024_t hashCheckpointAfter = ChainState::hashCheckpoint.load();
-                        if(hashCheckpointBefore != hashCheckpointAfter)
-                        {
-                            debug::log(0, FUNCTION, "Checkpoint hardened: ",
-                                hashCheckpointBefore.SubString(), " -> ", hashCheckpointAfter.SubString(),
-                                " at height ", ChainState::nCheckpointHeight.load());
-                        }
-                    }
+                    stateCheckpoint = Prev();
+                    fCheckpointCandidate = true;
                     #endif
 
                     /* Debug output if we are debugging reorgs */
@@ -1149,6 +1158,21 @@ namespace TAO
                  * instance's commit failed, so the chain transition is aborted. */
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed; aborting chain transition");
+
+                #ifndef UNIT_TESTS
+                if(fCheckpointCandidate)
+                {
+                    const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
+                    HardenCheckpoint(stateCheckpoint);
+                    const uint1024_t hashCheckpointAfter = ChainState::hashCheckpoint.load();
+                    if(hashCheckpointBefore != hashCheckpointAfter)
+                    {
+                        debug::log(0, FUNCTION, "Checkpoint hardened: ",
+                            hashCheckpointBefore.SubString(), " -> ", hashCheckpointAfter.SubString(),
+                            " at height ", ChainState::nCheckpointHeight.load());
+                    }
+                }
+                #endif
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 
