@@ -77,7 +77,7 @@ namespace LLD
         /** The keychain flags. **/
         uint8_t nFlags;
 
-        /** Files modified since durability tracking began. **/
+        /** Files awaiting a successful durability sync. **/
         std::set<std::string> setDirtyFiles;
 
         /** Whether a new hashmap file requires directory metadata syncing. **/
@@ -184,7 +184,7 @@ namespace LLD
         void Flush();
 
 
-        /** Reset the files tracked for the next durable transaction apply. **/
+        /** Begin tracking a durable transaction apply. **/
         void BeginDurabilityTracking();
 
 

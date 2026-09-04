@@ -191,6 +191,7 @@ namespace LLD
             std::fstream stream(index, std::ios::out | std::ios::binary | std::ios::trunc);
             stream.write((char*)&vSpace[0], vSpace.size());
             stream.close();
+            setDirtyFiles.insert(index);
             fDirectoryDirty = true;
 
             /* Debug output showing generation of disk index. */
@@ -232,6 +233,7 @@ namespace LLD
             std::fstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
             stream.write((char*)&vSpace[0], vSpace.size());
             stream.close();
+            setDirtyFiles.insert(file);
             fDirectoryDirty = true;
 
             /* Debug output showing generating of the hashmap file. */
@@ -562,12 +564,10 @@ namespace LLD
     }
 
 
-    /* Reset file tracking while preserving unsynced directory metadata. */
+    /* Preserve unsynced files and directory metadata until a successful sync. */
     void BinaryHashMap::BeginDurabilityTracking()
     {
         LOCK(KEY_MUTEX);
-
-        setDirtyFiles.clear();
     }
 
 

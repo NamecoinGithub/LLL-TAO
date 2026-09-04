@@ -316,34 +316,27 @@ TEST_CASE("Burst Mode — Dedup uses the full committed tip", "[burst_mode][dedu
     const uint1024_t hashA(0x00000001DEADBEEFULL);
     const uint1024_t hashB(0x00000002DEADBEEFULL);
 
-    SECTION("Different heights produce different dedup keys")
-    {
-        SimDedupKey key;
-        REQUIRE(ReserveDedupKey(key, 1000, hashA));
-        REQUIRE(ReserveDedupKey(key, 1001, hashA));
-    }
+    REQUIRE((hashA.Get64(0) & 0xffffffffULL) == (hashB.Get64(0) & 0xffffffffULL));
 
-    SECTION("Same height and full hash is suppressed")
-    {
-        SimDedupKey key;
-        REQUIRE(ReserveDedupKey(key, 5000, hashA));
-        REQUIRE_FALSE(ReserveDedupKey(key, 5000, hashA));
-    }
+    const auto first = LLP::MinerPushDispatcher::ReservePushEvent(0xffff0000, hashA);
+    REQUIRE(first.fPrime);
+    REQUIRE(first.fHash);
 
-    SECTION("Same height and same 32-bit prefix but different full hash dispatches")
-    {
-        REQUIRE((hashA.Get64(0) & 0xffffffffULL) == (hashB.Get64(0) & 0xffffffffULL));
+    const auto duplicate = LLP::MinerPushDispatcher::ReservePushEvent(0xffff0000, hashA);
+    REQUIRE_FALSE(duplicate.fPrime);
+    REQUIRE_FALSE(duplicate.fHash);
 
-        SimDedupKey key;
-        REQUIRE(ReserveDedupKey(key, 5000, hashA));
-        REQUIRE(ReserveDedupKey(key, 5000, hashB));
-    }
+    const auto differentHash = LLP::MinerPushDispatcher::ReservePushEvent(0xffff0000, hashB);
+    REQUIRE(differentHash.fPrime);
+    REQUIRE(differentHash.fHash);
+
+    const auto differentHeight = LLP::MinerPushDispatcher::ReservePushEvent(0xffff0001, hashB);
+    REQUIRE(differentHeight.fPrime);
+    REQUIRE(differentHeight.fHash);
 }
 
 TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst", "[burst_mode][dedup][llp]")
 {
-    SimDedupKey dedupState;
-
     struct DispatchAttempt
     {
         uint32_t nHeight;
@@ -352,16 +345,16 @@ TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst"
     };
 
     std::vector<DispatchAttempt> vBurst = {
-        { 1000, uint1024_t(0xAAAAAAAA), true  },
-        { 1000, uint1024_t(0xAAAAAAAA), false },
-        { 1000, uint1024_t(0xAAAAAAAA), false },
-        { 1001, uint1024_t(0xBBBBBBBB), true  },
-        { 1001, uint1024_t(0xBBBBBBBB), false },
-        { 1002, uint1024_t(0xCCCCCCCC), true  },
-        { 1002, uint1024_t(0xCCCCCCCC), false },
-        { 1002, uint1024_t(0xCCCCCCCC), false },
-        { 1002, uint1024_t(0xCCCCCCCC), false },
-        { 1003, uint1024_t(0xDDDDDDDD), true  },
+        { 0xfffe0000, uint1024_t(0xAAAAAAAA), true  },
+        { 0xfffe0000, uint1024_t(0xAAAAAAAA), false },
+        { 0xfffe0000, uint1024_t(0xAAAAAAAA), false },
+        { 0xfffe0001, uint1024_t(0xBBBBBBBB), true  },
+        { 0xfffe0001, uint1024_t(0xBBBBBBBB), false },
+        { 0xfffe0002, uint1024_t(0xCCCCCCCC), true  },
+        { 0xfffe0002, uint1024_t(0xCCCCCCCC), false },
+        { 0xfffe0002, uint1024_t(0xCCCCCCCC), false },
+        { 0xfffe0002, uint1024_t(0xCCCCCCCC), false },
+        { 0xfffe0003, uint1024_t(0xDDDDDDDD), true  },
     };
 
     uint32_t nDispatched = 0;
@@ -369,15 +362,18 @@ TEST_CASE("Burst Mode — Dedup prevents duplicate dispatches during fork burst"
 
     for (const auto& attempt : vBurst)
     {
-        if(ReserveDedupKey(dedupState, attempt.nHeight, attempt.hashBestChain))
+        const auto event = LLP::MinerPushDispatcher::ReservePushEvent(
+            attempt.nHeight, attempt.hashBestChain);
+        REQUIRE(event.fPrime == attempt.fExpectedSend);
+        REQUIRE(event.fHash == attempt.fExpectedSend);
+
+        if(event.fPrime)
         {
             ++nDispatched;
-            REQUIRE(attempt.fExpectedSend);
         }
         else
         {
             ++nSuppressed;
-            REQUIRE_FALSE(attempt.fExpectedSend);
         }
     }
 

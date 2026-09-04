@@ -219,6 +219,34 @@ TEST_CASE("LLD::TxnCommit returns true when all selected instances have active t
 }
 
 
+TEST_CASE("LLD::TxnCommit applies every instance owned by the transaction",
+          "[lld][txncommit]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    const std::pair<std::string, uint32_t> ledgerKey =
+        std::make_pair(std::string("txn-owned-ledger"), 1);
+    const std::pair<std::string, uint32_t> trustKey =
+        std::make_pair(std::string("txn-owned-trust"), 1);
+
+    LLD::Ledger->Erase(ledgerKey);
+    LLD::Trust->Erase(trustKey);
+
+    REQUIRE(LLD::TxnBegin(
+        0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST));
+    REQUIRE(LLD::Ledger->Write(ledgerKey, uint32_t(42)));
+    REQUIRE(LLD::Trust->Write(trustKey, uint32_t(43)));
+
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Exists(ledgerKey));
+    REQUIRE(LLD::Trust->Exists(trustKey));
+
+    LLD::Ledger->Erase(ledgerKey);
+    LLD::Trust->Erase(trustKey);
+}
+
+
 /* ===========================================================================
  * TEST 3 — Checkpoint barrier: one missing participant aborts every participant
  * ===========================================================================

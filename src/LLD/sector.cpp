@@ -60,7 +60,7 @@ namespace LLD
         {
             #ifdef WIN32
             const HANDLE hDirectory = CreateFileA(
-                strPath.c_str(), GENERIC_READ,
+                strPath.c_str(), GENERIC_READ | GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
             if(hDirectory == INVALID_HANDLE_VALUE)

@@ -567,11 +567,11 @@ namespace LLD
         /* Memory-pool transactions have no physical journal. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
         {
-            if(Contract && (nInstances & INSTANCES::CONTRACT))
+            if(Contract && (nReleaseInstances & INSTANCES::CONTRACT))
                 Contract->MemoryCommit();
-            if(Register && (nInstances & INSTANCES::REGISTER))
+            if(Register && (nReleaseInstances & INSTANCES::REGISTER))
                 Register->MemoryCommit();
-            if(Ledger && (nInstances & INSTANCES::LEDGER))
+            if(Ledger && (nReleaseInstances & INSTANCES::LEDGER))
                 Ledger->MemoryCommit();
 
             ReleaseTransactionOwnership();
@@ -591,31 +591,31 @@ namespace LLD
         bool fCheckpointsComplete = true;
 
         /* Set a checkpoint for Logical DB. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nReleaseInstances & INSTANCES::LOGICAL))
             fCheckpointsComplete = Logical->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for contract DB. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nReleaseInstances & INSTANCES::CONTRACT))
             fCheckpointsComplete = Contract->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for register DB. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nReleaseInstances & INSTANCES::REGISTER))
             fCheckpointsComplete = Register->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for ledger DB. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nReleaseInstances & INSTANCES::LEDGER))
             fCheckpointsComplete = Ledger->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for client DB. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nReleaseInstances & INSTANCES::CLIENT))
             fCheckpointsComplete = Client->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for trust DB. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nReleaseInstances & INSTANCES::TRUST))
             fCheckpointsComplete = Trust->TxnCheckpoint() && fCheckpointsComplete;
 
         /* Set a checkpoint for legacy DB. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nReleaseInstances & INSTANCES::LEGACY))
             fCheckpointsComplete = Legacy->TxnCheckpoint() && fCheckpointsComplete;
 
         if(!fCheckpointsComplete)
@@ -631,7 +631,7 @@ namespace LLD
         bool fAllSucceeded = true;
 
         /* Commit Logical DB transaction. */
-        if(fAllSucceeded && Logical && (nInstances & INSTANCES::LOGICAL))
+        if(fAllSucceeded && Logical && (nReleaseInstances & INSTANCES::LOGICAL))
         {
             if(!Logical->TxnCommit())
             {
@@ -641,7 +641,7 @@ namespace LLD
         }
 
         /* Commit contract DB transaction. */
-        if(fAllSucceeded && Contract && (nInstances & INSTANCES::CONTRACT))
+        if(fAllSucceeded && Contract && (nReleaseInstances & INSTANCES::CONTRACT))
         {
             if(!Contract->TxnCommit())
             {
@@ -651,7 +651,7 @@ namespace LLD
         }
 
         /* Commit register DB transaction. */
-        if(fAllSucceeded && Register && (nInstances & INSTANCES::REGISTER))
+        if(fAllSucceeded && Register && (nReleaseInstances & INSTANCES::REGISTER))
         {
             if(!Register->TxnCommit())
             {
@@ -661,7 +661,7 @@ namespace LLD
         }
 
         /* Commit the trust DB transaction. */
-        if(fAllSucceeded && Trust && (nInstances & INSTANCES::TRUST))
+        if(fAllSucceeded && Trust && (nReleaseInstances & INSTANCES::TRUST))
         {
             if(!Trust->TxnCommit())
             {
@@ -671,7 +671,7 @@ namespace LLD
         }
 
         /* Commit the legacy DB transaction. */
-        if(fAllSucceeded && Legacy && (nInstances & INSTANCES::LEGACY))
+        if(fAllSucceeded && Legacy && (nReleaseInstances & INSTANCES::LEGACY))
         {
             if(!Legacy->TxnCommit())
             {
@@ -681,7 +681,7 @@ namespace LLD
         }
 
         /* Commit the authoritative full-node pointer last. */
-        if(fAllSucceeded && Ledger && (nInstances & INSTANCES::LEDGER))
+        if(fAllSucceeded && Ledger && (nReleaseInstances & INSTANCES::LEDGER))
         {
             if(!Ledger->TxnCommit())
             {
@@ -691,7 +691,7 @@ namespace LLD
         }
 
         /* Commit the authoritative client pointer last in MERKLE mode. */
-        if(fAllSucceeded && Client && (nInstances & INSTANCES::CLIENT))
+        if(fAllSucceeded && Client && (nReleaseInstances & INSTANCES::CLIENT))
         {
             if(!Client->TxnCommit())
             {

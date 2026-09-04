@@ -639,7 +639,7 @@ namespace TAO
                 }
 
                 /* Erase block if not connecting anything. */
-                if(vConnect.empty() && !LLD::Ledger->EraseBlock(state.GetHash()))
+                if(vConnect.empty() && !LLD::Client->EraseBlock(state.GetHash()))
                 {
                     LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
                     return debug::error(FUNCTION, "failed to erase disconnected block ", state.GetHash().SubString());
