@@ -511,13 +511,13 @@ TEST_CASE("LLD transaction coordinator serializes shared transaction state",
             LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
     });
 
+    bool fSawContenderWaiting = false;
     {
         std::unique_lock<std::mutex> lock(mutex);
-        condition.wait_for(lock, std::chrono::seconds(2),
+        fSawContenderWaiting = condition.wait_for(lock, std::chrono::seconds(2),
             [&](){ return fContenderWaiting; });
     }
 
-    const bool fSawContenderWaiting = fContenderWaiting;
     const bool fAcquiredBeforeRelease = fContenderAcquired.load();
 
     LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
