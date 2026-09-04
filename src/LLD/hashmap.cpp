@@ -26,6 +26,7 @@ ________________________________________________________________________________
 
 #ifdef WIN32
 #include <io.h>
+#include <windows.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -592,9 +593,20 @@ namespace LLD
                 return false;
         }
 
-        #ifndef WIN32
         if(fDirectoryDirty)
         {
+            #ifdef WIN32
+            const HANDLE hDirectory = CreateFileA(
+                strBaseLocation.c_str(), GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            if(hDirectory == INVALID_HANDLE_VALUE)
+                return false;
+
+            const bool fSynced = (FlushFileBuffers(hDirectory) != 0);
+            if(CloseHandle(hDirectory) == 0 || !fSynced)
+                return false;
+            #else
             const int nDirectory = open(strBaseLocation.c_str(), O_RDONLY);
             if(nDirectory < 0)
                 return false;
@@ -602,8 +614,8 @@ namespace LLD
             const bool fSynced = (fsync(nDirectory) == 0);
             if(close(nDirectory) != 0 || !fSynced)
                 return false;
+            #endif
         }
-        #endif
 
         setDirtyFiles.clear();
         fDirectoryDirty = false;

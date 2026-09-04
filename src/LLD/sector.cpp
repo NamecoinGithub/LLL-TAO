@@ -872,18 +872,8 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to sync sector file");
         }
 
-        #ifndef WIN32
-        if(!setSectorFiles.empty())
-        {
-            const int nDataDirectory = open(strBaseLocation.c_str(), O_RDONLY);
-            if(nDataDirectory < 0)
-                return debug::error(FUNCTION, "failed to open sector directory");
-
-            const bool fDataDirectorySynced = (fsync(nDataDirectory) == 0);
-            if(close(nDataDirectory) != 0 || !fDataDirectorySynced)
-                return debug::error(FUNCTION, "failed to sync sector directory");
-        }
-        #endif
+        if(!setSectorFiles.empty() && !SyncDirectory(strBaseLocation))
+            return debug::error(FUNCTION, "failed to sync sector directory");
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
