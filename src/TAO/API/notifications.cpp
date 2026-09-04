@@ -527,7 +527,8 @@ namespace TAO::API
             }
 
             /* Start a ACID transaction (to be disposed). */
-            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+            LLD::TransactionGuard transaction(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+            if(!transaction)
                 return false;
 
             /* Iterate through our contracts. */

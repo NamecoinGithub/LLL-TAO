@@ -111,6 +111,8 @@ namespace LLD
     {
         debug::log(0, FUNCTION, "Initializing LLD");
 
+        try
+        {
         /* Create the contract database instance. */
         const uint32_t nContractCacheSize = config::GetArg("-contractcache", 1);
         Contract = new ContractDB(
@@ -180,6 +182,13 @@ namespace LLD
             return false;
 
         return true;
+        }
+        catch(const std::exception& e)
+        {
+            debug::error(FUNCTION, "failed to initialize LLD: ", e.what());
+            Shutdown();
+            return false;
+        }
     }
 
 
@@ -208,40 +217,40 @@ namespace LLD
         debug::log(0, FUNCTION, "Shutting down LLD");
 
         /* Cleanup the contract database. */
-        if(Contract)
-            delete Contract;
+        delete Contract;
+        Contract = nullptr;
 
         /* Cleanup the ledger database. */
-        if(Ledger)
-            delete Ledger;
+        delete Ledger;
+        Ledger = nullptr;
 
         /* Cleanup the register database. */
-        if(Register)
-            delete Register;
+        delete Register;
+        Register = nullptr;
 
         /* Cleanup the local database. */
-        if(Local)
-            delete Local;
+        delete Local;
+        Local = nullptr;
 
         /* Cleanup the client database. */
-        if(Client)
-            delete Client;
+        delete Client;
+        Client = nullptr;
 
         /* Cleanup the legacy database. */
-        if(Legacy)
-            delete Legacy;
+        delete Legacy;
+        Legacy = nullptr;
 
         /* Cleanup the trust database. */
-        if(Trust)
-            delete Trust;
+        delete Trust;
+        Trust = nullptr;
 
         /* Cleanup the logical database. */
-        if(Logical)
-            delete Logical;
+        delete Logical;
+        Logical = nullptr;
 
         /* Cleanup the sessions database. */
-        if(Sessions)
-            delete Sessions;
+        delete Sessions;
+        Sessions = nullptr;
     }
 
 

@@ -650,7 +650,8 @@ namespace TAO
                 }
 
                 /* Connect transaction in memory. */
-                if(!LLD::TxnBegin(FLAGS::MEMPOOL))
+                LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
+                if(!transaction)
                     return debug::error(FUNCTION, "failed to begin mempool transaction");
                 if(!tx.Connect(FLAGS::MEMPOOL))
                 {
