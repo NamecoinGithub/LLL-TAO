@@ -593,7 +593,7 @@ namespace LLD
                 return false;
         }
 
-        if(fDirectoryDirty)
+        if(fDirectoryDirty || !setDirtyFiles.empty())
         {
             #ifdef WIN32
             const HANDLE hDirectory = CreateFileA(
