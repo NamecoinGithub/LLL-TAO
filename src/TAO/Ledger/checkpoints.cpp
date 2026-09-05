@@ -44,16 +44,24 @@ namespace TAO
 
 
         /* Check if the new block triggers a new Checkpoint timespan.*/
-        bool IsNewTimespan(const BlockState& state)
+        bool IsNewTimespan(const BlockState& state, bool& fNewTimespan)
         {
+            fNewTimespan = false;
+
             /* Catch if checkpoint is not established. */
             if(ChainState::hashCheckpoint == 0)
+            {
+                fNewTimespan = true;
                 return true;
+            }
 
             /* Get previous block state. */
             BlockState statePrev;
             if(!LLD::Ledger->ReadBlock(state.hashPrevBlock, statePrev))
+            {
+                fNewTimespan = true;
                 return true;
+            }
 
             /* Get checkpoint state. */
             BlockState stateCheck;
@@ -64,7 +72,8 @@ namespace TAO
             uint32_t nFirstMinutes = static_cast<uint32_t>((state.GetBlockTime() - stateCheck.GetBlockTime()) / 60);
             uint32_t nLastMinutes =  static_cast<uint32_t>((statePrev.GetBlockTime() - stateCheck.GetBlockTime()) / 60);
 
-            return (nFirstMinutes != nLastMinutes && nFirstMinutes >= CHECKPOINT_TIMESPAN);
+            fNewTimespan = (nFirstMinutes != nLastMinutes && nFirstMinutes >= CHECKPOINT_TIMESPAN);
+            return true;
         }
 
 
@@ -158,15 +167,12 @@ namespace TAO
                 *pfHardened = false;
 
             /* Only Harden New Checkpoint if it Fits new timestamp. */
-            if(!IsNewTimespan(state))
-            {
-                BlockState stateCheckpoint;
-                if(ChainState::hashCheckpoint != 0
-                && !LLD::Ledger->ReadBlock(state.hashCheckpoint, stateCheckpoint))
-                    return debug::error(FUNCTION, "failed to read checkpoint");
+            bool fNewTimespan = false;
+            if(!IsNewTimespan(state, fNewTimespan))
+                return false;
 
+            if(!fNewTimespan)
                 return true;
-            }
 
             /* Read the checkpoint block BEFORE updating atomics to avoid
              * partial-update visibility between hashCheckpoint and nCheckpointHeight. */

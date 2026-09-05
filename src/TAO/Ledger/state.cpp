@@ -733,7 +733,11 @@ namespace TAO
             }
 
             /* Add the Pending Checkpoint into the Blockchain. */
-            if(IsNewTimespan(statePrev))
+            bool fNewTimespan = false;
+            if(!IsNewTimespan(statePrev, fNewTimespan))
+                return false;
+
+            if(fNewTimespan)
             {
                 /* Set new checkpoint hash. */
                 hashCheckpoint = GetHash();

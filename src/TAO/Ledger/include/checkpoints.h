@@ -37,10 +37,12 @@ namespace TAO
          *
          *  @param[in] state The state object to check from.
          *
-         *  @returns true if a new timespan has elapsed
+         *  @param[out] fNewTimespan Set true if a new timespan has elapsed.
+         *
+         *  @returns true if the checkpoint state was evaluated successfully.
          *
          **/
-        bool IsNewTimespan(const BlockState& state);
+        bool IsNewTimespan(const BlockState& state, bool& fNewTimespan);
 
 
         /** IsDescendant
