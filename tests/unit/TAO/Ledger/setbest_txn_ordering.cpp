@@ -1057,7 +1057,10 @@ TEST_CASE("Real SetBest(): checkpoint hardening runs after commit and gates best
             {
                 uint1024_t hashBestOnDisk;
                 fHookCalledAfterCommit =
-                    LLD::Ledger->ReadBestChain(hashBestOnDisk) && hashBestOnDisk == hashCandidate;
+                    !LLD::HasOpenTransaction(
+                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS)
+                    && LLD::Ledger->ReadBestChain(hashBestOnDisk)
+                    && hashBestOnDisk == hashCandidate;
                 fBestUnpublishedAtHook =
                     TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
 
@@ -1085,7 +1088,10 @@ TEST_CASE("Real SetBest(): checkpoint hardening runs after commit and gates best
             {
                 uint1024_t hashBestOnDisk;
                 fHookCalledAfterCommit =
-                    LLD::Ledger->ReadBestChain(hashBestOnDisk) && hashBestOnDisk == hashCandidate;
+                    !LLD::HasOpenTransaction(
+                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS)
+                    && LLD::Ledger->ReadBestChain(hashBestOnDisk)
+                    && hashBestOnDisk == hashCandidate;
                 fBestUnpublishedAtHook =
                     TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
                 return false;
