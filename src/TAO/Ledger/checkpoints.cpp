@@ -56,12 +56,15 @@ namespace TAO
             }
 
             /* Get previous block state. */
-            BlockState statePrev;
-            if(!LLD::Ledger->ReadBlock(state.hashPrevBlock, statePrev))
+            if(state.hashPrevBlock == 0)
             {
                 fNewTimespan = true;
                 return true;
             }
+
+            BlockState statePrev;
+            if(!LLD::Ledger->ReadBlock(state.hashPrevBlock, statePrev))
+                return debug::error(FUNCTION, "failed to read previous block");
 
             /* Get checkpoint state. */
             BlockState stateCheck;
