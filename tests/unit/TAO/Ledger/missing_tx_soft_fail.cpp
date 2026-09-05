@@ -1450,6 +1450,75 @@ TEST_CASE("Connectable incomplete orphan is retained and later redelivery drains
 }
 
 
+TEST_CASE("Accepted connectable root clears its incomplete descendant throttle",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4150001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 215;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    PassBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 216;
+    blockA.nNonce = 11501;
+    const uint1024_t hashA = blockA.GetHash();
+
+    MissingBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 217;
+    blockB.nNonce = 11502;
+    const uint1024_t hashB = blockB.GetHash();
+
+    PassBlock blockC;
+    blockC.nVersion = 4;
+    blockC.hashPrevBlock = hashB;
+    blockC.nHeight = 218;
+    blockC.nNonce = 11503;
+    const uint1024_t hashC = blockC.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashC, 218, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::PROGRESS);
+    REQUIRE(TAO::Ledger::mapLastMissingProcessTime.count(hashB) == 0);
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashC));
+
+    /* PassBlock::Accept() is a test double and does not persist the accepted root. */
+    REQUIRE(LLD::Ledger->WriteBlock(hashA, stateRoot));
+
+    PassBlock resolvedB;
+    static_cast<TAO::Ledger::Block&>(resolvedB) = blockB;
+    REQUIRE(resolvedB.GetHash() == hashB);
+
+    uint8_t nStatus = 0;
+    TAO::Ledger::Process(resolvedB, nStatus);
+
+    REQUIRE((nStatus & TAO::Ledger::PROCESS::ACCEPTED) != 0);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    LLD::Ledger->EraseBlock(hashA);
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
 TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     "[ledger][process][orphan_pool]")
 {

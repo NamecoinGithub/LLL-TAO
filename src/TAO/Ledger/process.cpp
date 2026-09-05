@@ -729,6 +729,16 @@ namespace TAO
                     Process(*pConnectable, nStatus, pnode, false);
 
                     const bool fProgress = (nStatus & PROCESS::ACCEPTED) != 0;
+                    {
+                        LOCK(PROCESSING_MUTEX);
+                        FinalizeExtractedOrphan(*pConnectable, nStatus);
+
+                        /* Permit one prompt redelivery of the actual incomplete
+                         * orphan after its missing data arrives. */
+                        if((nStatus & PROCESS::INCOMPLETE) && pConnectable->hashMissing != 0)
+                            mapLastMissingProcessTime.erase(pConnectable->hashMissing);
+                    }
+
                     if(fProgress)
                     {
                         debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "=== PEER_BEST_RECOVERED ===",
@@ -737,16 +747,6 @@ namespace TAO
                             " height=", ChainState::nBestHeight.load(),
                             " source=orphan-pool-walkback");
                         return PeerBestRecoveryResult::PROGRESS;
-                    }
-
-                    {
-                        LOCK(PROCESSING_MUTEX);
-                        FinalizeExtractedOrphan(*pConnectable, nStatus);
-
-                        /* Permit one prompt redelivery after missing data arrives.
-                         * A still-incomplete retry records a fresh throttle time. */
-                        if(nStatus & PROCESS::INCOMPLETE)
-                            mapLastMissingProcessTime.erase(pConnectable->GetHash());
                     }
 
                     return PeerBestRecoveryResult::SKIPPED;

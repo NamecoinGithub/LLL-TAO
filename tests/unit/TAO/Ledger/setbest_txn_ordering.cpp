@@ -1113,6 +1113,69 @@ TEST_CASE("Real SetBest(): checkpoint hardening runs after commit and gates best
 }
 
 
+TEST_CASE("Real SetBest(): multi-block reorg evaluates checkpoint candidates in order",
+          "[ledger][setbest_txn][checkpoint][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    ShutdownGuard       shutdownGuard;
+
+    config::fShutdown.store(false);
+
+    TAO::Ledger::BlockState genesis =
+        TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Ledger->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis      = genesis;
+    TAO::Ledger::ChainState::tStateBest         = genesis;
+    TAO::Ledger::ChainState::hashBestChain      = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight        = genesis.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust    = genesis.nChainTrust;
+
+    TAO::Ledger::BlockState first;
+    first.nVersion      = 4;
+    first.hashPrevBlock = hashGenesis;
+    first.nChannel      = 2;
+    first.nHeight       = genesis.nHeight + 1;
+    first.nTime         = genesis.nTime + 1;
+    first.nBits         = 1;
+    first.nNonce        = 2101;
+    first.nChainTrust   = genesis.nChainTrust + 1;
+    const uint1024_t hashFirst = first.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashFirst, first));
+
+    TAO::Ledger::BlockState second;
+    second.nVersion      = 4;
+    second.hashPrevBlock = hashFirst;
+    second.nChannel      = 2;
+    second.nHeight       = first.nHeight + 1;
+    second.nTime         = first.nTime + 1;
+    second.nBits         = 1;
+    second.nNonce        = 2102;
+    second.nChainTrust   = first.nChainTrust + 1;
+
+    std::vector<uint1024_t> vCandidates;
+    TAO::Ledger::SetHardenCheckpointHook(
+        [&](const TAO::Ledger::BlockState& state, bool* pfHardened)
+        {
+            vCandidates.push_back(state.GetHash());
+            *pfHardened = false;
+            return true;
+        });
+
+    REQUIRE(second.SetBest());
+    const std::vector<uint1024_t> vExpected{hashGenesis, hashFirst};
+    REQUIRE(vCandidates == vExpected);
+    REQUIRE_FALSE(config::fShutdown.load());
+
+    LLD::Ledger->EraseBlock(second.GetHash());
+    LLD::Ledger->EraseBlock(hashFirst);
+}
+
+
 /* ===========================================================================
  * TEST 9 — Case B: outer TxnBegin without SetBest() → HasOpenTransaction true
  *           → outer TxnCommit() is needed and succeeds

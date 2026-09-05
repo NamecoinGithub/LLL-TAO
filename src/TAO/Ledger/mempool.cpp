@@ -1149,7 +1149,8 @@ namespace TAO
                                 debug::notice(FUNCTION, "ORPHAN DETECTED AT INDEX ", n, ": last hash mismatch ", vtx[n].hashPrevTx.SubString());
 
                             /* Begin the memory transaction. */
-                            if(!LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
+                            LLD::TransactionGuard transaction(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            if(!transaction)
                                 return;
 
                             /* Track whether the LLD transaction is still active (not aborted). */
