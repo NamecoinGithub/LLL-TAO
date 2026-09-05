@@ -49,6 +49,7 @@ ________________________________________________________________________________
 #include <LLD/types/trust.h>
 
 #include <TAO/Ledger/include/chainstate.h>
+#include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/genesis_block.h>
 #include <TAO/Ledger/types/mempool.h>
@@ -613,10 +614,21 @@ namespace
                 LLD::Ledger = new LLD::LedgerDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
                 ownedLedger = true;
             }
+
+            TAO::Ledger::SetHardenCheckpointHook(
+                [](const TAO::Ledger::BlockState&, bool* pfHardened)
+                {
+                    if(pfHardened)
+                        *pfHardened = false;
+
+                    return true;
+                });
         }
 
         ~RealCodeLedgerGuard()
         {
+            TAO::Ledger::SetHardenCheckpointHook({});
+
             if(ownedLedger)
             {
                 delete LLD::Ledger;
@@ -636,6 +648,8 @@ namespace
         uint1024_t              savedBestHash;
         uint32_t                savedBestHeight;
         uint64_t                savedBestTrust;
+        uint1024_t              savedCheckpointHash;
+        uint32_t                savedCheckpointHeight;
 
         ChainStateGuard()
         : savedGenesis  (TAO::Ledger::ChainState::tStateGenesis)
@@ -643,6 +657,8 @@ namespace
         , savedBestHash (TAO::Ledger::ChainState::hashBestChain.load())
         , savedBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
         , savedBestTrust(TAO::Ledger::ChainState::nBestChainTrust.load())
+        , savedCheckpointHash(TAO::Ledger::ChainState::hashCheckpoint.load())
+        , savedCheckpointHeight(TAO::Ledger::ChainState::nCheckpointHeight.load())
         {}
 
         ~ChainStateGuard()
@@ -652,6 +668,19 @@ namespace
             TAO::Ledger::ChainState::hashBestChain   = savedBestHash;
             TAO::Ledger::ChainState::nBestHeight     .store(savedBestHeight);
             TAO::Ledger::ChainState::nBestChainTrust .store(savedBestTrust);
+            TAO::Ledger::ChainState::hashCheckpoint  = savedCheckpointHash;
+            TAO::Ledger::ChainState::nCheckpointHeight.store(savedCheckpointHeight);
+        }
+    };
+
+
+    struct ShutdownGuard
+    {
+        const bool savedShutdown{config::fShutdown.load()};
+
+        ~ShutdownGuard()
+        {
+            config::fShutdown.store(savedShutdown);
         }
     };
 
@@ -979,6 +1008,102 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     /* Cleanup */
     LLD::Ledger->EraseBlock(hashCandidate);
     LLD::Ledger->EraseBlock(hashGenesis);
+}
+
+
+TEST_CASE("Real SetBest(): checkpoint hardening runs after commit and gates best-tip publication",
+          "[ledger][setbest_txn][checkpoint][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    ShutdownGuard       shutdownGuard;
+
+    config::fShutdown.store(false);
+
+    TAO::Ledger::BlockState genesis =
+        TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(hashGenesis == TAO::Ledger::ChainState::Genesis());
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Ledger->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis      = genesis;
+    TAO::Ledger::ChainState::tStateBest         = genesis;
+    TAO::Ledger::ChainState::hashBestChain      = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight        = genesis.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust    = genesis.nChainTrust;
+    TAO::Ledger::ChainState::hashCheckpoint     = uint1024_t(0x1234);
+    TAO::Ledger::ChainState::nCheckpointHeight  = 0;
+
+    TAO::Ledger::BlockState candidate;
+    candidate.nVersion      = 4;
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.nChannel      = 2;
+    candidate.nHeight       = genesis.nHeight + 1;
+    candidate.nTime         = genesis.nTime + 1;
+    candidate.nBits         = 1;
+    candidate.nNonce        = 2001;
+    candidate.nChainTrust   = genesis.nChainTrust + 1;
+
+    const uint1024_t hashCandidate = candidate.GetHash();
+    bool fHookCalledAfterCommit = false;
+    bool fBestUnpublishedAtHook = false;
+
+    SECTION("successful hardening publishes the checkpoint before the best tip")
+    {
+        TAO::Ledger::SetHardenCheckpointHook(
+            [&](const TAO::Ledger::BlockState& state, bool* pfHardened)
+            {
+                uint1024_t hashBestOnDisk;
+                fHookCalledAfterCommit =
+                    LLD::Ledger->ReadBestChain(hashBestOnDisk) && hashBestOnDisk == hashCandidate;
+                fBestUnpublishedAtHook =
+                    TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
+
+                TAO::Ledger::ChainState::nCheckpointHeight = state.nHeight;
+                TAO::Ledger::ChainState::hashCheckpoint = state.hashCheckpoint;
+                *pfHardened = true;
+                return true;
+            });
+
+        REQUIRE(candidate.SetBest());
+        REQUIRE(fHookCalledAfterCommit);
+        REQUIRE(fBestUnpublishedAtHook);
+        REQUIRE(TAO::Ledger::ChainState::hashCheckpoint.load() == genesis.hashCheckpoint);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+        REQUIRE_FALSE(config::fShutdown.load());
+    }
+
+    SECTION("hardening read failure requests shutdown without publishing the best tip")
+    {
+        const uint1024_t hashCheckpointBefore =
+            TAO::Ledger::ChainState::hashCheckpoint.load();
+
+        TAO::Ledger::SetHardenCheckpointHook(
+            [&](const TAO::Ledger::BlockState&, bool*)
+            {
+                uint1024_t hashBestOnDisk;
+                fHookCalledAfterCommit =
+                    LLD::Ledger->ReadBestChain(hashBestOnDisk) && hashBestOnDisk == hashCandidate;
+                fBestUnpublishedAtHook =
+                    TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
+                return false;
+            });
+
+        REQUIRE_FALSE(candidate.SetBest());
+        REQUIRE(fHookCalledAfterCommit);
+        REQUIRE(fBestUnpublishedAtHook);
+        REQUIRE(config::fShutdown.load());
+        REQUIRE(TAO::Ledger::ChainState::hashCheckpoint.load() == hashCheckpointBefore);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+
+        uint1024_t hashBestOnDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+        REQUIRE(hashBestOnDisk == hashCandidate);
+    }
+
+    LLD::Ledger->EraseBlock(hashCandidate);
 }
 
 

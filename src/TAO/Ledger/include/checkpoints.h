@@ -19,6 +19,10 @@ ________________________________________________________________________________
 
 #include <LLC/types/uint1024.h>
 
+#ifdef UNIT_TESTS
+#include <functional>
+#endif
+
 /* Global TAO namespace. */
 namespace TAO
 {
@@ -63,6 +67,11 @@ namespace TAO
          *
          **/
         bool HardenCheckpoint(const BlockState& state, bool* pfHardened = nullptr);
+
+#ifdef UNIT_TESTS
+        /** Install a checkpoint-hardening seam for SetBest regression tests. **/
+        void SetHardenCheckpointHook(const std::function<bool(const BlockState&, bool*)>& fnHook);
+#endif
 
 
         /** Checkpoint Height.

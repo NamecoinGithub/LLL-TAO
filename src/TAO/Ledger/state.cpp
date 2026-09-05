@@ -1040,10 +1040,8 @@ namespace TAO
                 /* Keep track of mempool transactions to delete. */
                 std::vector<std::pair<uint8_t, uint512_t>> vDelete;
 
-                #ifndef UNIT_TESTS
                 BlockState stateCheckpoint;
                 bool fCheckpointCandidate = false;
-                #endif
 
                 /* Reverse the blocks to connect to connect in ascending height. */
                 for(auto state = vConnect.rbegin(); state != vConnect.rend(); ++state)
@@ -1060,10 +1058,8 @@ namespace TAO
                     }
 
                     /* Stage checkpoint publication until the disk transaction commits. */
-                    #ifndef UNIT_TESTS
                     stateCheckpoint = Prev();
                     fCheckpointCandidate = true;
-                    #endif
 
                     /* Debug output if we are debugging reorgs */
                     if(fDebugReorg)
@@ -1159,7 +1155,6 @@ namespace TAO
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed; aborting chain transition");
 
-                #ifndef UNIT_TESTS
                 if(fCheckpointCandidate)
                 {
                     const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
@@ -1179,7 +1174,6 @@ namespace TAO
                             " at height ", ChainState::nCheckpointHeight.load());
                     }
                 }
-                #endif
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 

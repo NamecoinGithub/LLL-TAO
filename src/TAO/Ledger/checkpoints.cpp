@@ -29,6 +29,15 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+#ifdef UNIT_TESTS
+        static std::function<bool(const BlockState&, bool*)> fnHardenCheckpointHook;
+
+
+        void SetHardenCheckpointHook(const std::function<bool(const BlockState&, bool*)>& fnHook)
+        {
+            fnHardenCheckpointHook = fnHook;
+        }
+#endif
 
         /** Checkpoint timespan. **/
         uint32_t CHECKPOINT_TIMESPAN = 30;
@@ -140,6 +149,11 @@ namespace TAO
         /*Harden a checkpoint into the checkpoint chain.*/
         bool HardenCheckpoint(const BlockState& state, bool* pfHardened)
         {
+#ifdef UNIT_TESTS
+            if(fnHardenCheckpointHook)
+                return fnHardenCheckpointHook(state, pfHardened);
+#endif
+
             if(pfHardened)
                 *pfHardened = false;
 
