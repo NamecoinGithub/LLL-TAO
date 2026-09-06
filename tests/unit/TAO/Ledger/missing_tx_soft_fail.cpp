@@ -1566,6 +1566,7 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     {
         TAO::Ledger::mapLastMissing[hash] = 1;
         TAO::Ledger::mapMissingBranchEscalations[hash] = 1;
+        TAO::Ledger::mapCheckRejects[hash] = 1;
         TAO::Ledger::mapMissingTxCache[hash] = {};
         TAO::Ledger::mapLastMissingProcessTime[hash] = 1;
     }
@@ -1581,6 +1582,7 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
     REQUIRE(TAO::Ledger::mapLastMissing.empty());
     REQUIRE(TAO::Ledger::mapMissingBranchEscalations.empty());
+    REQUIRE(TAO::Ledger::mapCheckRejects.empty());
     REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
     REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
     REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());

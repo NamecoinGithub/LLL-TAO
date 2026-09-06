@@ -27,6 +27,7 @@ ________________________________________________________________________________
 
 #include <Util/include/runtime.h>
 
+#include <optional>
 #include <vector>
 #include <queue>
 
@@ -236,6 +237,7 @@ namespace TAO
                 {
                     mapLastMissing.erase(hash);
                     mapMissingBranchEscalations.erase(hash);
+                    mapCheckRejects.erase(hash);
                     setUnrecoverableBlocks.erase(hash);
                     mapMissingTxCache.erase(hash);
                     mapLastMissingProcessTime.erase(hash);
@@ -565,9 +567,11 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
+            std::optional<LLD::TransactionGuard> transaction;
             if(fTransaction)
             {
-                if(!LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*transaction)
                 {
                     ChainState::fChainReorg.store(false);
                     return debug::error(FUNCTION, "failed to begin candidate activation transaction");

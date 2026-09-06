@@ -161,7 +161,9 @@ namespace LLP
                                     LOCK(TritiumNode::CLIENT_MUTEX);
 
                                     /* Begin our ACID transaction across LLD instances. */
-                                    if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                    LLD::TransactionGuard transaction(
+                                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                    if(!transaction)
                                         return debug::drop(NODE, "FLAGS::LOOKUP: failed to begin transaction");
 
                                     /* Terminate early if we have already indexed this transaction. */
@@ -354,7 +356,9 @@ namespace LLP
                                     /* Begin our ACID transaction across LLD instances. */
                                     { LOCK(TritiumNode::CLIENT_MUTEX);
 
-                                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                        LLD::TransactionGuard transaction(
+                                            TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                        if(!transaction)
                                             return debug::drop(NODE, "FLAGS::LOOKUP::PROOF: failed to begin transaction");
 
                                         /* Iterate the transaction contracts. */

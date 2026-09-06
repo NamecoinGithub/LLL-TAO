@@ -470,49 +470,62 @@ namespace LLD
             return false;
         }
 
-        /* Start the contract DB transaction. */
-        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
-            Contract->MemoryBegin(nFlags);
+        try
+        {
+            /* Start the contract DB transaction. */
+            if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
+                Contract->MemoryBegin(nFlags);
 
-        /* Start the register DB transacdtion. */
-        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
-            Register->MemoryBegin(nFlags);
+            /* Start the register DB transacdtion. */
+            if(Register && (nOwnedInstances & INSTANCES::REGISTER))
+                Register->MemoryBegin(nFlags);
 
-        /* Start the ledger DB transaction. */
-        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
-            Ledger->MemoryBegin(nFlags);
+            /* Start the ledger DB transaction. */
+            if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
+                Ledger->MemoryBegin(nFlags);
 
-        /* Handle memory commits if in memory m ode. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return true;
+            /* Handle memory commits if in memory m ode. */
+            if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+                return true;
 
-        /* Start the Logical DB transaction. */
-        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
-            Logical->TxnBegin();
+            /* Start the Logical DB transaction. */
+            if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
+                Logical->TxnBegin();
 
-        /* Start the contract DB transaction. */
-        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
-            Contract->TxnBegin();
+            /* Start the contract DB transaction. */
+            if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
+                Contract->TxnBegin();
 
-        /* Start the register DB transacdtion. */
-        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
-            Register->TxnBegin();
+            /* Start the register DB transacdtion. */
+            if(Register && (nOwnedInstances & INSTANCES::REGISTER))
+                Register->TxnBegin();
 
-        /* Start the ledger DB transaction. */
-        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
-            Ledger->TxnBegin();
+            /* Start the ledger DB transaction. */
+            if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
+                Ledger->TxnBegin();
 
-        /* Start the client DB transaction. */
-        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
-            Client->TxnBegin();
+            /* Start the client DB transaction. */
+            if(Client && (nOwnedInstances & INSTANCES::CLIENT))
+                Client->TxnBegin();
 
-        /* Start the trust DB transaction. */
-        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
-            Trust->TxnBegin();
+            /* Start the trust DB transaction. */
+            if(Trust && (nOwnedInstances & INSTANCES::TRUST))
+                Trust->TxnBegin();
 
-        /* Start the legacy DB transaction. */
-        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
-            Legacy->TxnBegin();
+            /* Start the legacy DB transaction. */
+            if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
+                Legacy->TxnBegin();
+        }
+        catch(const std::exception& e)
+        {
+            TxnAbort(nFlags, nOwnedInstances);
+            return debug::error(FUNCTION, "failed to start transaction participants: ", e.what());
+        }
+        catch(...)
+        {
+            TxnAbort(nFlags, nOwnedInstances);
+            return debug::error(FUNCTION, "failed to start transaction participants");
+        }
 
         return true;
     }
