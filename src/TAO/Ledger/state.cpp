@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/state.h>
 
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -838,8 +839,13 @@ namespace TAO
 
             /* Open a transaction when the caller has not already opened one. */
             const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-            if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
-                return debug::error(FUNCTION, "failed to begin best-chain transaction");
+            std::optional<LLD::TransactionGuard> transaction;
+            if(fOwnedTxn)
+            {
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*transaction)
+                    return debug::error(FUNCTION, "failed to begin best-chain transaction");
+            }
 
             /* Watch for genesis. */
             if(!ChainState::tStateGenesis)

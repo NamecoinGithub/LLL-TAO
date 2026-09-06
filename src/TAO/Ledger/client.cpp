@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/client.h>
 
+#include <optional>
 #include <string>
 
 #include <LLD/include/global.h>
@@ -618,9 +619,11 @@ namespace TAO
 
             /* Keep all client-chain link updates and the best pointer in one recoverable
              * transaction. Empty MERKLE participants provide a complete recovery decision. */
+            std::optional<LLD::TransactionGuard> transaction;
             if(!LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
             {
-                if(!LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                if(!*transaction)
                     return debug::error(FUNCTION, "failed to begin client-chain transaction");
             }
 

@@ -426,7 +426,9 @@ namespace TAO::API
         bool fSanitized = false;
 
         /* Start a ACID transaction (to be disposed). */
-        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+        LLD::TransactionGuard transaction(
+            TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+        if(!transaction)
             return false;
 
         /* Temporarily disable error logging so that we don't log errors for contracts that fail to execute. */

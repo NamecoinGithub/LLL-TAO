@@ -1109,9 +1109,10 @@ namespace TAO
                     if(!vtx[n].IsFirst())
                     {
                         /* Start a ACID transaction (to be disposed). */
-                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+                        LLD::TransactionGuard transaction(
+                            TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                        if(!transaction)
                             return;
-                        bool fSanitizeTxnActive = true;
 
                         /* Check the contracts for our root transaction to make sure it's valid. */
                         bool fContractInvalid = false;
@@ -1129,15 +1130,11 @@ namespace TAO
                         }
                         catch(...)
                         {
-                            if(fSanitizeTxnActive)
-                                LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-
                             throw;
                         }
 
                         /* Abort the mempool ACID transaction once the contract is sanitized */
-                        if(fSanitizeTxnActive)
-                            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                        LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
 
                         /* Check that transaction is in sequence. */
                         if(vtx[n].hashPrevTx != hashLast || fContractInvalid)
