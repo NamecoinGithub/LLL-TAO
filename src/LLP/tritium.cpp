@@ -3634,7 +3634,9 @@ namespace LLP
                         /* Start our ACID transaction in case we have any failures here. */
                         { LOCK(CLIENT_MUTEX);
 
-                            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                            LLD::TransactionGuard transaction(
+                                TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!transaction)
                                 return debug::drop(NODE, FUNCTION, "failed to begin transaction");
 
                             /* Build indexes if we don't have them. */

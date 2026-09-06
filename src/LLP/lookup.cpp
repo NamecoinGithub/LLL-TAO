@@ -224,7 +224,9 @@ namespace LLP
                                 /* Begin our ACID transaction across LLD instances. */
                                 { LOCK(TritiumNode::CLIENT_MUTEX);
 
-                                    if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                    LLD::TransactionGuard transaction(
+                                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                    if(!transaction)
                                         return debug::drop(NODE, "FLAGS::LOOKUP: failed to begin transaction");
 
                                     /* Check if we have this transaction already. */
