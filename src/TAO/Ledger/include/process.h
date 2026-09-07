@@ -329,11 +329,10 @@ namespace TAO
          *  should be sent for the missing ancestor identified by hashAncestor.
          *
          *  Canonical key: the *missing ancestor* hash (typically the orphan
-         *  block's own hashPrevBlock).  Using hashPrevBlock as the key ensures
-         *  that the orphan-drain BFS cleanup `mapLastOrphanRequest.erase(
-         *  hashParent)` always removes entries regardless of which code path
-         *  last wrote them, and that the throttle semantics are uniform across
-         *  both the ledger and the LLP layer.
+         *  block's own hashPrevBlock). Using hashPrevBlock as the key ensures
+         *  that accepting the missing ancestor clears entries regardless of
+         *  which code path last wrote them, and that the throttle semantics are
+         *  uniform across both the ledger and the LLP layer.
          *
          *  Returns true when at least ORPHAN_REQUEST_THROTTLE_SECONDS have
          *  elapsed since the last request for this ancestor (or no prior

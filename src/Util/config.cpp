@@ -16,8 +16,10 @@ ________________________________________________________________________________
 #include <Util/include/mutex.h>
 #include <Util/include/filesystem.h>
 #include <Util/include/debug.h>
+#include <filesystem>
 #include <fstream>
 #include <cstring> /* strlen */
+#include <vector>
 
 #ifdef WIN32
 #include <shlobj.h>
@@ -25,6 +27,14 @@ ________________________________________________________________________________
 
 namespace config
 {
+    namespace
+    {
+        std::string pathCached[2];
+        std::mutex csPathCached;
+        bool fCachedPath[2] = {false, false};
+        std::vector<std::filesystem::path> vDataDirectoryParents[2];
+    }
+
 
     /* Read the Config file from the Disk. */
     void ReadConfigFile(std::map<std::string, std::string>& mapSettingsRet,
@@ -227,10 +237,6 @@ namespace config
     /* Get the location that Nexus data is being stored in. */
     std::string GetDataDir(bool fNetSpecific)
     {
-        static std::string pathCached[2];
-        static std::mutex csPathCached;
-        static bool fCachedPath[2] = {false, false};
-
         std::string &path = pathCached[fNetSpecific];
 
         // This can be called during exceptions by debug log, so we cache the
@@ -284,10 +290,60 @@ namespace config
         if(config::GetBoolArg("-client", false))
             path.append("client/");
 
-        filesystem::create_directories(path);
+        if(!filesystem::exists(path))
+        {
+            std::filesystem::path cDirectory(path);
+            if(cDirectory.filename().empty())
+                cDirectory = cDirectory.parent_path();
+
+            std::vector<std::filesystem::path> vDirectories;
+            while(!cDirectory.empty() && !filesystem::exists(cDirectory.string()))
+            {
+                vDirectories.push_back(cDirectory);
+                cDirectory = cDirectory.parent_path();
+            }
+
+            filesystem::create_directories(path);
+            for(const auto& cCreated : vDirectories)
+            {
+                if(filesystem::exists(cCreated.string()))
+                    vDataDirectoryParents[fNetSpecific].push_back(cCreated.parent_path());
+            }
+        }
 
         pathCached[fNetSpecific] =  path;
         fCachedPath[fNetSpecific] = true;
         return path;
+    }
+
+
+    /* Persist newly created data-directory entries in their parents. */
+    bool SyncDataDirectories()
+    {
+        GetDataDir();
+
+        LOCK(csPathCached);
+
+        for(uint32_t nIndex = 0; nIndex < 2; ++nIndex)
+        {
+            if(!vDataDirectoryParents[nIndex].empty()
+            && !filesystem::sync_directory_chain(vDataDirectoryParents[nIndex].front().string(),
+                                                  vDataDirectoryParents[nIndex].back().string()))
+                return false;
+
+            vDataDirectoryParents[nIndex].clear();
+        }
+
+        return true;
+    }
+
+
+    /* Persist a database directory chain and any newly created data directories. */
+    bool SyncDataDirectoryChain(const std::string& strDirectory)
+    {
+        if(!filesystem::sync_directory_chain(strDirectory, GetDataDir()))
+            return false;
+
+        return SyncDataDirectories();
     }
 }

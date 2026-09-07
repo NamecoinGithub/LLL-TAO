@@ -23,10 +23,8 @@ ________________________________________________________________________________
  *  2. LLD::TxnCommit() returns true when all selected instances have active
  *     transactions that complete successfully.
  *
- *  3. All selected instances are attempted even when an earlier one fails — no
- *     short-circuit — confirmed by verifying that a later-selected instance with
- *     a valid transaction still has its data committed after the overall return
- *     value is false.
+ *  3. No participant is applied unless every selected journal reaches its
+ *     checkpoint, preventing a missing participant from producing a partial commit.
  *
  * Tests 1-3 below use inline simulation / ordering-assertion infrastructure so
  * that they compile and run without a live LLD database or full chain state —
@@ -44,19 +42,32 @@ ________________________________________________________________________________
 
 /* Real-code test headers (Gap 2 tests below) */
 #include <LLD/include/global.h>
+#include <LLD/include/version.h>
+#include <LLD/types/contract.h>
+#include <LLD/types/register.h>
+#include <LLD/types/legacy.h>
 #include <LLD/types/trust.h>
 
 #include <TAO/Ledger/include/chainstate.h>
+#include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/include/genesis_block.h>
 #include <TAO/Ledger/types/mempool.h>
+#include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
 
 #include <Util/include/args.h>
 #include <Util/include/filesystem.h>
+#include <Util/templates/datastream.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unit/catch2/catch.hpp>
@@ -120,7 +131,233 @@ namespace
         }
     };
 
-} /* anonymous namespace */
+
+    struct LogicalGuard
+    {
+        bool ownedLogical{false};
+
+        LogicalGuard()
+        {
+            if(!LLD::Logical)
+            {
+                LLD::Logical = new LLD::LogicalDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLogical = true;
+            }
+        }
+
+        ~LogicalGuard()
+        {
+            if(ownedLogical)
+            {
+                delete LLD::Logical;
+                LLD::Logical = nullptr;
+            }
+        }
+    };
+
+
+    struct ClientGuard
+    {
+        bool ownedClient{false};
+
+        ClientGuard()
+        {
+            if(!LLD::Client)
+            {
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedClient = true;
+            }
+        }
+
+        ~ClientGuard()
+        {
+            if(ownedClient)
+            {
+                delete LLD::Client;
+                LLD::Client = nullptr;
+            }
+        }
+    };
+
+
+    struct ClientModeGuard
+    {
+        bool savedClient;
+        bool savedHybrid;
+        bool savedTestNet;
+
+        ClientModeGuard()
+        : savedClient(config::fClient.load())
+        , savedHybrid(config::fHybrid.load())
+        , savedTestNet(config::fTestNet.load())
+        {
+            config::fClient.store(true);
+            config::fHybrid.store(false);
+            config::fTestNet.store(false);
+        }
+
+        ~ClientModeGuard()
+        {
+            config::fClient.store(savedClient);
+            config::fHybrid.store(savedHybrid);
+            config::fTestNet.store(savedTestNet);
+        }
+    };
+
+
+    struct ContractGuard
+    {
+        bool ownedContract{false};
+
+        ContractGuard()
+        {
+            if(!LLD::Contract)
+            {
+                LLD::Contract = new LLD::ContractDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedContract = true;
+            }
+        }
+
+        ~ContractGuard()
+        {
+            if(ownedContract)
+            {
+                delete LLD::Contract;
+                LLD::Contract = nullptr;
+            }
+        }
+    };
+
+
+    struct RegisterGuard
+    {
+        bool ownedRegister{false};
+
+        RegisterGuard()
+        {
+            if(!LLD::Register)
+            {
+                LLD::Register = new LLD::RegisterDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedRegister = true;
+            }
+        }
+
+        ~RegisterGuard()
+        {
+            if(ownedRegister)
+            {
+                delete LLD::Register;
+                LLD::Register = nullptr;
+            }
+        }
+    };
+
+
+    struct LegacyGuard
+    {
+        bool ownedLegacy{false};
+
+        LegacyGuard()
+        {
+            if(!LLD::Legacy)
+            {
+                LLD::Legacy = new LLD::LegacyDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLegacy = true;
+            }
+        }
+
+        ~LegacyGuard()
+        {
+            if(ownedLegacy)
+            {
+                delete LLD::Legacy;
+                LLD::Legacy = nullptr;
+            }
+        }
+    };
+
+
+    /* Write a complete recovery journal with a durable commit marker. */
+    bool WriteRecoveryJournal(const std::string& strName, const DataStream& ssJournal)
+    {
+        const std::string strPath =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
+        FILE* stream = std::fopen(strPath.c_str(), "wb");
+        if(!stream)
+            return false;
+
+        const std::vector<uint8_t>& vBytes = ssJournal.Bytes();
+        const bool fWrote =
+            std::fwrite(vBytes.data(), 1, vBytes.size(), stream) == vBytes.size()
+            && std::fflush(stream) == 0;
+
+        return (std::fclose(stream) == 0 && fWrote);
+    }
+
+
+    /* Build a journal that applies a simple key/value write. */
+    DataStream MakeWriteJournal(const std::pair<std::string, uint32_t>& key,
+                                const uint32_t nValue)
+    {
+        DataStream ssKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssKey << key;
+
+        DataStream ssData(SER_LLD, LLD::DATABASE_VERSION);
+        ssData << std::string("NONE");
+        ssData << nValue;
+
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("write") << ssKey.Bytes() << ssData.Bytes();
+        ssJournal << std::string("commit");
+        return ssJournal;
+    }
+
+
+    /* Build a journal whose apply path fails while still reaching commit. */
+    DataStream MakeFailingIndexJournal()
+    {
+        const std::vector<uint8_t> vKey = { 0x01, 0x02, 0x03, 0x04 };
+        const std::vector<uint8_t> vMissing = { 0xde, 0xad, 0xbe, 0xef };
+
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("index") << vKey << vMissing;
+        ssJournal << std::string("commit");
+        return ssJournal;
+    }
+
+
+    /* Build a journal containing an invalid entry type. */
+    DataStream MakeInvalidRecoveryJournal()
+    {
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("invalid");
+        return ssJournal;
+    }
+
+
+    uint64_t JournalSize(const std::string& strName)
+    {
+        const std::string strPath =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
+        FILE* stream = std::fopen(strPath.c_str(), "rb");
+        if(!stream)
+            return 0;
+
+        if(std::fseek(stream, 0, SEEK_END) != 0)
+        {
+            std::fclose(stream);
+            return 0;
+        }
+
+        const long nSize = std::ftell(stream);
+        std::fclose(stream);
+        return nSize > 0 ? static_cast<uint64_t>(nSize) : 0;
+    }
+
+
+    } /* anonymous namespace */
 
 
 /* ===========================================================================
@@ -169,56 +406,159 @@ TEST_CASE("LLD::TxnCommit returns true when all selected instances have active t
 }
 
 
-/* ===========================================================================
- * TEST 3 — Aggregation: one failure → overall false, no short-circuit
- * ===========================================================================
- * We begin a transaction on Ledger but NOT on Trust, then commit both
- * (INSTANCES::LEDGER | INSTANCES::TRUST).  Trust returns false (no pTransaction),
- * Ledger returns true.  The aggregated result must be false.
- *
- * To confirm no short-circuit: after the call we verify that Ledger's
- * transaction was actually committed (a new TxnBegin on Ledger succeeds without
- * error, proving the previous transaction's pTransaction was nulled by its
- * TxnCommit and not left dangling by a short-circuit that skipped Ledger).
- */
-TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
+TEST_CASE("LLD::TxnCommit applies every instance owned by the transaction",
           "[lld][txncommit]")
 {
     LedgerGuard ledgerGuard;
-    TrustGuard  trustGuard;
+    TrustGuard trustGuard;
 
-    SECTION("Ledger succeeds, Trust has no transaction → overall false")
+    const std::pair<std::string, uint32_t> ledgerKey =
+        std::make_pair(std::string("txn-owned-ledger"), 1);
+    const std::pair<std::string, uint32_t> trustKey =
+        std::make_pair(std::string("txn-owned-trust"), 1);
+
+    LLD::Ledger->Erase(ledgerKey);
+    LLD::Trust->Erase(trustKey);
+
+    REQUIRE(LLD::TxnBegin(
+        0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST));
+    REQUIRE(LLD::Ledger->Write(ledgerKey, uint32_t(42)));
+    REQUIRE(LLD::Trust->Write(trustKey, uint32_t(43)));
+
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Exists(ledgerKey));
+    REQUIRE(LLD::Trust->Exists(trustKey));
+
+    LLD::Ledger->Erase(ledgerKey);
+    LLD::Trust->Erase(trustKey);
+}
+
+
+TEST_CASE("LLD::TxnBegin opens every crash-recovery participant",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE(LLD::Trust->HasTransaction());
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+}
+
+
+/* ===========================================================================
+ * TEST 3 — Checkpoint barrier: an unowned participant aborts every participant
+ * ===========================================================================
+ * We begin a consensus transaction on Ledger, then attempt to commit Logical
+ * as well. Logical belongs to the MERKLE recovery group and therefore has no
+ * transaction, so the coordinator must abort before applying Ledger.
+ */
+TEST_CASE("LLD::TxnCommit checkpoint barrier prevents partial apply",
+          "[lld][txncommit]")
+{
+    LedgerGuard ledgerGuard;
+    LogicalGuard logicalGuard;
+
+    SECTION("Logical has no transaction → overall false")
     {
         /* Open a transaction only on Ledger. */
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
 
-        /* Commit both Ledger and Trust. Trust has no active transaction → returns
-         * false. Ledger has an active transaction → returns true.
-         * Aggregated result must be false. */
-        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        /* Logical has no active transaction, so the checkpoint set is incomplete. */
+        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::LOGICAL);
         REQUIRE_FALSE(fResult);
     }
 
-    SECTION("No short-circuit: Ledger data committed despite Trust failure")
+    SECTION("Ledger data is not applied when Logical cannot checkpoint")
     {
-        /* Open a transaction on Ledger and commit a write inside it. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        const std::pair<std::string, uint32_t> keyTest =
+            std::make_pair(std::string("txn-checkpoint-barrier"), 1);
+        LLD::Ledger->Erase(keyTest);
 
-        /* Commit both (Trust has no active transaction → will return false,
-         * but Ledger MUST still be committed — no short-circuit allowed). */
-        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
-        REQUIRE_FALSE(fResult); /* overall false because Trust failed */
-
-        /* After the call, opening a fresh transaction on Ledger must succeed
-         * cleanly.  If TxnCommit had short-circuited before reaching Ledger,
-         * Ledger->pTransaction would still be set (left over from TxnBegin) and
-         * TxnRelease would not have run for it.  TxnBegin internally deletes any
-         * stale pTransaction, so we verify by immediately committing the empty new
-         * transaction — this must return true (a valid empty transaction). */
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
-        const bool fSecondCommit = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER);
-        REQUIRE(fSecondCommit);
+        const bool fWrite = LLD::Ledger->Write(keyTest, uint32_t(42));
+
+        /* Logical has no transaction, so no selected database may be applied. */
+        const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::LOGICAL);
+        const bool fApplied = LLD::Ledger->Exists(keyTest);
+
+        REQUIRE(fWrite);
+        REQUIRE_FALSE(fResult);
+        REQUIRE_FALSE(fApplied);
+
+        LLD::Ledger->Erase(keyTest);
     }
+}
+
+
+TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool fContenderWaiting = false;
+    std::atomic<bool> fContenderAcquired{false};
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    LLD::SetTxnCoordinatorWaitHook([&]()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            fContenderWaiting = true;
+        }
+        condition.notify_one();
+    });
+
+    std::thread contender([&]()
+    {
+        const bool fAcquired =
+            LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        fContenderAcquired.store(fAcquired);
+        if(fAcquired)
+            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+    });
+
+    bool fSawContenderWaiting = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        fSawContenderWaiting = condition.wait_for(lock, std::chrono::seconds(2),
+            [&](){ return fContenderWaiting; });
+    }
+
+    const bool fAcquiredBeforeRelease = fContenderAcquired.load();
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    if(contender.joinable())
+        contender.join();
+    LLD::SetTxnCoordinatorWaitHook({});
+
+    REQUIRE(fSawContenderWaiting);
+    REQUIRE_FALSE(fAcquiredBeforeRelease);
+    REQUIRE(fContenderAcquired.load());
+}
+
+
+TEST_CASE("LLD::HasOpenTransaction covers every MERKLE database",
+          "[lld][txncommit][merkle]")
+{
+    LogicalGuard logicalGuard;
+    ClientGuard clientGuard;
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+    const bool fLogicalDetected =
+        LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LOGICAL);
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+    const bool fClientDetected =
+        LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CLIENT);
+
+    REQUIRE(fLogicalDetected);
+    REQUIRE(fClientDetected);
 }
 
 
@@ -283,10 +623,21 @@ namespace
                 LLD::Ledger = new LLD::LedgerDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
                 ownedLedger = true;
             }
+
+            TAO::Ledger::SetHardenCheckpointHook(
+                [](const TAO::Ledger::BlockState&, bool* pfHardened)
+                {
+                    if(pfHardened)
+                        *pfHardened = false;
+
+                    return true;
+                });
         }
 
         ~RealCodeLedgerGuard()
         {
+            TAO::Ledger::SetHardenCheckpointHook({});
+
             if(ownedLedger)
             {
                 delete LLD::Ledger;
@@ -306,6 +657,8 @@ namespace
         uint1024_t              savedBestHash;
         uint32_t                savedBestHeight;
         uint64_t                savedBestTrust;
+        uint1024_t              savedCheckpointHash;
+        uint32_t                savedCheckpointHeight;
 
         ChainStateGuard()
         : savedGenesis  (TAO::Ledger::ChainState::tStateGenesis)
@@ -313,6 +666,8 @@ namespace
         , savedBestHash (TAO::Ledger::ChainState::hashBestChain.load())
         , savedBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
         , savedBestTrust(TAO::Ledger::ChainState::nBestChainTrust.load())
+        , savedCheckpointHash(TAO::Ledger::ChainState::hashCheckpoint.load())
+        , savedCheckpointHeight(TAO::Ledger::ChainState::nCheckpointHeight.load())
         {}
 
         ~ChainStateGuard()
@@ -322,6 +677,39 @@ namespace
             TAO::Ledger::ChainState::hashBestChain   = savedBestHash;
             TAO::Ledger::ChainState::nBestHeight     .store(savedBestHeight);
             TAO::Ledger::ChainState::nBestChainTrust .store(savedBestTrust);
+            TAO::Ledger::ChainState::hashCheckpoint  = savedCheckpointHash;
+            TAO::Ledger::ChainState::nCheckpointHeight.store(savedCheckpointHeight);
+        }
+    };
+
+
+    struct ShutdownGuard
+    {
+        const bool savedShutdown{config::fShutdown.load()};
+
+        ~ShutdownGuard()
+        {
+            config::fShutdown.store(savedShutdown);
+        }
+    };
+
+
+    struct BestChainDiskGuard
+    {
+        bool hadBest{false};
+        uint1024_t hashBest;
+
+        BestChainDiskGuard()
+        : hadBest(LLD::Ledger->ReadBestChain(hashBest))
+        {
+        }
+
+        ~BestChainDiskGuard()
+        {
+            if(hadBest)
+                LLD::Ledger->WriteBestChain(hashBest);
+            else
+                LLD::Ledger->Erase(std::string("hashbestchain"));
         }
     };
 
@@ -344,6 +732,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 {
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
 
     /* ---- Minimal genesis block written to disk ---- */
     TAO::Ledger::BlockState genesis;
@@ -564,6 +953,7 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
 {
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
 
     /* ---- Minimal genesis (nNonce distinct from earlier tests in this file to avoid hash collisions) ---- */
     TAO::Ledger::BlockState genesis;
@@ -620,9 +1010,178 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()   == 1u);
 
+    uint1024_t hashBestOnDisk;
+    REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+    REQUIRE(hashBestOnDisk == hashCandidate);
+
     /* Cleanup */
     LLD::Ledger->EraseBlock(hashCandidate);
     LLD::Ledger->EraseBlock(hashGenesis);
+}
+
+
+TEST_CASE("Real SetBest(): checkpoint hardening runs after commit and gates best-tip publication",
+          "[ledger][setbest_txn][checkpoint][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    ShutdownGuard       shutdownGuard;
+
+    config::fShutdown.store(false);
+
+    TAO::Ledger::BlockState genesis =
+        TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(hashGenesis == TAO::Ledger::ChainState::Genesis());
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Ledger->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis      = genesis;
+    TAO::Ledger::ChainState::tStateBest         = genesis;
+    TAO::Ledger::ChainState::hashBestChain      = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight        = genesis.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust    = genesis.nChainTrust;
+    TAO::Ledger::ChainState::hashCheckpoint     = uint1024_t(0x1234);
+    TAO::Ledger::ChainState::nCheckpointHeight  = 0;
+
+    TAO::Ledger::BlockState candidate;
+    candidate.nVersion      = 4;
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.nChannel      = 2;
+    candidate.nHeight       = genesis.nHeight + 1;
+    candidate.nTime         = genesis.nTime + 1;
+    candidate.nBits         = 1;
+    candidate.nNonce        = 2001;
+    candidate.nChainTrust   = genesis.nChainTrust + 1;
+
+    const uint1024_t hashCandidate = candidate.GetHash();
+    bool fHookCalledAfterCommit = false;
+    bool fBestUnpublishedAtHook = false;
+
+    SECTION("successful hardening publishes the checkpoint before the best tip")
+    {
+        TAO::Ledger::SetHardenCheckpointHook(
+            [&](const TAO::Ledger::BlockState& state, bool* pfHardened)
+            {
+                uint1024_t hashBestOnDisk;
+                fHookCalledAfterCommit =
+                    !LLD::HasOpenTransaction(
+                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS)
+                    && LLD::Ledger->ReadBestChain(hashBestOnDisk)
+                    && hashBestOnDisk == hashCandidate;
+                fBestUnpublishedAtHook =
+                    TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
+
+                TAO::Ledger::ChainState::nCheckpointHeight = state.nHeight;
+                TAO::Ledger::ChainState::hashCheckpoint = state.hashCheckpoint;
+                *pfHardened = true;
+                return true;
+            });
+
+        REQUIRE(candidate.SetBest());
+        REQUIRE(fHookCalledAfterCommit);
+        REQUIRE(fBestUnpublishedAtHook);
+        REQUIRE(TAO::Ledger::ChainState::hashCheckpoint.load() == genesis.hashCheckpoint);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+        REQUIRE_FALSE(config::fShutdown.load());
+    }
+
+    SECTION("hardening read failure requests shutdown without publishing the best tip")
+    {
+        const uint1024_t hashCheckpointBefore =
+            TAO::Ledger::ChainState::hashCheckpoint.load();
+
+        TAO::Ledger::SetHardenCheckpointHook(
+            [&](const TAO::Ledger::BlockState&, bool*)
+            {
+                uint1024_t hashBestOnDisk;
+                fHookCalledAfterCommit =
+                    !LLD::HasOpenTransaction(
+                        TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS)
+                    && LLD::Ledger->ReadBestChain(hashBestOnDisk)
+                    && hashBestOnDisk == hashCandidate;
+                fBestUnpublishedAtHook =
+                    TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis;
+                return false;
+            });
+
+        REQUIRE_FALSE(candidate.SetBest());
+        REQUIRE(fHookCalledAfterCommit);
+        REQUIRE(fBestUnpublishedAtHook);
+        REQUIRE(config::fShutdown.load());
+        REQUIRE(TAO::Ledger::ChainState::hashCheckpoint.load() == hashCheckpointBefore);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+
+        uint1024_t hashBestOnDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+        REQUIRE(hashBestOnDisk == hashCandidate);
+    }
+
+    LLD::Ledger->EraseBlock(hashCandidate);
+}
+
+
+TEST_CASE("Real SetBest(): multi-block reorg evaluates checkpoint candidates in order",
+          "[ledger][setbest_txn][checkpoint][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    ShutdownGuard       shutdownGuard;
+
+    config::fShutdown.store(false);
+
+    TAO::Ledger::BlockState genesis =
+        TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Ledger->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis      = genesis;
+    TAO::Ledger::ChainState::tStateBest         = genesis;
+    TAO::Ledger::ChainState::hashBestChain      = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight        = genesis.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust    = genesis.nChainTrust;
+
+    TAO::Ledger::BlockState first;
+    first.nVersion      = 4;
+    first.hashPrevBlock = hashGenesis;
+    first.nChannel      = 2;
+    first.nHeight       = genesis.nHeight + 1;
+    first.nTime         = genesis.nTime + 1;
+    first.nBits         = 1;
+    first.nNonce        = 2101;
+    first.nChainTrust   = genesis.nChainTrust + 1;
+    const uint1024_t hashFirst = first.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashFirst, first));
+
+    TAO::Ledger::BlockState second;
+    second.nVersion      = 4;
+    second.hashPrevBlock = hashFirst;
+    second.nChannel      = 2;
+    second.nHeight       = first.nHeight + 1;
+    second.nTime         = first.nTime + 1;
+    second.nBits         = 1;
+    second.nNonce        = 2102;
+    second.nChainTrust   = first.nChainTrust + 1;
+
+    std::vector<uint1024_t> vCandidates;
+    TAO::Ledger::SetHardenCheckpointHook(
+        [&](const TAO::Ledger::BlockState& state, bool* pfHardened)
+        {
+            vCandidates.push_back(state.GetHash());
+            *pfHardened = false;
+            return true;
+        });
+
+    REQUIRE(second.SetBest());
+    const std::vector<uint1024_t> vExpected{hashGenesis, hashFirst};
+    REQUIRE(vCandidates == vExpected);
+    REQUIRE_FALSE(config::fShutdown.load());
+
+    LLD::Ledger->EraseBlock(second.GetHash());
+    LLD::Ledger->EraseBlock(hashFirst);
 }
 
 
@@ -659,4 +1218,281 @@ TEST_CASE("Accept() Case B: outer TxnBegin without SetBest, HasOpenTransaction t
 
     /* After commit, no transaction should remain open */
     REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+}
+
+
+TEST_CASE("Client SetBest commits or rolls back the block, links, and best pointer atomically",
+          "[ledger][client][setbest_txn][real]")
+{
+    ClientModeGuard modeGuard;
+    ClientGuard clientGuard;
+    LogicalGuard logicalGuard;
+    ChainStateGuard chainGuard;
+
+    const TAO::Ledger::ClientBlock genesis(TAO::Ledger::TritiumGenesis());
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(hashGenesis == TAO::Ledger::ChainState::Genesis());
+
+    TAO::Ledger::ClientBlock savedGenesis;
+    const bool hadGenesis = LLD::Client->ReadBlock(hashGenesis, savedGenesis);
+    uint1024_t savedBest;
+    const bool hadBest = LLD::Client->ReadBestChain(savedBest);
+
+    REQUIRE(LLD::Client->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Client->WriteBestChain(hashGenesis));
+
+    TAO::Ledger::ChainState::tStateGenesis = genesis;
+    TAO::Ledger::ChainState::tStateBest = genesis;
+    TAO::Ledger::ChainState::hashBestChain = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight.store(genesis.nHeight);
+
+    TAO::Ledger::ClientBlock candidate(genesis);
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.hashNextBlock = 0;
+    candidate.nHeight = genesis.nHeight + 1;
+    candidate.nTime = genesis.nTime + 1;
+    candidate.nNonce++;
+    candidate.nChannelWeight[0]++;
+    const uint1024_t hashCandidate = candidate.GetHash();
+
+    SECTION("success commits every client-chain record before publication")
+    {
+        REQUIRE(candidate.Index());
+
+        TAO::Ledger::ClientBlock committedCandidate;
+        REQUIRE(LLD::Client->ReadBlock(hashCandidate, committedCandidate));
+        REQUIRE(committedCandidate == candidate);
+
+        TAO::Ledger::ClientBlock committedGenesis;
+        REQUIRE(LLD::Client->ReadBlock(hashGenesis, committedGenesis));
+        REQUIRE(committedGenesis.hashNextBlock == hashCandidate);
+
+        uint1024_t hashBest;
+        REQUIRE(LLD::Client->ReadBestChain(hashBest));
+        REQUIRE(hashBest == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+    }
+
+    SECTION("checkpoint failure rolls back every record and leaves ChainState unpublished")
+    {
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE));
+        REQUIRE(LLD::Client->WriteBlock(hashCandidate, candidate));
+
+        /* Remove one recovery-group participant to force the real checkpoint
+         * barrier to reject the transition before any staged record is applied. */
+        REQUIRE(LLD::Logical->TxnRelease());
+        REQUIRE_FALSE(candidate.SetBest());
+
+        TAO::Ledger::ClientBlock missingCandidate;
+        REQUIRE_FALSE(LLD::Client->ReadBlock(hashCandidate, missingCandidate));
+
+        TAO::Ledger::ClientBlock unchangedGenesis;
+        REQUIRE(LLD::Client->ReadBlock(hashGenesis, unchangedGenesis));
+        REQUIRE(unchangedGenesis.hashNextBlock == 0);
+
+        uint1024_t hashBest;
+        REQUIRE(LLD::Client->ReadBestChain(hashBest));
+        REQUIRE(hashBest == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+    }
+
+    LLD::Client->EraseBlock(hashCandidate);
+    if(hadGenesis)
+        LLD::Client->WriteBlock(hashGenesis, savedGenesis);
+    else
+        LLD::Client->EraseBlock(hashGenesis);
+
+    if(hadBest)
+        LLD::Client->WriteBestChain(savedBest);
+    else
+        LLD::Client->Erase(std::string("hashbestchain"));
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS apply failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    /* Apply earlier CONSENSUS participants successfully, then fail a later one
+     * so recovery stops after a real partial apply and retains every journal. */
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-contract"), 1);
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-register"), 1);
+    const std::pair<std::string, uint32_t> trustKey =
+        std::make_pair(std::string("recovery-trust"), 1);
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Trust->Erase(trustKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 10)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 11)));
+    REQUIRE(WriteRecoveryJournal("_TRUST", MakeFailingIndexJournal()));
+    REQUIRE(WriteRecoveryJournal("_LEGACY", MakeWriteJournal(
+        std::make_pair(std::string("recovery-legacy"), 1), 13)));
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeWriteJournal(
+        std::make_pair(std::string("recovery-ledger"), 1), 14)));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    const uint64_t nTrustJournal = JournalSize("_TRUST");
+    const uint64_t nLegacyJournal = JournalSize("_LEGACY");
+    const uint64_t nLedgerJournal = JournalSize("_LEDGER");
+
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+    REQUIRE(nTrustJournal > 0);
+    REQUIRE(nLegacyJournal > 0);
+    REQUIRE(nLedgerJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE_FALSE(LLD::Trust->Exists(trustKey));
+
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+    REQUIRE(JournalSize("_TRUST") == nTrustJournal);
+    REQUIRE(JournalSize("_LEGACY") == nLegacyJournal);
+    REQUIRE(JournalSize("_LEDGER") == nLedgerJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Trust->TxnRelease());
+    REQUIRE(LLD::Legacy->TxnRelease());
+    REQUIRE(LLD::Ledger->TxnRelease());
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains journals after a CONSENSUS parse failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-parse-contract"), 1);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 30)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeInvalidRecoveryJournal()));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains journals after a CONSENSUS read failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-read-contract"), 1);
+    const std::string strRegisterJournal =
+        debug::safe_printstr(config::GetDataDir(), "_REGISTER/journal.dat");
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 31)));
+    REQUIRE(filesystem::remove(strRegisterJournal));
+    REQUIRE(filesystem::create_directories(strRegisterJournal + "/"));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    REQUIRE(nContractJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(filesystem::is_directory(strRegisterJournal));
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(filesystem::remove_directories(strRegisterJournal));
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply failure",
+          "[lld][txncommit][recovery][merkle]")
+{
+    ClientModeGuard modeGuard;
+    ClientGuard clientGuard;
+    LogicalGuard logicalGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    /* Apply earlier MERKLE participants successfully, then fail a later one. */
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-merkle-contract"), 1);
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("recovery-merkle-register"), 1);
+    const std::pair<std::string, uint32_t> logicalKey =
+        std::make_pair(std::string("recovery-logical"), 1);
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Logical->Erase(logicalKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 20)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
+    REQUIRE(WriteRecoveryJournal("_API", MakeFailingIndexJournal()));
+    REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
+        std::make_pair(std::string("recovery-client"), 1), 23)));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    const uint64_t nLogicalJournal = JournalSize("_API");
+    const uint64_t nClientJournal = JournalSize("_CLIENT");
+
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+    REQUIRE(nLogicalJournal > 0);
+    REQUIRE(nClientJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE_FALSE(LLD::Logical->Exists(logicalKey));
+
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+    REQUIRE(JournalSize("_API") == nLogicalJournal);
+    REQUIRE(JournalSize("_CLIENT") == nClientJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Logical->TxnRelease());
+    REQUIRE(LLD::Client->TxnRelease());
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
 }

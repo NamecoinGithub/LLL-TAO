@@ -29,22 +29,42 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+#ifdef UNIT_TESTS
+        static std::function<bool(const BlockState&, bool*)> fnHardenCheckpointHook;
+
+
+        void SetHardenCheckpointHook(const std::function<bool(const BlockState&, bool*)>& fnHook)
+        {
+            fnHardenCheckpointHook = fnHook;
+        }
+#endif
 
         /** Checkpoint timespan. **/
         uint32_t CHECKPOINT_TIMESPAN = 30;
 
 
         /* Check if the new block triggers a new Checkpoint timespan.*/
-        bool IsNewTimespan(const BlockState& state)
+        bool IsNewTimespan(const BlockState& state, bool& fNewTimespan)
         {
+            fNewTimespan = false;
+
             /* Catch if checkpoint is not established. */
             if(ChainState::hashCheckpoint == 0)
+            {
+                fNewTimespan = true;
                 return true;
+            }
 
             /* Get previous block state. */
+            if(state.hashPrevBlock == 0)
+            {
+                fNewTimespan = true;
+                return true;
+            }
+
             BlockState statePrev;
             if(!LLD::Ledger->ReadBlock(state.hashPrevBlock, statePrev))
-                return true;
+                return debug::error(FUNCTION, "failed to read previous block");
 
             /* Get checkpoint state. */
             BlockState stateCheck;
@@ -55,7 +75,8 @@ namespace TAO
             uint32_t nFirstMinutes = static_cast<uint32_t>((state.GetBlockTime() - stateCheck.GetBlockTime()) / 60);
             uint32_t nLastMinutes =  static_cast<uint32_t>((statePrev.GetBlockTime() - stateCheck.GetBlockTime()) / 60);
 
-            return (nFirstMinutes != nLastMinutes && nFirstMinutes >= CHECKPOINT_TIMESPAN);
+            fNewTimespan = (nFirstMinutes != nLastMinutes && nFirstMinutes >= CHECKPOINT_TIMESPAN);
+            return true;
         }
 
 
@@ -138,22 +159,23 @@ namespace TAO
 
 
         /*Harden a checkpoint into the checkpoint chain.*/
-        bool HardenCheckpoint(const BlockState& state)
+        bool HardenCheckpoint(const BlockState& state, bool* pfHardened)
         {
+#ifdef UNIT_TESTS
+            if(fnHardenCheckpointHook)
+                return fnHardenCheckpointHook(state, pfHardened);
+#endif
+
+            if(pfHardened)
+                *pfHardened = false;
+
             /* Only Harden New Checkpoint if it Fits new timestamp. */
-            if(!IsNewTimespan(state))
+            bool fNewTimespan = false;
+            if(!IsNewTimespan(state, fNewTimespan))
                 return false;
 
-            /* Notify nodes of the checkpoint. */
-            if(LLP::TRITIUM_SERVER && !ChainState::Synchronizing())
-            {
-                LLP::TRITIUM_SERVER->Relay
-                (
-                    LLP::TritiumNode::ACTION::NOTIFY,
-                    uint8_t(LLP::TritiumNode::TYPES::CHECKPOINT),
-                    state.hashCheckpoint
-                );
-            }
+            if(!fNewTimespan)
+                return true;
 
             /* Read the checkpoint block BEFORE updating atomics to avoid
              * partial-update visibility between hashCheckpoint and nCheckpointHeight. */
@@ -165,6 +187,20 @@ namespace TAO
              * will already see the matching nCheckpointHeight. */
             ChainState::nCheckpointHeight = stateCheckpoint.nHeight;
             ChainState::hashCheckpoint    = state.hashCheckpoint;
+
+            /* Notify nodes only after the checkpoint has been published locally. */
+            if(LLP::TRITIUM_SERVER && !ChainState::Synchronizing())
+            {
+                LLP::TRITIUM_SERVER->Relay
+                (
+                    LLP::TritiumNode::ACTION::NOTIFY,
+                    uint8_t(LLP::TritiumNode::TYPES::CHECKPOINT),
+                    state.hashCheckpoint
+                );
+            }
+
+            if(pfHardened)
+                *pfHardened = true;
 
             /* Dump the Checkpoint if not Initializing. */
             if(config::nVerbose >= (ChainState::Synchronizing() ? 1 : 0))

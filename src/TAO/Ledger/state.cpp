@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/state.h>
 
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -58,6 +59,7 @@ ________________________________________________________________________________
 
 #include <Util/include/args.h>
 #include <Util/include/runtime.h>
+#include <Util/include/signals.h>
 #include <Util/include/softfloat.h>
 
 #include <map>
@@ -732,7 +734,11 @@ namespace TAO
             }
 
             /* Add the Pending Checkpoint into the Blockchain. */
-            if(IsNewTimespan(statePrev))
+            bool fNewTimespan = false;
+            if(!IsNewTimespan(statePrev, fNewTimespan))
+                return false;
+
+            if(fNewTimespan)
             {
                 /* Set new checkpoint hash. */
                 hashCheckpoint = GetHash();
@@ -831,16 +837,44 @@ namespace TAO
             /* Get the hash. */
             uint1024_t hash = GetHash();
 
+            /* Open a transaction when the caller has not already opened one. */
+            const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            std::optional<LLD::TransactionGuard> transaction;
+            if(fOwnedTxn)
+            {
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*transaction)
+                    return debug::error(FUNCTION, "failed to begin best-chain transaction");
+            }
+
             /* Watch for genesis. */
             if(!ChainState::tStateGenesis)
             {
-                /* Write the best chain pointer. */
-                if(!LLD::Ledger->WriteBestChain(hash))
-                    return debug::error(FUNCTION, "failed to write best chain");
+                /* Accept a retry only when the previously persisted block is identical. */
+                if(LLD::Ledger->HasBlock(hash))
+                {
+                    BlockState state;
+                    if(!LLD::Ledger->ReadBlock(hash, state) || state != *this)
+                    {
+                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                        return debug::error(FUNCTION, "conflicting genesis block state already exists");
+                    }
+                }
+                else if(!LLD::Ledger->WriteBlock(hash, *this))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    return debug::error(FUNCTION, "failed to write genesis block state");
+                }
 
-                /* Write the block to disk. */
-                if(!LLD::Ledger->WriteBlock(hash, *this))
-                    return debug::error(FUNCTION, "block state already exists");
+                /* Publish the best pointer only after its target exists on disk. */
+                if(!LLD::Ledger->WriteBestChain(hash))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    return debug::error(FUNCTION, "failed to write best chain");
+                }
+
+                if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "failed to commit genesis chain state");
 
                 /* Set the genesis block. */
                 ChainState::tStateGenesis = *this;
@@ -852,10 +886,6 @@ namespace TAO
                  * and #3-#5 in chainstate.cpp all open a TxnBegin before calling SetBest()).
                  * A future caller that forgets to open a transaction is self-healed here
                  * instead of silently hitting TxnCommit with no active transaction. */
-                const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-                if(fOwnedTxn)
-                    LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();
                 BlockState longer = *this;
@@ -1020,6 +1050,8 @@ namespace TAO
                 /* Keep track of mempool transactions to delete. */
                 std::vector<std::pair<uint8_t, uint512_t>> vDelete;
 
+                std::vector<BlockState> vCheckpointCandidates;
+
                 /* Reverse the blocks to connect to connect in ascending height. */
                 for(auto state = vConnect.rbegin(); state != vConnect.rend(); ++state)
                 {
@@ -1034,20 +1066,8 @@ namespace TAO
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
                     }
 
-                    /* Harden a checkpoint if there is any. */
-                    #ifndef UNIT_TESTS
-                    {
-                        const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
-                        HardenCheckpoint(Prev());
-                        const uint1024_t hashCheckpointAfter = ChainState::hashCheckpoint.load();
-                        if(hashCheckpointBefore != hashCheckpointAfter)
-                        {
-                            debug::log(0, FUNCTION, "Checkpoint hardened: ",
-                                hashCheckpointBefore.SubString(), " -> ", hashCheckpointAfter.SubString(),
-                                " at height ", ChainState::nCheckpointHeight.load());
-                        }
-                    }
-                    #endif
+                    /* Stage checkpoint publication until the disk transaction commits. */
+                    vCheckpointCandidates.push_back(state->Prev());
 
                     /* Debug output if we are debugging reorgs */
                     if(fDebugReorg)
@@ -1118,10 +1138,18 @@ namespace TAO
                             " was blocked for the duration");
                 }
 
-                /* All disk writes (disconnect + connect) are complete. Commit the transaction
-                 * durably before touching mempool or in-memory ChainState atomics.  This is the
-                 * transactional boundary: everything above is rollback-safe; everything below is
-                 * in-memory-only and runs only after the durable commit succeeds.
+                /* Stage the best-chain pointer with the disconnect/connect writes so the durable
+                 * transition cannot commit without its authoritative tip. */
+                if(!LLD::Ledger->WriteBestChain(hash))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    return debug::error(FUNCTION, "failed to stage best chain pointer");
+                }
+
+                /* All disk writes (disconnect + connect + best pointer) are complete. Commit the
+                 * transaction durably before touching mempool or in-memory ChainState atomics.
+                 * This is the transactional boundary: everything above is rollback-safe;
+                 * everything below is in-memory-only and runs only after durable commit succeeds.
                  *
                  * Self-containment: when fOwnedTxn=true SetBest() opened this transaction itself
                  * (the caller had no active transaction).  When fOwnedTxn=false an outer caller
@@ -1134,6 +1162,26 @@ namespace TAO
                  * instance's commit failed, so the chain transition is aborted. */
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed; aborting chain transition");
+
+                for(const auto& stateCheckpoint : vCheckpointCandidates)
+                {
+                    const uint1024_t hashCheckpointBefore = ChainState::hashCheckpoint.load();
+                    bool fCheckpointHardened = false;
+                    if(!HardenCheckpoint(stateCheckpoint, &fCheckpointHardened))
+                    {
+                        ::Shutdown();
+                        return debug::error(FUNCTION,
+                            "post-commit checkpoint hardening failed; shutdown requested");
+                    }
+
+                    const uint1024_t hashCheckpointAfter = ChainState::hashCheckpoint.load();
+                    if(fCheckpointHardened && hashCheckpointBefore != hashCheckpointAfter)
+                    {
+                        debug::log(0, FUNCTION, "Checkpoint hardened: ",
+                            hashCheckpointBefore.SubString(), " -> ", hashCheckpointAfter.SubString(),
+                            " at height ", ChainState::nCheckpointHeight.load());
+                    }
+                }
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 
@@ -1246,6 +1294,17 @@ namespace TAO
                         " mempool_conflict_deps=", TAO::Ledger::mempool.ConflictDependents(),
                         " mempool_size=", TAO::Ledger::mempool.Size());
 
+                /* Refresh the committed genesis next pointer without exposing a staged update. */
+                BlockState stateGenesis;
+                if(LLD::Ledger->ReadBlock(ChainState::Genesis(), stateGenesis))
+                    ChainState::tStateGenesis = stateGenesis;
+                else
+                {
+                    ::Shutdown();
+                    return debug::error(FUNCTION,
+                        "failed to refresh committed genesis state; shutdown requested");
+                }
+
                 /* Set the best chain variables. */
                 ChainState::tStateBest          = *this; //XXX: we are not getting all the data from connect, consider using pointer
                 ChainState::hashBestChain      = hash;
@@ -1268,10 +1327,6 @@ namespace TAO
 
                 /* Set our chain cache update now. */
                 TAO::API::nBlockCounter.store(nHeight);
-
-                /* Write the best chain pointer. */
-                if(!LLD::Ledger->WriteBestChain(hash))
-                    return debug::error(FUNCTION, "failed to write best chain");
 
                 /* Reset contract meters. */
                 nTotalContracts = 0;
@@ -1566,9 +1621,6 @@ namespace TAO
                 if(!LLD::Ledger->WriteBlock(hashPrevBlock, prev))
                     return debug::error(FUNCTION, "failed to update previous block state");
 
-                /* If we just updated hashNextBlock for genesis block, update the in-memory genesis */
-                if(hashPrevBlock == ChainState::Genesis())
-                    ChainState::tStateGenesis = prev;
             }
 
             return true;

@@ -3,7 +3,7 @@
 **Audience:** reviewers, operators, and agents picking up recovery work  
 **Scope:** ledger `Process()` / peer-best recovery / missing-tx escalation / BESTCHAIN coordination from roughly PR **#656** through the **near-tip orphan-pool exclusion**  
 **Living audit:** [NODE_AUDIT_2026-08-10.md](NODE_AUDIT_2026-08-10.md) · [FOOT_GUNS.md](FOOT_GUNS.md) · [RECCES.md](RECCES.md)  
-**Diagrams:** [process-upgrade-series.md](../../../diagrams/audit/process-upgrade-series.md) · [recovery-coordinator-upgrade.md](../../../diagrams/audit/recovery-coordinator-upgrade.md) · [mempool-recovery-coupling.md](../../../diagrams/audit/mempool-recovery-coupling.md)
+**Diagrams:** [process-upgrade-series.md](../../../diagrams/audit/process-upgrade-series.md) · [recovery-coordinator-upgrade.md](../../../diagrams/audit/recovery-coordinator-upgrade.md) · [mempool-recovery-coupling.md](../../../diagrams/audit/mempool-recovery-coupling.md) · [PR #697 review hardening](../../../diagrams/audit/pr697-review-hardening.md)
 
 ---
 
@@ -157,6 +157,12 @@ Full decision trees: [process-upgrade-series.md](../../../diagrams/audit/process
 | **Fix** | Rate-limit path sets `hashMissing = hashBlock` and returns `INCOMPLETE` so LLP takes the cheap per-tx re-request branch. Seed `mapLastMissingProcessTime` when the counter is first set to 1. |
 | **PRs / docs** | #666 · FOOT_GUNS FG-07 / FG-08 |
 | **Invariant** | Soft throttle ≠ escalation; only explicit erase/limit/blacklist paths escalate. |
+
+When peer-best walkback accepts a connectable root but its orphan BFS finds an
+incomplete descendant, `Process()` returns both `ACCEPTED` and `INCOMPLETE`.
+Recovery clears `mapLastMissingProcessTime[block.hashMissing]` before returning
+`PROGRESS`, allowing the descendant—not merely the accepted root—to be redelivered
+promptly when its transactions arrive.
 
 ---
 

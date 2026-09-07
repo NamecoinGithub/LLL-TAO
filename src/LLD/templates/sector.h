@@ -102,7 +102,6 @@ namespace LLD
         std::string strBaseLocation;
         std::string strName;
 
-
         /* timer for Runtime Calculations. */
         runtime::timer runtime;
 
@@ -831,7 +830,7 @@ namespace LLD
          *  Release the transaction checkpoint.
          *
          **/
-        void TxnRelease();
+        bool TxnRelease();
 
 
         /** TxnCommit
@@ -849,7 +848,7 @@ namespace LLD
          *  Recover a transaction from the journal.
          *
          **/
-        bool TxnRecovery();
+        RECOVERY TxnRecovery();
 
     };
 }

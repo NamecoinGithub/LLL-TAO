@@ -25,6 +25,10 @@ ________________________________________________________________________________
 #include <LLD/types/trust.h>
 #include <LLD/types/contract.h>
 
+#ifdef UNIT_TESTS
+#include <functional>
+#endif
+
 namespace LLD
 {
     extern LogicalDB*    Logical;
@@ -65,8 +69,10 @@ namespace LLD
      *
      *  Initialize the global LLD instances.
      *
+     *  @return True if initialization and journal recovery succeeded.
+     *
      **/
-    void Initialize();
+    bool Initialize();
 
 
     /** Indexing
@@ -89,8 +95,11 @@ namespace LLD
      *
      *  Check the transactions for recovery.
      *
+     *  @return True if no recovery was needed or every recovered database
+     *          committed successfully.
+     *
      **/
-    void TxnRecovery();
+    bool TxnRecovery();
 
 
     /** HasOpenTransaction
@@ -108,7 +117,7 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      */
-    void TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
     /** Txn Abort
@@ -116,18 +125,46 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      */
-    void TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
     /** Txn Commit
      *
      *  Global handler for all LLD instances.
      *
-     *  @return true if every selected per-DB commit succeeded, false if any failed.
-     *          All selected instances are attempted regardless of individual failures.
+     *  @return True if every selected checkpoint and per-DB commit succeeded.
      *
      */
     bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+
+
+    /** Abort a transaction automatically if its scope exits before it is consumed. */
+    class TransactionGuard
+    {
+    public:
+        TransactionGuard(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+        ~TransactionGuard();
+
+        TransactionGuard(const TransactionGuard&) = delete;
+        TransactionGuard& operator=(const TransactionGuard&) = delete;
+
+        explicit operator bool() const;
+
+    private:
+        const uint8_t nFlags;
+        const uint16_t nInstances;
+        const bool fAcquired;
+    };
+
+
+    #ifdef UNIT_TESTS
+    /** Install a test hook invoked after the coordinator is observed locked. */
+    void SetTxnCoordinatorWaitHook(const std::function<void()>& fnHook);
+
+    /** Clear the recovery-required latch so unit tests can continue after a
+     *  forced partial-apply failure. */
+    void ResetTxnRecoveryRequired();
+    #endif
 }
 
 #endif
