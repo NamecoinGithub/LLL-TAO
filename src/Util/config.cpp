@@ -19,6 +19,7 @@ ________________________________________________________________________________
 #include <filesystem>
 #include <fstream>
 #include <cstring> /* strlen */
+#include <vector>
 
 #ifdef WIN32
 #include <shlobj.h>
@@ -31,7 +32,7 @@ namespace config
         std::string pathCached[2];
         std::mutex csPathCached;
         bool fCachedPath[2] = {false, false};
-        bool fDataDirectoryDirty[2] = {false, false};
+        std::vector<std::filesystem::path> vDataDirectoryParents[2];
     }
 
 
@@ -289,8 +290,26 @@ namespace config
         if(config::GetBoolArg("-client", false))
             path.append("client/");
 
-        if(!filesystem::exists(path) && filesystem::create_directories(path))
-            fDataDirectoryDirty[fNetSpecific] = true;
+        if(!filesystem::exists(path))
+        {
+            std::filesystem::path cDirectory(path);
+            if(cDirectory.filename().empty())
+                cDirectory = cDirectory.parent_path();
+
+            std::vector<std::filesystem::path> vDirectories;
+            while(!cDirectory.empty() && !filesystem::exists(cDirectory.string()))
+            {
+                vDirectories.push_back(cDirectory);
+                cDirectory = cDirectory.parent_path();
+            }
+
+            filesystem::create_directories(path);
+            for(const auto& cCreated : vDirectories)
+            {
+                if(filesystem::exists(cCreated.string()))
+                    vDataDirectoryParents[fNetSpecific].push_back(cCreated.parent_path());
+            }
+        }
 
         pathCached[fNetSpecific] =  path;
         fCachedPath[fNetSpecific] = true;
@@ -307,17 +326,13 @@ namespace config
 
         for(uint32_t nIndex = 0; nIndex < 2; ++nIndex)
         {
-            if(!fDataDirectoryDirty[nIndex])
-                continue;
+            for(const auto& cParent : vDataDirectoryParents[nIndex])
+            {
+                if(!filesystem::sync_directory(cParent.string()))
+                    return false;
+            }
 
-            std::filesystem::path cDataDirectory(pathCached[nIndex]);
-            if(cDataDirectory.filename().empty())
-                cDataDirectory = cDataDirectory.parent_path();
-
-            if(!filesystem::sync_directory(cDataDirectory.parent_path().string()))
-                return false;
-
-            fDataDirectoryDirty[nIndex] = false;
+            vDataDirectoryParents[nIndex].clear();
         }
 
         return true;
