@@ -27,6 +27,7 @@ ________________________________________________________________________________
 
 #include <Util/include/runtime.h>
 
+#include <optional>
 #include <vector>
 #include <queue>
 
@@ -37,6 +38,33 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        namespace
+        {
+            void ClearOrphanRecoveryState(const uint1024_t& hashBlock)
+            {
+                mapLastMissing.erase(hashBlock);
+                mapMissingBranchEscalations.erase(hashBlock);
+                mapCheckRejects.erase(hashBlock);
+                setUnrecoverableBlocks.erase(hashBlock);
+                mapMissingTxCache.erase(hashBlock);
+                mapLastOrphanRequest.erase(hashBlock);
+                mapLastMissingProcessTime.erase(hashBlock);
+            }
+
+
+            void ClearOrphanRecoveryState()
+            {
+                mapLastMissing.clear();
+                mapMissingBranchEscalations.clear();
+                mapCheckRejects.clear();
+                setUnrecoverableBlocks.clear();
+                mapMissingTxCache.clear();
+                mapLastOrphanRequest.clear();
+                mapLastMissingProcessTime.clear();
+            }
+        }
+
+
         /* Static instantiation of block orphan graph. */
         OrphanPool mapOrphans;
 
@@ -214,6 +242,80 @@ namespace TAO
 
         namespace
         {
+            uint64_t PruneOrphanSubtree(const uint1024_t& hashRoot)
+            {
+                std::vector<uint1024_t> vHashes;
+                std::queue<uint1024_t> queueHashes;
+                queueHashes.push(hashRoot);
+
+                while(!queueHashes.empty())
+                {
+                    const uint1024_t hash = queueHashes.front();
+                    queueHashes.pop();
+                    vHashes.push_back(hash);
+
+                    const std::vector<uint1024_t> vChildren = mapOrphans.Children(hash);
+                    for(const auto& hashChild : vChildren)
+                        queueHashes.push(hashChild);
+                }
+
+                const uint64_t nPruned = mapOrphans.RemoveSubtree(hashRoot);
+                for(const auto& hash : vHashes)
+                    ClearOrphanRecoveryState(hash);
+
+                return nPruned;
+            }
+
+
+            void FinalizeExtractedOrphan(const TAO::Ledger::Block& block,
+                                         const uint8_t nStatus)
+            {
+                const uint1024_t hashBlock = block.GetHash();
+                if(nStatus & (PROCESS::ACCEPTED | PROCESS::DUPLICATE))
+                    return;
+
+                if(nStatus & (PROCESS::REJECTED | PROCESS::IGNORED))
+                {
+                    const uint64_t nPruned = PruneOrphanSubtree(hashBlock);
+
+                    debug::warning(FUNCTION, "pruned rejected connectable orphan subtree root=",
+                        hashBlock.SubString(), " descendants=", nPruned);
+                    return;
+                }
+
+                if(!LLD::Ledger->HasBlock(hashBlock) && !mapOrphans.Contains(hashBlock))
+                    mapOrphans.Insert(block);
+            }
+
+
+            class ExtractedOrphanGuard
+            {
+                const TAO::Ledger::Block& block;
+                const uint8_t& nStatus;
+                bool fActive;
+
+            public:
+                ExtractedOrphanGuard(const TAO::Ledger::Block& blockIn,
+                                     const uint8_t& nStatusIn)
+                : block(blockIn)
+                , nStatus(nStatusIn)
+                , fActive(false)
+                {
+                }
+
+                ~ExtractedOrphanGuard()
+                {
+                    if(fActive)
+                        FinalizeExtractedOrphan(block, nStatus);
+                }
+
+                void Activate()
+                {
+                    fActive = true;
+                }
+            };
+
+
             /** LocalMinedBlockRecord
              *
              *  Memory-only watch record for locally mined blocks that have been
@@ -485,8 +587,16 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
+            std::optional<LLD::TransactionGuard> transaction;
             if(fTransaction)
-                LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            {
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*transaction)
+                {
+                    ChainState::fChainReorg.store(false);
+                    return debug::error(FUNCTION, "failed to begin candidate activation transaction");
+                }
+            }
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())
@@ -643,6 +753,16 @@ namespace TAO
                     Process(*pConnectable, nStatus, pnode, false);
 
                     const bool fProgress = (nStatus & PROCESS::ACCEPTED) != 0;
+                    {
+                        LOCK(PROCESSING_MUTEX);
+                        FinalizeExtractedOrphan(*pConnectable, nStatus);
+
+                        /* Permit one prompt redelivery of the actual incomplete
+                         * orphan after its missing data arrives. */
+                        if((nStatus & PROCESS::INCOMPLETE) && pConnectable->hashMissing != 0)
+                            mapLastMissingProcessTime.erase(pConnectable->hashMissing);
+                    }
+
                     if(fProgress)
                     {
                         debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "=== PEER_BEST_RECOVERED ===",
@@ -689,8 +809,8 @@ namespace TAO
                  * (the missing ancestor), not hashPeerBest when an orphan walk
                  * occurred — hashPeerBest is the branch tip and keying on it
                  * would reintroduce the two-namespace collision this helper was
-                 * designed to eliminate: the drain-loop erase(hashParent) cleanup
-                 * only ever clears hashPrevBlock keys.  When no orphans were
+                 * designed to eliminate: accepted-block cleanup clears entries
+                 * keyed by the accepted ancestor hash.  When no orphans were
                  * present, hashDeepestAncestor still defaults to hashPeerBest. */
                 if(!pSend)
                     return PeerBestRecoveryResult::SKIPPED;
@@ -1136,9 +1256,8 @@ namespace TAO
 
             /* Throttle: require at least ORPHAN_REQUEST_THROTTLE_SECONDS between
              * LIST requests for the same missing ancestor hash.  Keyed by the
-             * ancestor hash (hashPrevBlock of the requesting block) so the drain-
-             * loop cleanup mapLastOrphanRequest.erase(hashParent) is always
-             * effective regardless of which code path last wrote the entry. */
+             * ancestor hash (hashPrevBlock of the requesting block) so accepting
+             * that ancestor clears the entry regardless of which path wrote it. */
             const uint64_t nNow = runtime::timestamp();
             const auto itReq = mapLastOrphanRequest.find(hashAncestor);
             if(itReq != mapLastOrphanRequest.end()
@@ -1163,12 +1282,7 @@ namespace TAO
              * blacklist and escalation entries computed against the now-discarded
              * orphan graph do not persist and mis-filter legitimate future blocks. */
             mapOrphans.Clear();
-            setUnrecoverableBlocks.clear();
-            mapMissingTxCache.clear();
-            mapLastMissingProcessTime.clear();
-            mapLastMissing.clear();
-            mapMissingBranchEscalations.clear();
-            mapLastOrphanRequest.clear();
+            ClearOrphanRecoveryState();
 
             debug::warning(FUNCTION, "purged orphan recovery state",
                 " reason=", (pszReason ? pszReason : "unknown"),
@@ -1193,6 +1307,10 @@ namespace TAO
 
             /* Get the block's hash. */
             const uint1024_t hashBlock = block.GetHash();
+
+            /* If a retained orphan's parent has arrived, retry validation but
+             * guarantee that transient results restore the extracted root. */
+            ExtractedOrphanGuard extractedOrphan(block, nStatus);
 
             const auto incrementMissingEscalations = [](const uint1024_t& hash)
             {
@@ -1293,18 +1411,24 @@ namespace TAO
                 {
                     nStatus |= PROCESS::DUPLICATE;
                     mapOrphans.Remove(hashBlock);
-                    mapLastMissing.erase(hashBlock);
-                    mapMissingBranchEscalations.erase(hashBlock);
-                    setUnrecoverableBlocks.erase(hashBlock);
-                    mapMissingTxCache.erase(hashBlock);
-                    mapLastMissingProcessTime.erase(hashBlock);
+                    ClearOrphanRecoveryState(hashBlock);
                     return;
                 }
 
                 if(mapOrphans.Contains(hashBlock))
                 {
-                    nStatus |= PROCESS::ORPHAN;
-                    return;
+                    const TAO::Ledger::Block* pOrphan = mapOrphans.Get(hashBlock);
+                    if(!pOrphan || !LLD::Ledger->HasBlock(pOrphan->hashPrevBlock))
+                    {
+                        nStatus |= PROCESS::ORPHAN;
+                        return;
+                    }
+
+                    /* Its parent arrived since insertion. Remove the retained
+                     * copy and let this delivery run through validation. If it
+                     * remains incomplete, the caller/recovery path requeues it. */
+                    mapOrphans.Remove(hashBlock);
+                    extractedOrphan.Activate();
                 }
 
                 /* Check for orphan. */
@@ -1738,12 +1862,7 @@ namespace TAO
                  * Also clear the rate-limit timestamp and blacklist entry so if
                  * this exact hash ever re-appears (e.g. a reorg that reverses a
                  * previously unrecoverable decision) it is processed normally. */
-                if(mapLastMissing.count(hashBlock))
-                    mapLastMissing.erase(hashBlock);
-                mapMissingBranchEscalations.erase(hashBlock);
-                setUnrecoverableBlocks.erase(hashBlock);
-                mapMissingTxCache.erase(hashBlock);
-                mapLastMissingProcessTime.erase(hashBlock);
+                ClearOrphanRecoveryState(hashBlock);
 
                 /* Special meter for synchronizing. */
                 uint64_t nElapsed = runtime::timestamp(true) - nSynchronizationTimer;
@@ -1846,12 +1965,7 @@ namespace TAO
                          * through. */
                         if(!pOrphan->Check())
                         {
-                            const uint64_t nPruned = mapOrphans.RemoveSubtree(hashOrphan);
-                            mapLastMissing.erase(hashOrphan);
-                            mapMissingBranchEscalations.erase(hashOrphan);
-                            setUnrecoverableBlocks.erase(hashOrphan);
-                            mapMissingTxCache.erase(hashOrphan);
-                            mapLastMissingProcessTime.erase(hashOrphan);
+                            const uint64_t nPruned = PruneOrphanSubtree(hashOrphan);
                             debug::warning(FUNCTION, "removed invalid orphan subtree root=",
                                 hashOrphan.SubString(), " count=", nPruned);
                             continue;
@@ -1962,23 +2076,13 @@ namespace TAO
 
                         if(!pOrphan->Accept())
                         {
-                            const uint64_t nPruned = mapOrphans.RemoveSubtree(hashOrphan);
-                            mapLastMissing.erase(hashOrphan);
-                            mapMissingBranchEscalations.erase(hashOrphan);
-                            setUnrecoverableBlocks.erase(hashOrphan);
-                            mapMissingTxCache.erase(hashOrphan);
-                            mapLastMissingProcessTime.erase(hashOrphan);
+                            const uint64_t nPruned = PruneOrphanSubtree(hashOrphan);
                             debug::warning(FUNCTION, "removed rejected orphan subtree root=",
                                 hashOrphan.SubString(), " count=", nPruned);
                             continue;
                         }
 
-                        mapLastMissing.erase(hashOrphan);
-                        mapMissingBranchEscalations.erase(hashOrphan);
-                        setUnrecoverableBlocks.erase(hashOrphan);
-                        mapMissingTxCache.erase(hashOrphan);
-                        mapLastMissingProcessTime.erase(hashOrphan);
-                        mapLastOrphanRequest.erase(hashParent);
+                        ClearOrphanRecoveryState(hashOrphan);
                         mapOrphans.Remove(hashOrphan);
                         queueParents.push(hashOrphan);
                         ++nDrained;

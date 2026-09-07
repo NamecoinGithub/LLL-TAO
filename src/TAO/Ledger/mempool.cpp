@@ -650,7 +650,9 @@ namespace TAO
                 }
 
                 /* Connect transaction in memory. */
-                LLD::TxnBegin(FLAGS::MEMPOOL);
+                LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
+                if(!transaction)
+                    return debug::error(FUNCTION, "failed to begin mempool transaction");
                 if(!tx.Connect(FLAGS::MEMPOOL))
                 {
                     /* Abort memory commits on failures. */
@@ -1107,8 +1109,10 @@ namespace TAO
                     if(!vtx[n].IsFirst())
                     {
                         /* Start a ACID transaction (to be disposed). */
-                        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-                        bool fSanitizeTxnActive = true;
+                        LLD::TransactionGuard transaction(
+                            TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                        if(!transaction)
+                            return;
 
                         /* Check the contracts for our root transaction to make sure it's valid. */
                         bool fContractInvalid = false;
@@ -1126,15 +1130,11 @@ namespace TAO
                         }
                         catch(...)
                         {
-                            if(fSanitizeTxnActive)
-                                LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-
                             throw;
                         }
 
                         /* Abort the mempool ACID transaction once the contract is sanitized */
-                        if(fSanitizeTxnActive)
-                            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                        LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
 
                         /* Check that transaction is in sequence. */
                         if(vtx[n].hashPrevTx != hashLast || fContractInvalid)
@@ -1146,7 +1146,9 @@ namespace TAO
                                 debug::notice(FUNCTION, "ORPHAN DETECTED AT INDEX ", n, ": last hash mismatch ", vtx[n].hashPrevTx.SubString());
 
                             /* Begin the memory transaction. */
-                            LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            LLD::TransactionGuard transaction(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            if(!transaction)
+                                return;
 
                             /* Track whether the LLD transaction is still active (not aborted). */
                             bool fTxnActive = true;

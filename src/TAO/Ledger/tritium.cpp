@@ -727,7 +727,9 @@ namespace TAO
             TAO::Ledger::BlockState state(*this);
 
             /* Start the database transaction. */
-            LLD::TxnBegin();
+            LLD::TransactionGuard transaction;
+            if(!transaction)
+                return debug::error(FUNCTION, "failed to begin block transaction");
 
             /* Write the transactions. */
             for(const auto& proof : vtx)
@@ -794,9 +796,6 @@ namespace TAO
             if(!LLD::Ledger->WriteTx(hashProducer, producer))
                 return debug::error(FUNCTION, "failed to write producer to disk");
 
-            /* Make sure we don't have any orphans to process from the producer. */
-            mempool.ProcessOrphans(hashProducer);
-
             /* Accept the block state. */
             if(!state.Index())
             {
@@ -815,6 +814,9 @@ namespace TAO
              * from TxnCommit() is a genuine failure signal in this path. */
             if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
                 return debug::error(FUNCTION, "disk transaction commit failed for block acceptance");
+
+            /* Process producer orphans only after releasing transaction ownership. */
+            mempool.ProcessOrphans(hashProducer);
 
             /* Check for best chain. */
             if(GetHash() == ChainState::hashBestChain.load() && !ChainState::Synchronizing())

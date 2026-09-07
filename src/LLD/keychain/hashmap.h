@@ -22,6 +22,7 @@ ________________________________________________________________________________
 #include <cstdint>
 #include <string>
 #include <fstream>
+#include <set>
 #include <vector>
 #include <mutex>
 
@@ -75,6 +76,12 @@ namespace LLD
 
         /** The keychain flags. **/
         uint8_t nFlags;
+
+        /** Files awaiting a successful durability sync. **/
+        std::set<std::string> setDirtyFiles;
+
+        /** Whether a new hashmap file requires directory metadata syncing. **/
+        bool fDirectoryDirty;
 
 
         /* The key level locking hashmap. */
@@ -177,6 +184,14 @@ namespace LLD
         void Flush();
 
 
+        /** Begin tracking a durable transaction apply. **/
+        void BeginDurabilityTracking();
+
+
+        /** Sync only files modified by the current durable transaction apply. **/
+        bool SyncTouchedFiles();
+
+
         /** Restore
          *
          *  Restore an erased key from keychain.
@@ -192,11 +207,13 @@ namespace LLD
         /** Erase
          *
          *  Erase a key from the disk hashmaps.
+         *  Missing keys succeed so replayed erasures stay idempotent, while
+         *  keychain I/O failures still return false.
          *  TODO: This should be optimized further.
          *
          *  @param[in] vKey the key to erase.
          *
-         *  @return True if the key was erased, false otherwise.
+         *  @return True if the key was erased or already absent, false on I/O failure.
          *
          **/
         bool Erase(const std::vector<uint8_t> &vKey);

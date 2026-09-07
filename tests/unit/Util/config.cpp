@@ -13,9 +13,22 @@ ________________________________________________________________________________
 
 #include <Util/include/config.h>
 #include <Util/include/args.h>
+#include <Util/include/filesystem.h>
 #include <unit/catch2/catch.hpp>
 #include <fstream>
 #include <cstdio>
+
+
+TEST_CASE("Directory chains include trailing-separator roots", "[config][durability]")
+{
+    const std::string strRoot = "/tmp/nexus-directory-chain/";
+    const std::string strLeaf = strRoot + "database/keychain/";
+
+    filesystem::remove_directories(strRoot);
+    REQUIRE(filesystem::create_directories(strLeaf));
+    REQUIRE(filesystem::sync_directory_chain(strLeaf, strRoot));
+    REQUIRE(filesystem::remove_directories(strRoot));
+}
 
 TEST_CASE("Config file parsing tests", "[config]")
 {

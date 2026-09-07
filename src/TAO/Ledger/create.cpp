@@ -756,8 +756,19 @@ namespace TAO::Ledger
         std::vector<uint512_t> vMempool;
         mempool.List(vMempool);
 
+        /* Snapshot transactions before acquiring the transaction coordinator. */
+        std::vector<std::pair<uint512_t, TAO::Ledger::Transaction>> vTransactions;
+        for(const auto& hash : vMempool)
+        {
+            TAO::Ledger::Transaction tx;
+            if(mempool.Get(hash, tx))
+                vTransactions.emplace_back(hash, std::move(tx));
+        }
+
         /* Start a ACID transaction (to be disposed). */
-        LLD::TxnBegin(FLAGS::MINER);
+        LLD::TransactionGuard transaction(FLAGS::MINER);
+        if(!transaction)
+            return;
 
         /* Loop through the list of transactions. */
         std::set<uint512_t> setDependents;
@@ -770,16 +781,14 @@ namespace TAO::Ledger
          * tests/unit/TAO/Ledger/filter_mempool_only_predecessor.cpp. */
         std::set<uint512_t> setInBlock;
 
-        for(const auto& hash : vMempool)
+        for(const auto& rTransaction : vTransactions)
         {
+            const uint512_t& hash = rTransaction.first;
+            const TAO::Ledger::Transaction& tx = rTransaction.second;
+
             /* Check the Size limits of the Current Block. */
             if(::GetSerializeSize(block, SER_NETWORK, LLP::PROTOCOL_VERSION) + 256 >= MAX_BLOCK_SIZE)
                 break;
-
-            /* Get the transaction from the memory pool. */
-            TAO::Ledger::Transaction tx;
-            if(!mempool.Get(hash, tx))
-                continue;
 
             /* Don't add transactions that are coinbase or coinstake. */
             if(tx.IsCoinBase() || tx.IsCoinStake())

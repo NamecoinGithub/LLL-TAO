@@ -96,6 +96,7 @@ namespace LLP
      * cheap clear-on-cap pattern already used for mapLastMissing. */
     static constexpr uint32_t CAP_WARNING_THROTTLE_MAX_ENTRIES = 256;
     static constexpr uint64_t CAP_WARNING_THROTTLE_SECONDS     = 60;
+    static std::mutex CAP_WARNING_THROTTLE_MUTEX;
     static std::map<uint1024_t, uint64_t> mapCapWarningLastTime;
 
     /* Per-stale-session throttled diagnostics for ignored SYNC blocks.
@@ -2281,9 +2282,11 @@ namespace LLP
                 std::set<uint1024_t> setBlockInventoryGets;
 
                 /* Foreign BESTCHAIN tips seen in this NOTIFY.  Recovery is
-                 * deferred until after WritePacket(ssResponse) so the near-tip
-                 * inventory-owned gate can require a successfully queued GET. */
-                std::vector<std::pair<uint1024_t, uint32_t>> vPendingBestChainRecovery;
+                 * deferred until after the packet is fully parsed and
+                 * WritePacket(ssResponse) has run so policy uses the latest
+                 * BESTHEIGHT and the near-tip inventory-owned gate can require
+                 * a successfully queued GET. */
+                std::vector<uint1024_t> vPendingBestChainRecovery;
 
                 /* Set our max limits to 100 notifications per packet. */
                 uint32_t nLimits = 0;
@@ -2678,8 +2681,7 @@ namespace LLP
                             if(hashBestChain != 0
                             && hashBestChain != TAO::Ledger::ChainState::hashBestChain.load())
                             {
-                                vPendingBestChainRecovery.emplace_back(
-                                    hashBestChain, nCurrentHeight);
+                                vPendingBestChainRecovery.push_back(hashBestChain);
                             }
 
                             /* A sync peer is complete only when its advertised best
@@ -2779,12 +2781,12 @@ namespace LLP
 
                 /* Run deferred BESTCHAIN recovery now that inventory GET
                  * queueing outcome is known. */
-                for(const auto& pending : vPendingBestChainRecovery)
+                for(const auto& hashPending : vPendingBestChainRecovery)
                 {
                     const bool fMatchingBlockGet = fInventoryGetQueued
-                        && (setBlockInventoryGets.count(pending.first) != 0);
+                        && (setBlockInventoryGets.count(hashPending) != 0);
                     TAO::Ledger::RequestBestChainBranchRecovery(
-                        pending.first, pending.second, NODE.c_str(), this,
+                        hashPending, nCurrentHeight, NODE.c_str(), this,
                         /*pfBranchSyncQueued=*/nullptr, fMatchingBlockGet);
                 }
 
@@ -3010,6 +3012,7 @@ namespace LLP
                                     const uint64_t nNow = runtime::timestamp();
                                     bool fEmitWarning = false;
                                     {
+                                        LOCK(CAP_WARNING_THROTTLE_MUTEX);
                                         auto itW = mapCapWarningLastTime.find(hashBlock);
                                         if(itW == mapCapWarningLastTime.end()
                                         || nNow - itW->second >= CAP_WARNING_THROTTLE_SECONDS)
@@ -3631,7 +3634,10 @@ namespace LLP
                         /* Start our ACID transaction in case we have any failures here. */
                         { LOCK(CLIENT_MUTEX);
 
-                            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            LLD::TransactionGuard transaction(
+                                TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!transaction)
+                                return debug::drop(NODE, FUNCTION, "failed to begin transaction");
 
                             /* Build indexes if we don't have them. */
                             if(!LLD::Client->HasIndex(hashTx))
@@ -3649,7 +3655,8 @@ namespace LLP
                             TAO::API::Indexing::IndexDependant(hashTx, tx);
 
                             /* Commit our ACID transaction across LLD instances. */
-                            LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                return debug::drop(NODE, FUNCTION, "failed to commit transaction");
                         }
 
                         /* Verbose=3 dumps transaction data. */
@@ -3687,7 +3694,10 @@ namespace LLP
                             /* Start our ACID transaction in case we have any failures here. */
                             { LOCK(CLIENT_MUTEX);
 
-                                LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                LLD::TransactionGuard transaction(
+                                    TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                if(!transaction)
+                                    return debug::drop(NODE, FUNCTION, "failed to begin transaction");
 
                                 /* Only write to disk and index if not completed already. */
                                 if(!LLD::Client->HasIndex(hashTx))
@@ -3715,7 +3725,8 @@ namespace LLP
                                 }
 
                                 /* Commit our ACID transaction across LLD instances. */
-                                LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                if(!LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                    return debug::drop(NODE, FUNCTION, "failed to commit transaction");
                             }
 
                             /* Write Success to log. */

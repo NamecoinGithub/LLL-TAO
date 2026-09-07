@@ -588,7 +588,9 @@ namespace Legacy
         TAO::Ledger::BlockState state(*this);
 
         /* Start the database transaction. */
-        LLD::TxnBegin();
+        LLD::TransactionGuard transaction;
+        if(!transaction)
+            return debug::error(FUNCTION, "failed to begin block transaction");
 
         /* Write the transactions. */
         for(const auto& tx : vtx)

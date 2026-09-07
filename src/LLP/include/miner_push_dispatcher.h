@@ -40,8 +40,8 @@ namespace LLP
      *       Hash  → Legacy lane
      *       Hash  → Stateless lane
      *
-     *  2. DEDUPLICATION: a (unified_height, hash-prefix-4B, channel) triplet is
-     *     recorded atomically after the first dispatch.  Any re-entry with the
+     *  2. DEDUPLICATION: a (unified_height, full-tip-hash, channel) triplet is
+     *     recorded after the first dispatch.  Any re-entry with the
      *     same key (e.g. accidental double call from SetBest) is silently dropped.
      *
      *  3. LOGGING: at verbosity 0, emit one line per (channel, lane) plus a
@@ -52,6 +52,7 @@ namespace LLP
      *     via EnqueuePushEvent().  Dedicated per-lane worker threads dequeue and
      *     call their respective lane handlers so that stateless template creation
      *     time does not affect legacy lane notification latency, and vice versa.
+     *     Each lane retains only its newest pending committed tip.
      *
      *  NOTE: Template refresh during dry spells is handled on the miner side.
      *  The miner detects stale templates and autonomously sends GET_BLOCK to
@@ -75,7 +76,7 @@ namespace LLP
          *
          *  Broadcast push notifications for BOTH Prime and Hash channels on BOTH
          *  Legacy and Stateless lanes.  Internally deduplicates by
-         *  (unified_height, hash_prefix4, channel) so that accidental double-calls
+         *  (unified_height, full_tip_hash, channel) so that accidental double-calls
          *  produce exactly one broadcast per (channel, lane) pair.
          *
          *  @param[in] nHeight      Unified blockchain height at the time of the new tip.
@@ -125,33 +126,58 @@ namespace LLP
 
     private:
 
+        #ifdef UNIT_TESTS
+    public:
+        #endif
+
         /** Accepted push event after channel-level dedup. */
         struct PushEvent
         {
             uint32_t nHeight{0};
             uint1024_t hashBestChain;
+            uint64_t nGeneration{0};
             bool fPrime{false};
             bool fHash{false};
         };
 
 
-        /** Packed dedup key for one channel: high-32 = unified height, low-32 = hash prefix. */
-        static std::atomic<uint64_t> s_nPrimeDedup;   /* dedup key for Prime channel */
-        static std::atomic<uint64_t> s_nHashDedup;    /* dedup key for Hash  channel */
+        /** Full committed-tip identity retained for one channel. */
+        struct DedupKey
+        {
+            uint32_t nHeight{0};
+            uint1024_t hashBestChain;
+            bool fInitialized{false};
+        };
+
+        static std::mutex s_dedupMutex;
+        static DedupKey s_primeDedup;
+        static DedupKey s_hashDedup;
+        static uint64_t s_nNextGeneration;
 
         /** Reserve one channel's push key exactly once across both async workers. */
-        static bool ReserveChannelPush(std::atomic<uint64_t>& nDedupKey,
-                                       uint64_t nNewKey,
+        static bool ReserveChannelPush(DedupKey& tDedupKey,
                                        const char* strChannel,
                                        uint32_t nHeight,
+                                       const uint1024_t& hashBestChain,
                                        uint32_t hashPrefix4);
 
         /** Build a deduplicated push event for both lanes. */
         static PushEvent ReservePushEvent(uint32_t nHeight, const uint1024_t& hashBestChain);
 
+        /** Replace a lane's pending work only when this event is newer. */
+        static bool EnqueueLatest(std::queue<PushEvent>& queue,
+                                  std::mutex& mutex,
+                                  uint64_t& nAcceptedGeneration,
+                                  const PushEvent& event);
+
+        #ifdef UNIT_TESTS
+    private:
+        #endif
+
         /* ── Stateless lane worker ──────────────────────────────────────────── */
         static std::queue<PushEvent>                      s_statelessQueue;
         static std::mutex                                   s_statelessMutex;
+        static uint64_t                                     s_nStatelessAcceptedGeneration;
         static std::condition_variable                      s_statelessCV;
         static std::thread                                  s_statelessThread;
         static std::atomic<bool>                            s_statelessRunning;
@@ -159,6 +185,7 @@ namespace LLP
         /* ── Legacy lane worker ─────────────────────────────────────────────── */
         static std::queue<PushEvent>                      s_legacyQueue;
         static std::mutex                                   s_legacyMutex;
+        static uint64_t                                     s_nLegacyAcceptedGeneration;
         static std::condition_variable                      s_legacyCV;
         static std::thread                                  s_legacyThread;
         static std::atomic<bool>                            s_legacyRunning;

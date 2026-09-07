@@ -13,6 +13,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/client.h>
 
+#include <optional>
 #include <string>
 
 #include <LLD/include/global.h>
@@ -45,6 +46,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/mempool.h>
 
 #include <Util/include/string.h>
+#include <Util/include/signals.h>
 
 
 
@@ -497,6 +499,12 @@ namespace TAO
             runtime::timer timer;
             timer.Start();
 
+            /* Keep the candidate block and any resulting chain transition in one
+             * recoverable transaction. SetBest() joins and commits this transaction. */
+            LLD::TransactionGuard transaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+            if(!transaction)
+                return debug::error(FUNCTION, "failed to begin client block transaction");
+
             /* Write the block to disk. */
             if(!LLD::Client->WriteBlock(GetHash(), *this))
                 return debug::error(FUNCTION, "block state failed to write");
@@ -538,6 +546,12 @@ namespace TAO
                         return debug::error(FUNCTION, "failed to set best chain");
                 }
             }
+
+            /* SetBest() commits the transaction when this block becomes best.
+             * Non-best candidates still need their block write committed here. */
+            if(LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE)
+            && !LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                return debug::error(FUNCTION, "disk transaction commit failed for client block");
 
             /* Debug output. */
             debug::log(TAO::Ledger::ChainState::Synchronizing() ? 4 : 0, FUNCTION, "ACCEPTED");
@@ -603,6 +617,16 @@ namespace TAO
                         "..", hash.SubString());
             }
 
+            /* Keep all client-chain link updates and the best pointer in one recoverable
+             * transaction. Empty MERKLE participants provide a complete recovery decision. */
+            std::optional<LLD::TransactionGuard> transaction;
+            if(!LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+            {
+                transaction.emplace(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                if(!*transaction)
+                    return debug::error(FUNCTION, "failed to begin client-chain transaction");
+            }
+
             /* Disconnect given blocks. */
             for(auto& state : vDisconnect)
             {
@@ -612,11 +636,17 @@ namespace TAO
 
                 /* Connect the block. */
                 if(!state.Disconnect())
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
                     return debug::error(FUNCTION, "failed to disconnect ", state.GetHash().SubString());
+                }
 
                 /* Erase block if not connecting anything. */
-                if(vConnect.empty())
-                    LLD::Ledger->EraseBlock(state.GetHash());
+                if(vConnect.empty() && !LLD::Client->EraseBlock(state.GetHash()))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                    return debug::error(FUNCTION, "failed to erase disconnected block ", state.GetHash().SubString());
+                }
             }
 
             /* Reverse the blocks to connect to connect in ascending height. */
@@ -628,8 +658,21 @@ namespace TAO
 
                 /* Connect the block. */
                 if(!state->Connect())
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
                     return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
+                }
             }
+
+            /* Stage and durably commit the authoritative pointer before publication. */
+            if(!LLD::Client->WriteBestChain(hash))
+            {
+                LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                return debug::error(FUNCTION, "failed to stage best chain pointer");
+            }
+
+            if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                return debug::error(FUNCTION, "disk transaction commit failed; aborting client chain transition");
 
             /* Debug output about the best chain. */
             uint64_t nTimer   = timer.ElapsedMilliseconds();
@@ -650,14 +693,21 @@ namespace TAO
                     " [", ::GetSerializeSize(*this, SER_LLD, nVersion), " bytes]");
             }
 
+            /* Refresh the committed genesis next pointer without exposing a staged update. */
+            ClientBlock stateGenesis;
+            if(LLD::Client->ReadBlock(ChainState::Genesis(), stateGenesis))
+                ChainState::tStateGenesis = stateGenesis;
+            else
+            {
+                ::Shutdown();
+                return debug::error(FUNCTION,
+                    "failed to refresh committed genesis state; shutdown requested");
+            }
+
             /* Set the best chain variables. */
             ChainState::tStateBest          = *this;
             ChainState::hashBestChain      = hash;
             ChainState::nBestHeight        = nHeight;
-
-            /* Write the best chain pointer. */
-            if(!LLD::Ledger->WriteBestChain(ChainState::hashBestChain.load()))
-                return debug::error(FUNCTION, "failed to write best chain");
 
             return true;
         }
@@ -673,10 +723,6 @@ namespace TAO
                 prev.hashNextBlock = GetHash();
                 if(!LLD::Client->WriteBlock(prev.GetHash(), prev))
                     return debug::error(FUNCTION, "failed to update previous block state");
-
-                /* If we just updated hashNextBlock for genesis block, update the in-memory genesis */
-                if(prev.nHeight == 0)
-                    ChainState::tStateGenesis = prev;
             }
 
             return true;
@@ -691,7 +737,8 @@ namespace TAO
             if(!prev.IsNull())
             {
                 prev.hashNextBlock = 0;
-                LLD::Ledger->WriteBlock(prev.GetHash(), prev);
+                if(!LLD::Client->WriteBlock(prev.GetHash(), prev))
+                    return debug::error(FUNCTION, "failed to update previous block state");
             }
 
             return true;

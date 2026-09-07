@@ -42,8 +42,10 @@ ________________________________________________________________________________
 #include <Util/templates/datastream.h>
 
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstdint>
 #include <cstring>
@@ -1289,7 +1291,9 @@ TEST_CASE("PurgeOrphanRecoveryState clears all correlated maps", "[ledger][proce
     /* Seed every recovery map with at least one entry. */
     TAO::Ledger::mapLastMissing[h1]              = 5;
     TAO::Ledger::mapMissingBranchEscalations[h2] = 2;
+    TAO::Ledger::mapCheckRejects[h3]             = 1;
     TAO::Ledger::setUnrecoverableBlocks.insert(h3);
+    TAO::Ledger::mapMissingTxCache[h1]           = {};
     TAO::Ledger::mapLastMissingProcessTime[h1]   = 12345678;
     TAO::Ledger::mapLastOrphanRequest[h2]        = 87654321;
 
@@ -1308,7 +1312,9 @@ TEST_CASE("PurgeOrphanRecoveryState clears all correlated maps", "[ledger][proce
     REQUIRE(TAO::Ledger::mapOrphans.Empty());
     REQUIRE(TAO::Ledger::mapLastMissing.empty());
     REQUIRE(TAO::Ledger::mapMissingBranchEscalations.empty());
+    REQUIRE(TAO::Ledger::mapCheckRejects.empty());
     REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
+    REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
     REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());
     REQUIRE(TAO::Ledger::mapLastOrphanRequest.empty());
 }
@@ -1387,6 +1393,221 @@ TEST_CASE("AttemptPeerBestChainRecovery walks orphan pool for connectable ancest
     TAO::Ledger::mapLastMissingProcessTime.clear();
     LLD::Ledger->EraseBlock(hashA);
     LLD::Ledger->EraseBlock(hashB);
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
+TEST_CASE("Connectable incomplete orphan is retained and later redelivery drains descendants",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4100001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 210;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    MissingBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 211;
+    blockA.nNonce = 11001;
+    const uint1024_t hashA = blockA.GetHash();
+
+    PassBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 212;
+    blockB.nNonce = 11002;
+    const uint1024_t hashB = blockB.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashB, 212, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
+
+    /* Re-deliver the same block hash with its formerly missing data available. */
+    PassBlock resolvedA;
+    static_cast<TAO::Ledger::Block&>(resolvedA) = blockA;
+    REQUIRE(resolvedA.GetHash() == hashA);
+
+    uint8_t nStatus = 0;
+    TAO::Ledger::Process(resolvedA, nStatus);
+
+    REQUIRE((nStatus & TAO::Ledger::PROCESS::ACCEPTED) != 0);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
+TEST_CASE("Accepted connectable root clears its incomplete descendant throttle",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4150001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 215;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    PassBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 216;
+    blockA.nNonce = 11501;
+    const uint1024_t hashA = blockA.GetHash();
+
+    MissingBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 217;
+    blockB.nNonce = 11502;
+    const uint1024_t hashB = blockB.GetHash();
+
+    PassBlock blockC;
+    blockC.nVersion = 4;
+    blockC.hashPrevBlock = hashB;
+    blockC.nHeight = 218;
+    blockC.nNonce = 11503;
+    const uint1024_t hashC = blockC.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
+    TAO::Ledger::mapLastOrphanRequest[hashA] = runtime::timestamp();
+    TAO::Ledger::mapCheckRejects[hashA] = 1;
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashC, 218, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::PROGRESS);
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashA) == 0);
+    REQUIRE(TAO::Ledger::mapCheckRejects.count(hashA) == 0);
+    REQUIRE(TAO::Ledger::mapLastMissingProcessTime.count(hashB) == 0);
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE(TAO::Ledger::mapOrphans.Contains(hashC));
+
+    /* PassBlock::Accept() is a test double and does not persist the accepted root. */
+    REQUIRE(LLD::Ledger->WriteBlock(hashA, stateRoot));
+
+    PassBlock resolvedB;
+    static_cast<TAO::Ledger::Block&>(resolvedB) = blockB;
+    REQUIRE(resolvedB.GetHash() == hashB);
+    TAO::Ledger::mapLastOrphanRequest[hashC] = runtime::timestamp();
+    TAO::Ledger::mapCheckRejects[hashC] = 1;
+
+    uint8_t nStatus = 0;
+    TAO::Ledger::Process(resolvedB, nStatus);
+
+    REQUIRE((nStatus & TAO::Ledger::PROCESS::ACCEPTED) != 0);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashC) == 0);
+    REQUIRE(TAO::Ledger::mapCheckRejects.count(hashC) == 0);
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapCheckRejects.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    LLD::Ledger->EraseBlock(hashA);
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+
+
+TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
+    "[ledger][process][orphan_pool]")
+{
+    LedgerGuard env;
+
+    const uint1024_t hashRoot(0xA4200001ULL);
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.nHeight = 220;
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    RejectBlock blockA;
+    blockA.nVersion = 4;
+    blockA.hashPrevBlock = hashRoot;
+    blockA.nHeight = 221;
+    blockA.nNonce = 12001;
+    const uint1024_t hashA = blockA.GetHash();
+
+    PassBlock blockB;
+    blockB.nVersion = 4;
+    blockB.hashPrevBlock = hashA;
+    blockB.nHeight = 222;
+    blockB.nNonce = 12002;
+    const uint1024_t hashB = blockB.GetHash();
+
+    PassBlock blockC;
+    blockC.nVersion = 4;
+    blockC.hashPrevBlock = hashB;
+    blockC.nHeight = 223;
+    blockC.nNonce = 12003;
+    const uint1024_t hashC = blockC.GetHash();
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapCheckRejects.clear();
+    TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapMissingBranchEscalations.clear();
+    TAO::Ledger::setUnrecoverableBlocks.clear();
+    TAO::Ledger::mapMissingTxCache.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
+    TAO::Ledger::mapLastMissingProcessTime.clear();
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
+    REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
+
+    for(const auto& hash : {hashA, hashB, hashC})
+    {
+        TAO::Ledger::mapLastMissing[hash] = 1;
+        TAO::Ledger::mapMissingBranchEscalations[hash] = 1;
+        TAO::Ledger::mapCheckRejects[hash] = 1;
+        TAO::Ledger::mapMissingTxCache[hash] = {};
+        TAO::Ledger::mapLastOrphanRequest[hash] = 1;
+        TAO::Ledger::mapLastMissingProcessTime[hash] = 1;
+    }
+    TAO::Ledger::setUnrecoverableBlocks.insert(hashB);
+    TAO::Ledger::setUnrecoverableBlocks.insert(hashC);
+
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashC, 223, "unit-test", nullptr);
+
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashA));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
+    REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
+    REQUIRE(TAO::Ledger::mapLastMissing.empty());
+    REQUIRE(TAO::Ledger::mapMissingBranchEscalations.empty());
+    REQUIRE(TAO::Ledger::mapCheckRejects.empty());
+    REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
+    REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.empty());
+    REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());
+
+    TAO::Ledger::mapOrphans.Clear();
+    TAO::Ledger::mapCheckRejects.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
     LLD::Ledger->EraseBlock(hashRoot);
 }
 
@@ -2302,6 +2523,148 @@ TEST_CASE("BESTCHAIN recovery skips near-tip unknown race",
     TAO::Ledger::ChainState::nBestHeight.store(nSavedBestHeight);
     TAO::Ledger::mapOrphans.Clear();
     TAO::Ledger::mapLastOrphanRequest.clear();
+}
+
+
+TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
+    "[ledger][process][a1][bestchain][near-tip][notify-order]")
+{
+#ifndef WIN32
+    LedgerGuard env;
+
+    const uint32_t nLocalHeight = 1000;
+    const uint32_t nPeerHeight =
+        nLocalHeight + TAO::Ledger::BESTCHAIN_NEAR_TIP_HEIGHT_SLACK + 1;
+    const uint1024_t hashGapTip(0xBC01000000000007ULL);
+
+    struct RecoveryStateGuard
+    {
+        const uint32_t nBestHeight;
+        const uint32_t nMaxPeerHeight;
+        const uint64_t nSyncSession;
+        const bool fClient;
+        std::map<uint1024_t, uint64_t> mapLastOrphanRequest;
+
+        explicit RecoveryStateGuard(uint32_t nHeight)
+        : nBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
+        , nMaxPeerHeight(TAO::Ledger::ChainState::nMaxPeerHeight.load())
+        , nSyncSession(TAO::Ledger::nSyncSession.load())
+        , fClient(config::fClient.load())
+        , mapLastOrphanRequest(TAO::Ledger::mapLastOrphanRequest)
+        {
+            TAO::Ledger::ChainState::nBestHeight.store(nHeight);
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(nHeight);
+            TAO::Ledger::nSyncSession.store(0);
+            TAO::Ledger::mapLastOrphanRequest.clear();
+            config::fClient.store(false);
+        }
+
+        ~RecoveryStateGuard()
+        {
+            config::fClient.store(fClient);
+            TAO::Ledger::nSyncSession.store(nSyncSession);
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(nMaxPeerHeight);
+            TAO::Ledger::ChainState::nBestHeight.store(nBestHeight);
+            TAO::Ledger::mapLastOrphanRequest = std::move(mapLastOrphanRequest);
+        }
+    } stateGuard(nLocalHeight);
+
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashGapTip));
+
+    struct SocketPairGuard
+    {
+        int fds[2] = {-1, -1};
+
+        ~SocketPairGuard()
+        {
+            if(fds[0] >= 0)
+                close(fds[0]);
+            if(fds[1] >= 0)
+                close(fds[1]);
+        }
+    } socketPair;
+
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, socketPair.fds) == 0);
+    REQUIRE(fcntl(socketPair.fds[1], F_SETFL, O_NONBLOCK) == 0);
+
+    LLP::TritiumNode node;
+    node.fd = socketPair.fds[1];
+    node.events = POLLIN;
+    node.nCurrentSession = 1;
+    node.nCurrentHeight = nLocalHeight;
+    node.Subscribe(
+        LLP::TritiumNode::SUBSCRIPTION::BLOCK
+        | LLP::TritiumNode::SUBSCRIPTION::BESTCHAIN
+        | LLP::TritiumNode::SUBSCRIPTION::BESTHEIGHT);
+
+    while(node.Buffered() > 0)
+    {
+        if(node.Flush() <= 0)
+            break;
+    }
+
+    std::vector<uint8_t> vDiscard(4096);
+    while(recv(socketPair.fds[0], vDiscard.data(), vDiscard.size(), MSG_DONTWAIT) > 0)
+        ;
+
+    /* Dispatch order is BLOCK -> BESTCHAIN -> BESTHEIGHT.  Recovery must use
+     * the final BESTHEIGHT rather than the stale height observed at BESTCHAIN. */
+    DataStream ssNotify(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssNotify
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << hashGapTip
+        << uint8_t(LLP::TritiumNode::TYPES::BESTCHAIN)
+        << hashGapTip
+        << uint8_t(LLP::TritiumNode::TYPES::BESTHEIGHT)
+        << nPeerHeight;
+    node.INCOMING =
+        LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, ssNotify);
+
+    REQUIRE(node.ProcessPacket());
+    REQUIRE(node.nCurrentHeight == nPeerHeight);
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashGapTip) == 1);
+
+    while(node.Buffered() > 0)
+    {
+        if(node.Flush() <= 0)
+            break;
+    }
+
+    std::vector<uint8_t> vSent;
+    {
+        std::vector<uint8_t> buf(65536);
+        for(;;)
+        {
+            const ssize_t n =
+                recv(socketPair.fds[0], buf.data(), buf.size(), MSG_DONTWAIT);
+            if(n <= 0)
+                break;
+            vSent.insert(vSent.end(), buf.begin(), buf.begin() + n);
+        }
+    }
+
+    DataStream ssExpectedGet(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssExpectedGet
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << hashGapTip;
+    std::vector<uint8_t> vExpected = LLP::TritiumNode::NewMessage(
+        LLP::TritiumNode::ACTION::GET, ssExpectedGet).GetBytes();
+
+    DataStream ssExpectedList(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ssExpectedList
+        << uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << uint8_t(LLP::TritiumNode::TYPES::LOCATOR)
+        << TAO::Ledger::Locator(TAO::Ledger::ChainState::hashBestChain.load())
+        << uint1024_t(hashGapTip);
+    const std::vector<uint8_t> vExpectedList = LLP::TritiumNode::NewMessage(
+        LLP::TritiumNode::ACTION::LIST, ssExpectedList).GetBytes();
+    vExpected.insert(vExpected.end(), vExpectedList.begin(), vExpectedList.end());
+
+    REQUIRE(vSent == vExpected);
+#else
+    SUCCEED("packet-level socket regression is POSIX-only");
+#endif
 }
 
 

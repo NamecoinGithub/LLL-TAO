@@ -418,6 +418,22 @@ tests. This is itself a good practice to carry forward: **a regression test that
 re-implements the expected behavior in the test file does not catch a bug in the real
 implementation.**
 
+### PR #697 follow-up: post-commit ordering and scoped cleanup
+
+The durable boundary also applies to checkpoint publication during multi-block
+reorganizations. `SetBest()` now stages every connected block's predecessor in
+ascending order and evaluates the full sequence only after the disk commit. This
+preserves the prior checkpoint progression: an older matured checkpoint is not
+hidden by a newer candidate that has not matured yet.
+
+Mempool orphan cleanup uses `LLD::TransactionGuard`, so exceptions from API index
+construction or deletion cannot leave the global transaction coordinator owned.
+The explicit commit/abort behavior is unchanged; the guard supplies cleanup for
+exceptional exits.
+
+See the [PR #697 review-hardening diagrams](../diagrams/audit/pr697-review-hardening.md)
+for the checkpoint, orphan-redelivery, and mempool transaction flows.
+
 ---
 
 ## Relationship to issue #254
