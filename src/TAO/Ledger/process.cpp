@@ -240,6 +240,7 @@ namespace TAO
                     mapCheckRejects.erase(hash);
                     setUnrecoverableBlocks.erase(hash);
                     mapMissingTxCache.erase(hash);
+                    mapLastOrphanRequest.erase(hash);
                     mapLastMissingProcessTime.erase(hash);
                 }
 

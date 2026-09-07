@@ -1557,6 +1557,7 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     TAO::Ledger::mapMissingBranchEscalations.clear();
     TAO::Ledger::setUnrecoverableBlocks.clear();
     TAO::Ledger::mapMissingTxCache.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
     TAO::Ledger::mapLastMissingProcessTime.clear();
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockA));
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
@@ -1568,6 +1569,7 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
         TAO::Ledger::mapMissingBranchEscalations[hash] = 1;
         TAO::Ledger::mapCheckRejects[hash] = 1;
         TAO::Ledger::mapMissingTxCache[hash] = {};
+        TAO::Ledger::mapLastOrphanRequest[hash] = 1;
         TAO::Ledger::mapLastMissingProcessTime[hash] = 1;
     }
     TAO::Ledger::setUnrecoverableBlocks.insert(hashB);
@@ -1585,10 +1587,12 @@ TEST_CASE("Rejected connectable orphan prunes its retained descendant subtree",
     REQUIRE(TAO::Ledger::mapCheckRejects.empty());
     REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
     REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
+    REQUIRE(TAO::Ledger::mapLastOrphanRequest.empty());
     REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());
 
     TAO::Ledger::mapOrphans.Clear();
     TAO::Ledger::mapCheckRejects.clear();
+    TAO::Ledger::mapLastOrphanRequest.clear();
     LLD::Ledger->EraseBlock(hashRoot);
 }
 
