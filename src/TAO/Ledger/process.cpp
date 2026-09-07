@@ -790,8 +790,8 @@ namespace TAO
                  * (the missing ancestor), not hashPeerBest when an orphan walk
                  * occurred — hashPeerBest is the branch tip and keying on it
                  * would reintroduce the two-namespace collision this helper was
-                 * designed to eliminate: the drain-loop erase(hashParent) cleanup
-                 * only ever clears hashPrevBlock keys.  When no orphans were
+                 * designed to eliminate: accepted-block cleanup clears entries
+                 * keyed by the accepted ancestor hash.  When no orphans were
                  * present, hashDeepestAncestor still defaults to hashPeerBest. */
                 if(!pSend)
                     return PeerBestRecoveryResult::SKIPPED;
@@ -1237,9 +1237,8 @@ namespace TAO
 
             /* Throttle: require at least ORPHAN_REQUEST_THROTTLE_SECONDS between
              * LIST requests for the same missing ancestor hash.  Keyed by the
-             * ancestor hash (hashPrevBlock of the requesting block) so the drain-
-             * loop cleanup mapLastOrphanRequest.erase(hashParent) is always
-             * effective regardless of which code path last wrote the entry. */
+             * ancestor hash (hashPrevBlock of the requesting block) so accepting
+             * that ancestor clears the entry regardless of which path wrote it. */
             const uint64_t nNow = runtime::timestamp();
             const auto itReq = mapLastOrphanRequest.find(hashAncestor);
             if(itReq != mapLastOrphanRequest.end()
@@ -1402,6 +1401,7 @@ namespace TAO
                     mapMissingBranchEscalations.erase(hashBlock);
                     setUnrecoverableBlocks.erase(hashBlock);
                     mapMissingTxCache.erase(hashBlock);
+                    mapLastOrphanRequest.erase(hashBlock);
                     mapLastMissingProcessTime.erase(hashBlock);
                     return;
                 }
@@ -1858,6 +1858,7 @@ namespace TAO
                 mapMissingBranchEscalations.erase(hashBlock);
                 setUnrecoverableBlocks.erase(hashBlock);
                 mapMissingTxCache.erase(hashBlock);
+                mapLastOrphanRequest.erase(hashBlock);
                 mapLastMissingProcessTime.erase(hashBlock);
 
                 /* Special meter for synchronizing. */
@@ -2083,7 +2084,7 @@ namespace TAO
                         setUnrecoverableBlocks.erase(hashOrphan);
                         mapMissingTxCache.erase(hashOrphan);
                         mapLastMissingProcessTime.erase(hashOrphan);
-                        mapLastOrphanRequest.erase(hashParent);
+                        mapLastOrphanRequest.erase(hashOrphan);
                         mapOrphans.Remove(hashOrphan);
                         queueParents.push(hashOrphan);
                         ++nDrained;
