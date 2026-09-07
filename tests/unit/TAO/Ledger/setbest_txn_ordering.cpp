@@ -327,6 +327,15 @@ namespace
     }
 
 
+    /* Build a journal containing an invalid entry type. */
+    DataStream MakeInvalidRecoveryJournal()
+    {
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("invalid");
+        return ssJournal;
+    }
+
+
     uint64_t JournalSize(const std::string& strName)
     {
         const std::string strPath =
@@ -1365,6 +1374,68 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
 
     LLD::Contract->Erase(contractKey);
     LLD::Register->Erase(registerKey);
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains journals after a CONSENSUS parse failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-parse-contract"), 1);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 30)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeInvalidRecoveryJournal()));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+}
+
+
+TEST_CASE("LLD::TxnRecovery retains journals after a CONSENSUS read failure",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-read-contract"), 1);
+    const std::string strRegisterJournal =
+        debug::safe_printstr(config::GetDataDir(), "_REGISTER/journal.dat");
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 31)));
+    REQUIRE(filesystem::remove(strRegisterJournal));
+    REQUIRE(filesystem::create_directories(strRegisterJournal + "/"));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    REQUIRE(nContractJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(filesystem::is_directory(strRegisterJournal));
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(filesystem::remove_directories(strRegisterJournal));
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
 }
 
 

@@ -26,6 +26,7 @@ ________________________________________________________________________________
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <set>
 
 #ifdef WIN32
@@ -874,22 +875,50 @@ namespace LLD
 
     /*  Recover a transaction from the journal. */
     template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnRecovery()
+    RECOVERY SectorDatabase<KeychainType, CacheType>::TxnRecovery()
     {
-        /* Create an append only stream. */
-        std::ifstream stream(debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat"), std::ios::in | std::ios::out | std::ios::binary);
+        const std::string strJournal =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
+        std::error_code ec;
+        const std::filesystem::file_status nStatus = std::filesystem::status(strJournal, ec);
+        if(ec)
+        {
+            if(ec == std::errc::no_such_file_or_directory)
+                return RECOVERY::INCOMPLETE;
+
+            return debug::error(FUNCTION, "failed to inspect ", strName, " transaction journal"),
+                   RECOVERY::FAILED;
+        }
+
+        if(!std::filesystem::exists(nStatus))
+            return RECOVERY::INCOMPLETE;
+
+        if(!std::filesystem::is_regular_file(nStatus))
+        {
+            return debug::error(FUNCTION, strName, " transaction journal is not a regular file"),
+                   RECOVERY::FAILED;
+        }
+
+        /* Open the journal for reading. */
+        std::ifstream stream(strJournal, std::ios::in | std::ios::binary | std::ios::ate);
         if(!stream.is_open())
-            return false;
+            return debug::error(FUNCTION, "failed to open ", strName, " transaction journal"),
+                   RECOVERY::FAILED;
 
         /* Get the Binary Size. */
-        stream.ignore(std::numeric_limits<std::streamsize>::max());
+        const std::streampos nStreamSize = stream.tellg();
+        if(nStreamSize < 0
+        || static_cast<uint64_t>(nStreamSize) > std::numeric_limits<uint32_t>::max())
+            return debug::error(FUNCTION, "failed to read ", strName, " transaction journal size"),
+                   RECOVERY::FAILED;
 
         /* Get the data buffer. */
-        const uint32_t nSize = static_cast<uint32_t>(stream.gcount());
+        const uint32_t nSize = static_cast<uint32_t>(nStreamSize);
 
         /* Check journal size for 0. */
         if(nSize == 0)
-            return false;
+            return RECOVERY::INCOMPLETE;
 
         /* Create buffer to read into. */
         std::vector<uint8_t> vBuffer(nSize, 0);
@@ -897,87 +926,106 @@ namespace LLD
         /* Read the journal file. */
         stream.seekg (0, std::ios::beg);
         stream.read((char*) &vBuffer[0], vBuffer.size());
+        if(!stream)
+            return debug::error(FUNCTION, "failed to read ", strName, " transaction journal"),
+                   RECOVERY::FAILED;
+
         stream.close();
 
         debug::log(0, FUNCTION, strName, " transaction journal detected of ", nSize, " bytes");
 
-        /* Create the transaction object. */
-        TxnBegin();
+        /* Parse into a temporary transaction so failures retain the existing state. */
+        std::unique_ptr<SectorTransaction> pRecovery(new SectorTransaction());
 
-        /* Serialize the key. */
-        const DataStream ssJournal(vBuffer, SER_LLD, DATABASE_VERSION);
-        while(!ssJournal.End())
+        try
         {
-            /* Read the data entry type. */
-            std::string strType;
-            ssJournal >> strType;
-
-            /* Check for Erase. */
-            if(strType == "erase")
+            /* Serialize the key. */
+            const DataStream ssJournal(vBuffer, SER_LLD, DATABASE_VERSION);
+            while(!ssJournal.End())
             {
-                /* Get the key to erase. */
-                std::vector<uint8_t> vKey;
-                ssJournal >> vKey;
+                /* Read the data entry type. */
+                std::string strType;
+                ssJournal >> strType;
 
-                /* Erase the key. */
-                pTransaction->EraseTransaction(vKey);
+                /* Check for Erase. */
+                if(strType == "erase")
+                {
+                    /* Get the key to erase. */
+                    std::vector<uint8_t> vKey;
+                    ssJournal >> vKey;
 
-                /* Debug output. */
-                debug::log(0, FUNCTION, "erasing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
-            }
-            else if(strType == "key")
-            {
-                /* Get the key to write. */
-                std::vector<uint8_t> vKey;
-                ssJournal >> vKey;
+                    /* Erase the key. */
+                    pRecovery->EraseTransaction(vKey);
 
-                /* Write the key. */
-                pTransaction->setKeychain.insert(vKey);
+                    /* Debug output. */
+                    debug::log(0, FUNCTION, "erasing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
+                }
+                else if(strType == "key")
+                {
+                    /* Get the key to write. */
+                    std::vector<uint8_t> vKey;
+                    ssJournal >> vKey;
 
-                /* Debug output. */
-                debug::log(0, FUNCTION, "writing keychain ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
-            }
-            else if(strType == "write")
-            {
-                /* Get the key to write. */
-                std::vector<uint8_t> vKey;
-                ssJournal >> vKey;
+                    /* Write the key. */
+                    pRecovery->setKeychain.insert(vKey);
 
-                /* Get the data to write. */
-                std::vector<uint8_t> vData;
-                ssJournal >> vData;
+                    /* Debug output. */
+                    debug::log(0, FUNCTION, "writing keychain ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
+                }
+                else if(strType == "write")
+                {
+                    /* Get the key to write. */
+                    std::vector<uint8_t> vKey;
+                    ssJournal >> vKey;
 
-                /* Write the sector data. */
-                pTransaction->mapTransactions[vKey] = vData;
+                    /* Get the data to write. */
+                    std::vector<uint8_t> vData;
+                    ssJournal >> vData;
 
-                /* Debug output. */
-                debug::log(0, FUNCTION, "writing data ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
-            }
-            else if(strType == "index")
-            {
-                /* Get the key to index. */
-                std::vector<uint8_t> vKey;
-                ssJournal >> vKey;
+                    /* Write the sector data. */
+                    pRecovery->mapTransactions[vKey] = vData;
 
-                /* Get the data to index to. */
-                std::vector<uint8_t> vIndex;
-                ssJournal >> vIndex;
+                    /* Debug output. */
+                    debug::log(0, FUNCTION, "writing data ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
+                }
+                else if(strType == "index")
+                {
+                    /* Get the key to index. */
+                    std::vector<uint8_t> vKey;
+                    ssJournal >> vKey;
 
-                /* Set the indexing key. */
-                pTransaction->mapIndex[vKey] = vIndex;
+                    /* Get the data to index to. */
+                    std::vector<uint8_t> vIndex;
+                    ssJournal >> vIndex;
 
-                /* Debug output. */
-                debug::log(0, FUNCTION, "indexing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
-            }
-            if(strType == "commit")
-            {
-                debug::log(0, FUNCTION, strName, " transaction journal ready to be restored");
+                    /* Set the indexing key. */
+                    pRecovery->mapIndex[vKey] = vIndex;
 
-                return true;
+                    /* Debug output. */
+                    debug::log(0, FUNCTION, "indexing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
+                }
+                else if(strType == "commit")
+                {
+                    LOCK(TRANSACTION_MUTEX);
+                    delete pTransaction;
+                    pTransaction = pRecovery.release();
+
+                    debug::log(0, FUNCTION, strName, " transaction journal ready to be restored");
+                    return RECOVERY::COMPLETE;
+                }
+                else
+                    return debug::error(FUNCTION, strName, " transaction journal contains invalid entry"),
+                           RECOVERY::FAILED;
             }
         }
+        catch(const std::exception& e)
+        {
+            return debug::error(FUNCTION, strName, " transaction journal parse failed: ", e.what()),
+                   RECOVERY::FAILED;
+        }
 
-        return debug::error(FUNCTION, strName, " transaction journal never reached commit");
+        debug::log(0, FUNCTION, strName, " transaction journal never reached commit");
+        return RECOVERY::INCOMPLETE;
     }
 
 

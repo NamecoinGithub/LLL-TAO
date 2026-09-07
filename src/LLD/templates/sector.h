@@ -852,7 +852,7 @@ namespace LLD
          *  Recover a transaction from the journal.
          *
          **/
-        bool TxnRecovery();
+        RECOVERY TxnRecovery();
 
     };
 }

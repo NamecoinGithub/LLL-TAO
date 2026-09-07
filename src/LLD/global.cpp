@@ -260,24 +260,43 @@ namespace LLD
         /* Flag to determine if there are any failures. */
         bool fRecovery = true;
 
+        /* Check one participant without confusing an incomplete journal with an error. */
+        const auto CheckRecovery = [&fRecovery](auto* pDatabase)
+        {
+            if(!pDatabase)
+                return true;
+
+            const RECOVERY nRecovery = pDatabase->TxnRecovery();
+            if(nRecovery == RECOVERY::FAILED)
+            {
+                fTxnRecoveryRequired.store(true);
+                return false;
+            }
+
+            if(nRecovery == RECOVERY::INCOMPLETE)
+                fRecovery = false;
+
+            return true;
+        };
+
         /* Special handle for -client mode. */
         if(config::fClient.load())
         {
             /* Check the contract DB journal. */
-            if(Contract && !Contract->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Contract))
+                return debug::error(FUNCTION, "failed to recover Contract DB journal");
 
             /* Check the register DB journal. */
-            if(Register && !Register->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Register))
+                return debug::error(FUNCTION, "failed to recover Register DB journal");
 
             /* Check the ledger DB journal. */
-            if(Client && !Client->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Client))
+                return debug::error(FUNCTION, "failed to recover Client DB journal");
 
             /* Check the ledger DB journal. */
-            if(Logical && !Logical->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Logical))
+                return debug::error(FUNCTION, "failed to recover Logical DB journal");
 
             /* Commit the transactions if journals are recovered. */
             if(fRecovery)
@@ -318,24 +337,24 @@ namespace LLD
         else
         {
             /* Check the contract DB journal. */
-            if(Contract && !Contract->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Contract))
+                return debug::error(FUNCTION, "failed to recover Contract DB journal");
 
             /* Check the register DB journal. */
-            if(Register && !Register->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Register))
+                return debug::error(FUNCTION, "failed to recover Register DB journal");
 
             /* Check the ledger DB journal. */
-            if(Ledger && !Ledger->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Ledger))
+                return debug::error(FUNCTION, "failed to recover Ledger DB journal");
 
             /* Check the ledger DB journal. */
-            if(Trust && !Trust->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Trust))
+                return debug::error(FUNCTION, "failed to recover Trust DB journal");
 
             /* Check the ledger DB journal. */
-            if(Legacy && !Legacy->TxnRecovery())
-                fRecovery = false;
+            if(!CheckRecovery(Legacy))
+                return debug::error(FUNCTION, "failed to recover Legacy DB journal");
 
             /* Commit the transactions if journals are recovered. */
             if(fRecovery)
