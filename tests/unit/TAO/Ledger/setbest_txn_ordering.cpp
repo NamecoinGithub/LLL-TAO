@@ -48,6 +48,8 @@ ________________________________________________________________________________
 #include <LLD/types/legacy.h>
 #include <LLD/types/trust.h>
 
+#include <TAO/API/include/global.h>
+
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
@@ -659,6 +661,7 @@ namespace
         uint64_t                savedBestTrust;
         uint1024_t              savedCheckpointHash;
         uint32_t                savedCheckpointHeight;
+        uint32_t                savedBlockCounter;
 
         ChainStateGuard()
         : savedGenesis  (TAO::Ledger::ChainState::tStateGenesis)
@@ -668,6 +671,7 @@ namespace
         , savedBestTrust(TAO::Ledger::ChainState::nBestChainTrust.load())
         , savedCheckpointHash(TAO::Ledger::ChainState::hashCheckpoint.load())
         , savedCheckpointHeight(TAO::Ledger::ChainState::nCheckpointHeight.load())
+        , savedBlockCounter(TAO::API::nBlockCounter.load())
         {}
 
         ~ChainStateGuard()
@@ -679,6 +683,7 @@ namespace
             TAO::Ledger::ChainState::nBestChainTrust .store(savedBestTrust);
             TAO::Ledger::ChainState::hashCheckpoint  = savedCheckpointHash;
             TAO::Ledger::ChainState::nCheckpointHeight.store(savedCheckpointHeight);
+            TAO::API::nBlockCounter.store(savedBlockCounter);
         }
     };
 
@@ -700,14 +705,14 @@ namespace
         uint1024_t hashBest;
 
         BestChainDiskGuard()
-        : hadBest(LLD::Ledger->ReadBestChain(hashBest))
+        : hadBest(LLD::Ledger->Read(std::string("hashbestchain"), hashBest))
         {
         }
 
         ~BestChainDiskGuard()
         {
             if(hadBest)
-                LLD::Ledger->WriteBestChain(hashBest);
+                LLD::Ledger->Write(std::string("hashbestchain"), hashBest);
             else
                 LLD::Ledger->Erase(std::string("hashbestchain"));
         }
@@ -1228,6 +1233,7 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
     ClientGuard clientGuard;
     LogicalGuard logicalGuard;
     ChainStateGuard chainGuard;
+    BestChainDiskGuard ledgerBestGuard;
 
     const TAO::Ledger::ClientBlock genesis(TAO::Ledger::TritiumGenesis());
     const uint1024_t hashGenesis = genesis.GetHash();
@@ -1255,6 +1261,10 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
     candidate.nChannelWeight[0]++;
     const uint1024_t hashCandidate = candidate.GetHash();
 
+    uint1024_t hashLedgerBest = hashCandidate;
+    ++hashLedgerBest;
+    REQUIRE(LLD::Ledger->Write(std::string("hashbestchain"), hashLedgerBest));
+
     SECTION("success commits every client-chain record before publication")
     {
         REQUIRE(candidate.Index());
@@ -1271,6 +1281,58 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(LLD::Client->ReadBestChain(hashBest));
         REQUIRE(hashBest == hashCandidate);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+    }
+
+    SECTION("startup restores the committed client tip")
+    {
+        REQUIRE(candidate.Index());
+
+        TAO::Ledger::ChainState::tStateGenesis = TAO::Ledger::BlockState();
+        TAO::Ledger::ChainState::tStateBest = TAO::Ledger::BlockState();
+        TAO::Ledger::ChainState::hashBestChain = 0;
+        TAO::Ledger::ChainState::nBestHeight.store(0);
+        TAO::Ledger::ChainState::nBestChainTrust.store(0);
+        TAO::Ledger::ChainState::hashCheckpoint = 0;
+        TAO::Ledger::ChainState::nCheckpointHeight.store(0);
+
+        REQUIRE(TAO::Ledger::ChainState::Initialize());
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == candidate.nHeight);
+
+        uint1024_t hashLedgerOnDisk;
+        REQUIRE(LLD::Ledger->Read(std::string("hashbestchain"), hashLedgerOnDisk));
+        REQUIRE(hashLedgerOnDisk == hashLedgerBest);
+    }
+
+    SECTION("startup recovery selects the last linked client block")
+    {
+        REQUIRE(candidate.Index());
+
+        uint1024_t hashMissing = hashCandidate;
+        ++hashMissing;
+        REQUIRE(LLD::Client->WriteBestChain(hashMissing));
+
+        TAO::Ledger::ChainState::tStateGenesis = TAO::Ledger::BlockState();
+        TAO::Ledger::ChainState::tStateBest = TAO::Ledger::BlockState();
+        TAO::Ledger::ChainState::hashBestChain = 0;
+        TAO::Ledger::ChainState::nBestHeight.store(0);
+        TAO::Ledger::ChainState::nBestChainTrust.store(0);
+        TAO::Ledger::ChainState::hashCheckpoint = 0;
+        TAO::Ledger::ChainState::nCheckpointHeight.store(0);
+
+        REQUIRE(TAO::Ledger::ChainState::Initialize());
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == candidate.nHeight);
+
+        uint1024_t hashRecovered;
+        REQUIRE(LLD::Client->ReadBestChain(hashRecovered));
+        REQUIRE(hashRecovered == hashCandidate);
+
+        uint1024_t hashLedgerOnDisk;
+        REQUIRE(LLD::Ledger->Read(std::string("hashbestchain"), hashLedgerOnDisk));
+        REQUIRE(hashLedgerOnDisk == hashLedgerBest);
     }
 
     SECTION("checkpoint failure rolls back every record and leaves ChainState unpublished")

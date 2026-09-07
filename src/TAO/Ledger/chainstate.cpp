@@ -198,9 +198,13 @@ namespace TAO
 
                 /* If hashBestChain exists, but block doesn't attempt to recover database from invalid write.  */
                 BlockState tStateBestKnown = tStateGenesis;
-                while(!tStateBestKnown.IsNull() && tStateBestKnown.hashNextBlock != 0)
+                while(!tStateBestKnown.IsNull())
                 {
                     tStateBest = tStateBestKnown;
+
+                    if(tStateBestKnown.hashNextBlock == 0)
+                        break;
+
                     tStateBestKnown = tStateBestKnown.Next();
                 }
 
