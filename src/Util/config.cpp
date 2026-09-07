@@ -236,9 +236,6 @@ namespace config
     /* Get the location that Nexus data is being stored in. */
     std::string GetDataDir(bool fNetSpecific)
     {
-        if(fNetSpecific)
-            GetDataDir(false);
-
         std::string &path = pathCached[fNetSpecific];
 
         // This can be called during exceptions by debug log, so we cache the
