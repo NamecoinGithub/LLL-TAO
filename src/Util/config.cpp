@@ -326,15 +326,24 @@ namespace config
 
         for(uint32_t nIndex = 0; nIndex < 2; ++nIndex)
         {
-            for(const auto& cParent : vDataDirectoryParents[nIndex])
-            {
-                if(!filesystem::sync_directory(cParent.string()))
-                    return false;
-            }
+            if(!vDataDirectoryParents[nIndex].empty()
+            && !filesystem::sync_directory_chain(vDataDirectoryParents[nIndex].front().string(),
+                                                  vDataDirectoryParents[nIndex].back().string()))
+                return false;
 
             vDataDirectoryParents[nIndex].clear();
         }
 
         return true;
+    }
+
+
+    /* Persist a database directory chain and any newly created data directories. */
+    bool SyncDataDirectoryChain(const std::string& strDirectory)
+    {
+        if(!filesystem::sync_directory_chain(strDirectory, GetDataDir()))
+            return false;
+
+        return SyncDataDirectories();
     }
 }

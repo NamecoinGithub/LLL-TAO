@@ -38,6 +38,33 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
+        namespace
+        {
+            void ClearOrphanRecoveryState(const uint1024_t& hashBlock)
+            {
+                mapLastMissing.erase(hashBlock);
+                mapMissingBranchEscalations.erase(hashBlock);
+                mapCheckRejects.erase(hashBlock);
+                setUnrecoverableBlocks.erase(hashBlock);
+                mapMissingTxCache.erase(hashBlock);
+                mapLastOrphanRequest.erase(hashBlock);
+                mapLastMissingProcessTime.erase(hashBlock);
+            }
+
+
+            void ClearOrphanRecoveryState()
+            {
+                mapLastMissing.clear();
+                mapMissingBranchEscalations.clear();
+                mapCheckRejects.clear();
+                setUnrecoverableBlocks.clear();
+                mapMissingTxCache.clear();
+                mapLastOrphanRequest.clear();
+                mapLastMissingProcessTime.clear();
+            }
+        }
+
+
         /* Static instantiation of block orphan graph. */
         OrphanPool mapOrphans;
 
@@ -234,15 +261,7 @@ namespace TAO
 
                 const uint64_t nPruned = mapOrphans.RemoveSubtree(hashRoot);
                 for(const auto& hash : vHashes)
-                {
-                    mapLastMissing.erase(hash);
-                    mapMissingBranchEscalations.erase(hash);
-                    mapCheckRejects.erase(hash);
-                    setUnrecoverableBlocks.erase(hash);
-                    mapMissingTxCache.erase(hash);
-                    mapLastOrphanRequest.erase(hash);
-                    mapLastMissingProcessTime.erase(hash);
-                }
+                    ClearOrphanRecoveryState(hash);
 
                 return nPruned;
             }
@@ -1263,12 +1282,7 @@ namespace TAO
              * blacklist and escalation entries computed against the now-discarded
              * orphan graph do not persist and mis-filter legitimate future blocks. */
             mapOrphans.Clear();
-            setUnrecoverableBlocks.clear();
-            mapMissingTxCache.clear();
-            mapLastMissingProcessTime.clear();
-            mapLastMissing.clear();
-            mapMissingBranchEscalations.clear();
-            mapLastOrphanRequest.clear();
+            ClearOrphanRecoveryState();
 
             debug::warning(FUNCTION, "purged orphan recovery state",
                 " reason=", (pszReason ? pszReason : "unknown"),
@@ -1397,12 +1411,7 @@ namespace TAO
                 {
                     nStatus |= PROCESS::DUPLICATE;
                     mapOrphans.Remove(hashBlock);
-                    mapLastMissing.erase(hashBlock);
-                    mapMissingBranchEscalations.erase(hashBlock);
-                    setUnrecoverableBlocks.erase(hashBlock);
-                    mapMissingTxCache.erase(hashBlock);
-                    mapLastOrphanRequest.erase(hashBlock);
-                    mapLastMissingProcessTime.erase(hashBlock);
+                    ClearOrphanRecoveryState(hashBlock);
                     return;
                 }
 
@@ -1853,13 +1862,7 @@ namespace TAO
                  * Also clear the rate-limit timestamp and blacklist entry so if
                  * this exact hash ever re-appears (e.g. a reorg that reverses a
                  * previously unrecoverable decision) it is processed normally. */
-                if(mapLastMissing.count(hashBlock))
-                    mapLastMissing.erase(hashBlock);
-                mapMissingBranchEscalations.erase(hashBlock);
-                setUnrecoverableBlocks.erase(hashBlock);
-                mapMissingTxCache.erase(hashBlock);
-                mapLastOrphanRequest.erase(hashBlock);
-                mapLastMissingProcessTime.erase(hashBlock);
+                ClearOrphanRecoveryState(hashBlock);
 
                 /* Special meter for synchronizing. */
                 uint64_t nElapsed = runtime::timestamp(true) - nSynchronizationTimer;
@@ -2079,12 +2082,7 @@ namespace TAO
                             continue;
                         }
 
-                        mapLastMissing.erase(hashOrphan);
-                        mapMissingBranchEscalations.erase(hashOrphan);
-                        setUnrecoverableBlocks.erase(hashOrphan);
-                        mapMissingTxCache.erase(hashOrphan);
-                        mapLastMissingProcessTime.erase(hashOrphan);
-                        mapLastOrphanRequest.erase(hashOrphan);
+                        ClearOrphanRecoveryState(hashOrphan);
                         mapOrphans.Remove(hashOrphan);
                         queueParents.push(hashOrphan);
                         ++nDrained;

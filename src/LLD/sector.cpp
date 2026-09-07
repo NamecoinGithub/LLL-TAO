@@ -70,7 +70,6 @@ namespace LLD
     , TRANSACTION_MUTEX()
     , strBaseLocation(config::GetDataDir() + strNameIn + "/datachain/")
     , strName(strNameIn)
-    , fDatabaseDirectoryDirty(!filesystem::exists(config::GetDataDir() + strNameIn + "/"))
     , runtime()
     , pTransaction(nullptr)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"), nFlagsIn, nBucketsIn))
@@ -699,6 +698,11 @@ namespace LLD
         if(!pTransaction)
             return false;
 
+        /* A durable journal must never reference newly created keychain storage
+         * whose file and directory entries have not reached stable storage. */
+        if(!pSectorKeys->SyncTouchedFiles())
+            return debug::error(FUNCTION, "failed to sync keychain storage");
+
         /* Set commit message into journal. */
         pTransaction->ssJournal << std::string("commit");
 
@@ -732,19 +736,8 @@ namespace LLD
         if(std::fclose(stream) != 0)
             return debug::error(FUNCTION, "failed to close journal file");
 
-        if(!filesystem::sync_directory(debug::safe_printstr(config::GetDataDir(), strName, "/")))
-            return debug::error(FUNCTION, "failed to sync journal directory");
-
-        if(fDatabaseDirectoryDirty)
-        {
-            if(!filesystem::sync_directory(config::GetDataDir()))
-                return debug::error(FUNCTION, "failed to sync database parent directory");
-
-            if(!config::SyncDataDirectories())
-                return debug::error(FUNCTION, "failed to sync data directory parent");
-
-            fDatabaseDirectoryDirty = false;
-        }
+        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
+            return debug::error(FUNCTION, "failed to sync journal directory chain");
 
         return true;
     }
@@ -778,6 +771,9 @@ namespace LLD
 
         if(std::fclose(stream) != 0 || !fSynced)
             return debug::error(FUNCTION, "failed to sync truncated journal file");
+
+        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
+            return debug::error(FUNCTION, "failed to sync journal directory chain");
 
         return true;
     }
@@ -859,8 +855,8 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to sync sector file");
         }
 
-        if(!setSectorFiles.empty() && !filesystem::sync_directory(strBaseLocation))
-            return debug::error(FUNCTION, "failed to sync sector directory");
+        if(!setSectorFiles.empty() && !config::SyncDataDirectoryChain(strBaseLocation))
+            return debug::error(FUNCTION, "failed to sync sector directory chain");
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");

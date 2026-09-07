@@ -17,6 +17,7 @@ ________________________________________________________________________________
 #include <LLD/hash/xxh3.h>
 
 #include <Util/templates/datastream.h>
+#include <Util/include/config.h>
 #include <Util/include/filesystem.h>
 #include <Util/include/debug.h>
 #include <Util/include/hex.h>
@@ -478,13 +479,19 @@ namespace LLD
 
         /* Create a new disk hashmap object in linked list if it doesn't exist. */
         std::string file = debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), hashmap[nBucket]);
+        const int64_t nExpectedSize =
+            static_cast<int64_t>(HASHMAP_TOTAL_BUCKETS) * HASHMAP_KEY_ALLOCATION;
+        if(filesystem::exists(file) && filesystem::size(file) != nExpectedSize
+        && !filesystem::remove(file))
+            return debug::error(FUNCTION, "failed to remove partial hashmap file");
+
         if(!filesystem::exists(file))
         {
             /* Blank vector to write empty space in new disk file. */
             std::vector<uint8_t> vSpace(HASHMAP_KEY_ALLOCATION, 0);
 
             /* Write the blank data to the new file handle. */
-            std::ofstream stream(file, std::ios::out | std::ios::binary | std::ios::app);
+            std::ofstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
             if(!stream)
                 return debug::error(FUNCTION, strerror(errno));
 
@@ -636,26 +643,8 @@ namespace LLD
 
         if(fDirectoryDirty || !setDirtyFiles.empty())
         {
-            #ifdef WIN32
-            const HANDLE hDirectory = CreateFileA(
-                strBaseLocation.c_str(), GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-            if(hDirectory == INVALID_HANDLE_VALUE)
+            if(!config::SyncDataDirectoryChain(strBaseLocation))
                 return false;
-
-            const bool fSynced = (FlushFileBuffers(hDirectory) != 0);
-            if(CloseHandle(hDirectory) == 0 || !fSynced)
-                return false;
-            #else
-            const int nDirectory = open(strBaseLocation.c_str(), O_RDONLY);
-            if(nDirectory < 0)
-                return false;
-
-            const bool fSynced = (fsync(nDirectory) == 0);
-            if(close(nDirectory) != 0 || !fSynced)
-                return false;
-            #endif
         }
 
         setDirtyFiles.clear();

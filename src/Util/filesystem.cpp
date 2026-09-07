@@ -23,6 +23,7 @@ ________________________________________________________________________________
 #include <cstring>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 
 #include <Util/include/debug.h>
 #include <Util/include/filesystem.h>
@@ -73,6 +74,41 @@ namespace filesystem
         const bool fSynced = (fsync(nDirectory) == 0);
         return (close(nDirectory) == 0 && fSynced);
         #endif
+    }
+
+
+    /* Sync a directory and each parent through the requested root. */
+    bool sync_directory_chain(const std::string& strPath, const std::string& strRoot)
+    {
+        auto normalize = [](const std::string& strDirectory)
+        {
+            std::filesystem::path directory =
+                std::filesystem::path(strDirectory).lexically_normal();
+            if(directory.has_relative_path() && directory.filename().empty())
+                directory = directory.parent_path();
+
+            return directory;
+        };
+
+        std::filesystem::path path = normalize(strPath);
+        const std::filesystem::path root = normalize(strRoot);
+
+        while(!path.empty())
+        {
+            if(!sync_directory(path.string()))
+                return false;
+
+            if(path == root)
+                return true;
+
+            const std::filesystem::path parent = path.parent_path();
+            if(parent == path)
+                break;
+
+            path = parent;
+        }
+
+        return false;
     }
 
 

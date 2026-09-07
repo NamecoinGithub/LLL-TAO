@@ -1291,7 +1291,9 @@ TEST_CASE("PurgeOrphanRecoveryState clears all correlated maps", "[ledger][proce
     /* Seed every recovery map with at least one entry. */
     TAO::Ledger::mapLastMissing[h1]              = 5;
     TAO::Ledger::mapMissingBranchEscalations[h2] = 2;
+    TAO::Ledger::mapCheckRejects[h3]             = 1;
     TAO::Ledger::setUnrecoverableBlocks.insert(h3);
+    TAO::Ledger::mapMissingTxCache[h1]           = {};
     TAO::Ledger::mapLastMissingProcessTime[h1]   = 12345678;
     TAO::Ledger::mapLastOrphanRequest[h2]        = 87654321;
 
@@ -1310,7 +1312,9 @@ TEST_CASE("PurgeOrphanRecoveryState clears all correlated maps", "[ledger][proce
     REQUIRE(TAO::Ledger::mapOrphans.Empty());
     REQUIRE(TAO::Ledger::mapLastMissing.empty());
     REQUIRE(TAO::Ledger::mapMissingBranchEscalations.empty());
+    REQUIRE(TAO::Ledger::mapCheckRejects.empty());
     REQUIRE(TAO::Ledger::setUnrecoverableBlocks.empty());
+    REQUIRE(TAO::Ledger::mapMissingTxCache.empty());
     REQUIRE(TAO::Ledger::mapLastMissingProcessTime.empty());
     REQUIRE(TAO::Ledger::mapLastOrphanRequest.empty());
 }
@@ -1490,12 +1494,14 @@ TEST_CASE("Accepted connectable root clears its incomplete descendant throttle",
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockB));
     REQUIRE(TAO::Ledger::mapOrphans.Insert(blockC));
     TAO::Ledger::mapLastOrphanRequest[hashA] = runtime::timestamp();
+    TAO::Ledger::mapCheckRejects[hashA] = 1;
 
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashC, 218, "unit-test", nullptr);
 
     REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::PROGRESS);
     REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashA) == 0);
+    REQUIRE(TAO::Ledger::mapCheckRejects.count(hashA) == 0);
     REQUIRE(TAO::Ledger::mapLastMissingProcessTime.count(hashB) == 0);
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashC));
@@ -1507,6 +1513,7 @@ TEST_CASE("Accepted connectable root clears its incomplete descendant throttle",
     static_cast<TAO::Ledger::Block&>(resolvedB) = blockB;
     REQUIRE(resolvedB.GetHash() == hashB);
     TAO::Ledger::mapLastOrphanRequest[hashC] = runtime::timestamp();
+    TAO::Ledger::mapCheckRejects[hashC] = 1;
 
     uint8_t nStatus = 0;
     TAO::Ledger::Process(resolvedB, nStatus);
@@ -1515,9 +1522,11 @@ TEST_CASE("Accepted connectable root clears its incomplete descendant throttle",
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashB));
     REQUIRE_FALSE(TAO::Ledger::mapOrphans.Contains(hashC));
     REQUIRE(TAO::Ledger::mapLastOrphanRequest.count(hashC) == 0);
+    REQUIRE(TAO::Ledger::mapCheckRejects.count(hashC) == 0);
 
     TAO::Ledger::mapOrphans.Clear();
     TAO::Ledger::mapLastMissing.clear();
+    TAO::Ledger::mapCheckRejects.clear();
     TAO::Ledger::mapLastOrphanRequest.clear();
     TAO::Ledger::mapLastMissingProcessTime.clear();
     LLD::Ledger->EraseBlock(hashA);

@@ -162,6 +162,10 @@ namespace filesystem
     bool sync_directory(const std::string& strPath);
 
 
+    /** Sync each directory from strPath through strRoot, inclusive. **/
+    bool sync_directory_chain(const std::string& strPath, const std::string& strRoot);
+
+
     /** system_complete
      *
      *  Obtain the system complete path from a given relative path.

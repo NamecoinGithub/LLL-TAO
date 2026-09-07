@@ -128,5 +128,9 @@ namespace config
      **/
     bool SyncDataDirectories();
 
+
+    /** Persist a database directory chain and any newly created data directories. **/
+    bool SyncDataDirectoryChain(const std::string& strDirectory);
+
 }
 #endif
