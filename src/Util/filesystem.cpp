@@ -52,6 +52,30 @@ ________________________________________________________________________________
 
 namespace filesystem
 {
+    /* Flush a directory and its entries to stable storage. */
+    bool sync_directory(const std::string& strPath)
+    {
+        #ifdef WIN32
+        const HANDLE hDirectory = CreateFileA(
+            strPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if(hDirectory == INVALID_HANDLE_VALUE)
+            return false;
+
+        const bool fSynced = (FlushFileBuffers(hDirectory) != 0);
+        return (CloseHandle(hDirectory) != 0 && fSynced);
+        #else
+        const int nDirectory = open(strPath.c_str(), O_RDONLY);
+        if(nDirectory < 0)
+            return false;
+
+        const bool fSynced = (fsync(nDirectory) == 0);
+        return (close(nDirectory) == 0 && fSynced);
+        #endif
+    }
+
+
     /* Get the size of a current file. */
     int64_t size(const std::string& strPath)
     {

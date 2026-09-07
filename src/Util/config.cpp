@@ -16,6 +16,7 @@ ________________________________________________________________________________
 #include <Util/include/mutex.h>
 #include <Util/include/filesystem.h>
 #include <Util/include/debug.h>
+#include <filesystem>
 #include <fstream>
 #include <cstring> /* strlen */
 
@@ -25,6 +26,14 @@ ________________________________________________________________________________
 
 namespace config
 {
+    namespace
+    {
+        std::string pathCached[2];
+        std::mutex csPathCached;
+        bool fCachedPath[2] = {false, false};
+        bool fDataDirectoryDirty[2] = {false, false};
+    }
+
 
     /* Read the Config file from the Disk. */
     void ReadConfigFile(std::map<std::string, std::string>& mapSettingsRet,
@@ -227,9 +236,8 @@ namespace config
     /* Get the location that Nexus data is being stored in. */
     std::string GetDataDir(bool fNetSpecific)
     {
-        static std::string pathCached[2];
-        static std::mutex csPathCached;
-        static bool fCachedPath[2] = {false, false};
+        if(fNetSpecific)
+            GetDataDir(false);
 
         std::string &path = pathCached[fNetSpecific];
 
@@ -284,10 +292,37 @@ namespace config
         if(config::GetBoolArg("-client", false))
             path.append("client/");
 
-        filesystem::create_directories(path);
+        if(!filesystem::exists(path) && filesystem::create_directories(path))
+            fDataDirectoryDirty[fNetSpecific] = true;
 
         pathCached[fNetSpecific] =  path;
         fCachedPath[fNetSpecific] = true;
         return path;
+    }
+
+
+    /* Persist newly created data-directory entries in their parents. */
+    bool SyncDataDirectories()
+    {
+        GetDataDir();
+
+        LOCK(csPathCached);
+
+        for(uint32_t nIndex = 0; nIndex < 2; ++nIndex)
+        {
+            if(!fDataDirectoryDirty[nIndex])
+                continue;
+
+            std::filesystem::path cDataDirectory(pathCached[nIndex]);
+            if(cDataDirectory.filename().empty())
+                cDataDirectory = cDataDirectory.parent_path();
+
+            if(!filesystem::sync_directory(cDataDirectory.parent_path().string()))
+                return false;
+
+            fDataDirectoryDirty[nIndex] = false;
+        }
+
+        return true;
     }
 }

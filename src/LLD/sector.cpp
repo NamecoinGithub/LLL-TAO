@@ -30,9 +30,7 @@ ________________________________________________________________________________
 
 #ifdef WIN32
 #include <io.h>
-#include <windows.h>
 #else
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -55,30 +53,6 @@ namespace LLD
             return (std::fclose(stream) == 0 && fSynced);
         }
 
-
-        bool SyncDirectory(const std::string& strPath)
-        {
-            #ifdef WIN32
-            const HANDLE hDirectory = CreateFileA(
-                strPath.c_str(), GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-            if(hDirectory == INVALID_HANDLE_VALUE)
-                return false;
-
-            const bool fSynced = (FlushFileBuffers(hDirectory) != 0);
-            return (CloseHandle(hDirectory) != 0 && fSynced);
-            #else
-            const int nDirectory = open(strPath.c_str(), O_RDONLY);
-            if(nDirectory < 0)
-                return false;
-
-            const bool fSynced = (fsync(nDirectory) == 0);
-            return (close(nDirectory) == 0 && fSynced);
-            #endif
-        }
-
-
     }
 
 
@@ -95,6 +69,7 @@ namespace LLD
     , TRANSACTION_MUTEX()
     , strBaseLocation(config::GetDataDir() + strNameIn + "/datachain/")
     , strName(strNameIn)
+    , fDatabaseDirectoryDirty(!filesystem::exists(config::GetDataDir() + strNameIn + "/"))
     , runtime()
     , pTransaction(nullptr)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"), nFlagsIn, nBucketsIn))
@@ -756,8 +731,19 @@ namespace LLD
         if(std::fclose(stream) != 0)
             return debug::error(FUNCTION, "failed to close journal file");
 
-        if(!SyncDirectory(debug::safe_printstr(config::GetDataDir(), strName, "/")))
+        if(!filesystem::sync_directory(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory");
+
+        if(fDatabaseDirectoryDirty)
+        {
+            if(!filesystem::sync_directory(config::GetDataDir()))
+                return debug::error(FUNCTION, "failed to sync database parent directory");
+
+            if(!config::SyncDataDirectories())
+                return debug::error(FUNCTION, "failed to sync data directory parent");
+
+            fDatabaseDirectoryDirty = false;
+        }
 
         return true;
     }
@@ -872,7 +858,7 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to sync sector file");
         }
 
-        if(!setSectorFiles.empty() && !SyncDirectory(strBaseLocation))
+        if(!setSectorFiles.empty() && !filesystem::sync_directory(strBaseLocation))
             return debug::error(FUNCTION, "failed to sync sector directory");
 
         if(!pSectorKeys->SyncTouchedFiles())

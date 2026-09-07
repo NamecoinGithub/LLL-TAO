@@ -120,5 +120,13 @@ namespace config
      **/
     std::string GetDataDir(bool fNetSpecific = true);
 
+
+    /** SyncDataDirectories
+     *
+     *  Persist newly created data-directory entries in their parents.
+     *
+     **/
+    bool SyncDataDirectories();
+
 }
 #endif

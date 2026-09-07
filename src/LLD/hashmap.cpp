@@ -493,11 +493,18 @@ namespace LLD
 
             stream.flush();
             if(!stream)
+            {
+                stream.close();
+                filesystem::remove(file);
                 return debug::error(FUNCTION, "failed to initialize hashmap file");
+            }
 
             stream.close();
             if(!stream)
+            {
+                filesystem::remove(file);
                 return debug::error(FUNCTION, "failed to close hashmap file");
+            }
 
             fDirectoryDirty = true;
         }

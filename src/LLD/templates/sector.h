@@ -102,6 +102,9 @@ namespace LLD
         std::string strBaseLocation;
         std::string strName;
 
+        /** Whether a new database root requires parent directory syncing. **/
+        bool fDatabaseDirectoryDirty;
+
 
         /* timer for Runtime Calculations. */
         runtime::timer runtime;
