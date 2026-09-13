@@ -59,6 +59,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/state.h>
 
 #include <Util/include/args.h>
+#include <Util/include/debug.h>
 #include <Util/include/filesystem.h>
 #include <Util/templates/datastream.h>
 
@@ -860,6 +861,37 @@ namespace
         ~CheckpointRepairHookGuard()
         {
             TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook({});
+        }
+    };
+
+
+    struct HeightIndexDiskGuard
+    {
+        const std::pair<std::string, uint32_t> key;
+        const std::pair<std::string, uint32_t> backup;
+        const bool hadIndex;
+
+        explicit HeightIndexDiskGuard(const uint32_t nHeight)
+        : key(std::make_pair(std::string("height"), nHeight))
+        , backup(std::make_pair(std::string("startup-height-backup"), nHeight))
+        , hadIndex(LLD::Ledger->Exists(key))
+        {
+            if(hadIndex)
+            {
+                REQUIRE(LLD::Ledger->Index(backup, key));
+                REQUIRE(LLD::Ledger->Erase(key, true));
+            }
+        }
+
+        ~HeightIndexDiskGuard()
+        {
+            if(hadIndex)
+            {
+                LLD::Ledger->Index(key, backup);
+                LLD::Ledger->Erase(backup, true);
+            }
+            else
+                LLD::Ledger->Erase(key, true);
         }
     };
 
@@ -1813,7 +1845,15 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
             {2, hashMissingCheckpoint}
         };
 
+        SECTION("checkpoint is missing") {}
+        SECTION("checkpoint record is invalid")
+        {
+            checkpoints[2] = fixture.hashThree;
+        }
+
+        debug::GetLastError();
         REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(debug::GetLastError().empty());
         REQUIRE(nSetBestCalls == 0);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
@@ -2058,7 +2098,6 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
     BestChainDiskGuard  bestChainGuard;
-    GenesisDiskGuard    genesisGuard;
     CheckpointBlocksDiskGuard blocksGuard;
     ArgsMapGuard        argsGuard;
     FlagGuard           flagGuard;
@@ -2066,6 +2105,44 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
     config::fClient.store(false);
     config::fHybrid.store(false);
     config::fTestNet.store(false);
+
+    GenesisDiskGuard    genesisGuard;
+    HeightIndexDiskGuard heightOneGuard(1);
+    HeightIndexDiskGuard heightTwoGuard(2);
+    TAO::Ledger::ChainState::tStateGenesis = TAO::Ledger::LegacyGenesis();
+    REQUIRE(TAO::Ledger::ChainState::tStateGenesis.GetHash() == TAO::Ledger::ChainState::Genesis());
+
+    SECTION("healthy ancestry passes at genesis and at the scan bound")
+    {
+        const auto fixture = BuildCheckpointChainFixture(37900, blocksGuard);
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 16));
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 3));
+        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashOne));
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 1));
+
+        TAO::Ledger::ChainState::tStateBest = fixture.genesis;
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 16));
+    }
+
+    SECTION("ancestry must terminate at the configured genesis")
+    {
+        TAO::Ledger::ChainState::tStateGenesis.nNonce++;
+        const auto fixture = BuildCheckpointChainFixture(37910, blocksGuard);
+        blocksGuard.hashes.push_back(fixture.hashGenesis);
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 16));
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 3));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("a nonzero-height tip with no predecessor is not genesis")
+    {
+        auto fixture = BuildCheckpointChainFixture(37920, blocksGuard);
+        fixture.three.hashPrevBlock = 0;
+        TAO::Ledger::ChainState::tStateBest = fixture.three;
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 16));
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
 
     SECTION("missing predecessor near best tip fails startup audit without mutation")
     {
@@ -2085,8 +2162,17 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
     SECTION("repairchain restores missing hash-key lookup from height recovery data")
     {
         const auto fixture = BuildCheckpointChainFixture(38100, blocksGuard);
-        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
-        REQUIRE(LLD::Ledger->Write(std::make_pair(std::string("height"), uint32_t(2)), fixture.two));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+
+        SECTION("hash key is absent") {}
+        SECTION("hash key exists but cannot be read")
+        {
+            REQUIRE(LLD::Ledger->Write(fixture.hashTwo, uint8_t(0)));
+            REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
+            TAO::Ledger::BlockState unreadable;
+            REQUIRE_FALSE(LLD::Ledger->ReadBlock(fixture.hashTwo, unreadable));
+        }
 
         REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
         REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
@@ -2098,13 +2184,73 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
 
         REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
         REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        restored.hashNextBlock = 0;
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashTwo, restored));
+        TAO::Ledger::BlockState byHeight;
+        REQUIRE(LLD::Ledger->ReadBlock(uint32_t(2), byHeight));
+        REQUIRE(byHeight.GetHash() == fixture.hashTwo);
+        REQUIRE(byHeight.hashNextBlock == 0);
+    }
+
+    SECTION("failed ancestry revalidation aborts the staged predecessor repair")
+    {
+        auto fixture = BuildCheckpointChainFixture(38110, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+
+        SECTION("another predecessor is unavailable")
+        {
+            REQUIRE(LLD::Ledger->EraseBlock(fixture.hashOne));
+            REQUIRE_FALSE(LLD::Ledger->Exists(std::make_pair(std::string("height"), uint32_t(1))));
+        }
+        SECTION("another predecessor is recoverable")
+        {
+            REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+            REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+        }
+        SECTION("an older predecessor has an invalid successor link")
+        {
+            fixture.one.hashNextBlock = 0;
+            REQUIRE(LLD::Ledger->WriteBlock(fixture.hashOne, fixture.one));
+        }
+        SECTION("an older predecessor has an invalid height")
+        {
+            fixture.one.nHeight = 9;
+            REQUIRE(LLD::Ledger->WriteBlock(fixture.hashOne, fixture.one));
+        }
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        TAO::Ledger::BlockState byHeight;
+        REQUIRE(LLD::Ledger->ReadBlock(uint32_t(2), byHeight));
+        REQUIRE(byHeight.GetHash() == fixture.hashTwo);
+        REQUIRE(byHeight.hashNextBlock == fixture.hashThree);
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+    }
+
+    SECTION("invalid genesis behind a recoverable hole leaves the hash key missing")
+    {
+        TAO::Ledger::ChainState::tStateGenesis.nNonce++;
+        const auto fixture = BuildCheckpointChainFixture(38120, blocksGuard);
+        blocksGuard.hashes.push_back(fixture.hashGenesis);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 
     SECTION("repairchain refuses mutation when predecessor data is genuinely unavailable")
     {
         const auto fixture = BuildCheckpointChainFixture(38200, blocksGuard);
         REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
-        REQUIRE(LLD::Ledger->Erase(std::make_pair(std::string("height"), uint32_t(2))));
+        REQUIRE_FALSE(LLD::Ledger->Exists(std::make_pair(std::string("height"), uint32_t(2))));
 
         REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
         REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));

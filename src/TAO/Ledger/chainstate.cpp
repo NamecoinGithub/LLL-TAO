@@ -376,6 +376,15 @@ namespace TAO
                     audit.nDepthScanned = nDepth + 1;
                 }
 
+                if(stateWalk.hashPrevBlock == 0
+                && (stateWalk.nHeight != 0 || hashWalk != ChainState::Genesis()))
+                {
+                    return debug::error(FUNCTION,
+                        "active-chain ancestry terminates at invalid genesis: height ",
+                        stateWalk.nHeight, " hash ", hashWalk.SubString(),
+                        " expected ", ChainState::Genesis().SubString());
+                }
+
                 return true;
             }
 
@@ -409,22 +418,32 @@ namespace TAO
                         "a trusted snapshot.");
                 }
 
-                if(LLD::Ledger->HasBlock(audit.hashMissingPrev))
-                {
-                    debug::log(0, FUNCTION, "missing predecessor hash key already present at ",
-                        audit.hashMissingPrev.SubString(), "; no write required");
-                    return true;
-                }
-
                 LLD::TransactionGuard transaction;
                 if(!transaction)
                     return debug::error(FUNCTION, "failed to begin best-chain repair transaction");
 
-                if(!LLD::Ledger->WriteBlock(audit.hashMissingPrev, audit.stateRecoveredPrev))
+                /* Discard unreadable cached data and preserve the sector shared with the height index. */
+                if(!LLD::Ledger->Erase(audit.hashMissingPrev, true)
+                || !LLD::Ledger->Index(audit.hashMissingPrev,
+                    std::make_pair(std::string("height"), audit.stateRecoveredPrev.nHeight)))
                 {
                     LLD::TxnAbort();
                     return debug::error(FUNCTION, "failed to restore missing predecessor block key ",
                         audit.hashMissingPrev.SubString());
+                }
+
+                /* Validate the staged repair before making any mutation durable. */
+                ChainHoleAudit verifyAudit;
+                if(!ScanActiveBestChain(nMaxDepth, verifyAudit))
+                    return false;
+
+                if(verifyAudit.fHoleDetected)
+                {
+                    return debug::error(FUNCTION,
+                        "best-chain repair did not restore contiguity near tip; unresolved missing predecessor ",
+                        verifyAudit.hashMissingPrev.SubString(), " at child height ",
+                        verifyAudit.stateChild.nHeight, " hash ",
+                        verifyAudit.stateChild.GetHash().SubString());
                 }
 
                 if(!LLD::TxnCommit())
@@ -440,19 +459,6 @@ namespace TAO
                     return debug::error(FUNCTION,
                         "post-repair verification failed for restored predecessor block key ",
                         audit.hashMissingPrev.SubString());
-                }
-
-                ChainHoleAudit verifyAudit;
-                if(!ScanActiveBestChain(nMaxDepth, verifyAudit))
-                    return false;
-
-                if(verifyAudit.fHoleDetected)
-                {
-                    return debug::error(FUNCTION,
-                        "best-chain repair did not restore contiguity near tip; unresolved missing predecessor ",
-                        verifyAudit.hashMissingPrev.SubString(), " at child height ",
-                        verifyAudit.stateChild.nHeight, " hash ",
-                        verifyAudit.stateChild.GetHash().SubString());
                 }
 
                 debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
@@ -479,7 +485,7 @@ namespace TAO
                         if(stateCheck.GetHash() == it->second && stateCheck.nHeight == it->first)
                             continue;
 
-                        debug::error(FUNCTION,
+                        debug::warning(FUNCTION,
                             "hardcoded checkpoint record is unreadable or invalid at height ", it->first,
                             " expected hash ", it->second.SubString(), " read hash ",
                             stateCheck.GetHash().SubString(), " read height ", stateCheck.nHeight,
@@ -487,7 +493,7 @@ namespace TAO
                     }
                     else
                     {
-                        debug::error(FUNCTION,
+                        debug::warning(FUNCTION,
                             "missing hardcoded checkpoint record at height ", it->first, " hash ",
                             it->second.SubString(), ". No rollback will be attempted by default.");
                     }
