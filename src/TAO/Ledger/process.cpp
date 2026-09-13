@@ -111,13 +111,16 @@ namespace TAO
             }
 
 
-            void RequestMissingTransactionsForBlock(const uint1024_t& hashMissing,
+            bool RequestMissingTransactionsForBlock(const uint1024_t& hashMissing,
                                                     LLP::TritiumNode* pnode)
             {
                 if(hashMissing == 0 || config::fClient.load())
-                    return;
+                    return false;
 
-                LLP::TritiumNode* pSend = pnode;
+                if(pnode && pnode->RequestMissingTransactions(hashMissing))
+                    return true;
+
+                LLP::TritiumNode* pSend = nullptr;
                 std::shared_ptr<LLP::TritiumNode> pRandom;
                 if(!pSend && LLP::TRITIUM_SERVER)
                 {
@@ -126,9 +129,9 @@ namespace TAO
                 }
 
                 if(!pSend)
-                    return;
+                    return false;
 
-                pSend->RequestMissingTransactions(hashMissing);
+                return pSend->RequestMissingTransactions(hashMissing);
             }
         }
 
@@ -832,8 +835,8 @@ namespace TAO
                             mapLastMissingProcessTime.erase(pConnectable->hashMissing);
                     }
 
-                    if(hashImmediateMissing != 0)
-                        RequestMissingTransactionsForBlock(hashImmediateMissing, pnode);
+                    const bool fMissingOwned = hashImmediateMissing != 0
+                        && RequestMissingTransactionsForBlock(hashImmediateMissing, pnode);
 
                     if(fProgress)
                     {
@@ -845,7 +848,7 @@ namespace TAO
                         return PeerBestRecoveryResult::PROGRESS;
                     }
 
-                    return hashImmediateMissing != 0
+                    return fMissingOwned
                         ? PeerBestRecoveryResult::MISSING_TX_PENDING
                         : PeerBestRecoveryResult::SKIPPED;
                 }
@@ -900,40 +903,32 @@ namespace TAO
                  * TRANSACTIONS causes the peer to push inline txs then the block as TRITIUM,
                  * which the receiver accepts unconditionally. */
                 bool fPrimaryQueued = false;
+                bool fAnyQueued = false;
                 try
                 {
                     const uint1024_t hashTarget = TAO::Ledger::ChainState::hashBestChain.load();
                     const uint32_t nLocalHeight = TAO::Ledger::ChainState::nBestHeight.load();
-                    const uint64_t nWindowRequest = !config::fClient.load()
-                        ? pSend->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                            hashTarget, hashPeerBest)
-                        : 0;
                     try
                     {
-                    if(!pSend->PushMessage(LLP::TritiumNode::ACTION::LIST,
-                        config::fClient.load()
-                            ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
-                            : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
-                        uint8_t(LLP::TritiumNode::TYPES::BLOCK),
-                        uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
-                        TAO::Ledger::Locator(hashTarget),
-                        uint1024_t(hashPeerBest)
-                    ))
-                    {
-                        if(nWindowRequest != 0)
-                            pSend->RollbackTxResponseWindow(nWindowRequest);
+                        if(pSend->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                            hashTarget, hashPeerBest, false, LLP::TritiumNode::ACTION::LIST,
+                            config::fClient.load()
+                                ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
+                                : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+                            uint8_t(LLP::TritiumNode::TYPES::BLOCK),
+                            uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+                            TAO::Ledger::Locator(hashTarget),
+                            uint1024_t(hashPeerBest)
+                        ))
+                        {
+                            fPrimaryQueued = true;
+                            fAnyQueued = true;
+                            RecordPeerBestRecoveryRequest(hashPeerBest, hashTarget, nLocalHeight);
+                        }
                     }
-                    else
+                    catch(const std::exception& e)
                     {
-                        fPrimaryQueued = true;
-                        RecordPeerBestRecoveryRequest(hashPeerBest, hashTarget, nLocalHeight);
-                    }
-                    }
-                    catch(...)
-                    {
-                        if(nWindowRequest != 0)
-                            pSend->RollbackTxResponseWindow(nWindowRequest);
-                        throw;
+                        debug::error(FUNCTION, e.what());
                     }
 
                     if(pfBranchSyncQueued && fPrimaryQueued)
@@ -951,33 +946,20 @@ namespace TAO
                         {
                             try
                             {
-                                const uint64_t nFanoutWindow = !config::fClient.load()
-                                    ? pFanout->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                                        hashTarget, hashPeerBest)
-                                    : 0;
-                                try
+                                if(pFanout->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                                    hashTarget, hashPeerBest, true, LLP::TritiumNode::ACTION::LIST,
+                                    config::fClient.load()
+                                        ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
+                                        : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+                                    uint8_t(LLP::TritiumNode::TYPES::BLOCK),
+                                    uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+                                    TAO::Ledger::Locator(hashTarget),
+                                    uint1024_t(hashPeerBest)
+                                ))
                                 {
-                                    if(!pFanout->PushMessage(LLP::TritiumNode::ACTION::LIST,
-                                        config::fClient.load()
-                                            ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
-                                            : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
-                                        uint8_t(LLP::TritiumNode::TYPES::BLOCK),
-                                        uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
-                                        TAO::Ledger::Locator(hashTarget),
-                                        uint1024_t(hashPeerBest)
-                                    ))
-                                    {
-                                        if(nFanoutWindow != 0)
-                                            pFanout->RollbackTxResponseWindow(nFanoutWindow);
-                                    }
-                                    else if(!fPrimaryQueued)
+                                    fAnyQueued = true;
+                                    if(!fPrimaryQueued)
                                         RecordPeerBestRecoveryRequest(hashPeerBest, hashTarget, nLocalHeight);
-                                }
-                                catch(...)
-                                {
-                                    if(nFanoutWindow != 0)
-                                        pFanout->RollbackTxResponseWindow(nFanoutWindow);
-                                    throw;
                                 }
                             }
                             catch(const std::exception& e)
@@ -992,7 +974,7 @@ namespace TAO
                     debug::error(FUNCTION, e.what());
                 }
 
-                return fPrimaryQueued
+                return fAnyQueued
                     ? PeerBestRecoveryResult::FETCH_QUEUED
                     : PeerBestRecoveryResult::SKIPPED;
             }
@@ -1098,34 +1080,17 @@ namespace TAO
                 if(ShouldSendBranchSyncRequest(hashTarget))
                 {
                     const uint1024_t hashLocator = ChainState::hashBestChain.load();
-                    const uint64_t nWindowRequest = !config::fClient.load()
-                        ? pnode->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                            hashLocator, hashTarget)
-                        : 0;
-                    try
-                    {
-                        if(!pnode->PushMessage(LLP::TritiumNode::ACTION::LIST,
-                            config::fClient.load()
-                                ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
-                                : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
-                            uint8_t(LLP::TritiumNode::TYPES::BLOCK),
-                            uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
-                            TAO::Ledger::Locator(hashLocator),
-                            uint1024_t(hashTarget)
-                        ))
-                        {
-                            if(nWindowRequest != 0)
-                                pnode->RollbackTxResponseWindow(nWindowRequest);
-                        }
-                        else
-                            fBranchSyncQueued = true;
-                    }
-                    catch(...)
-                    {
-                        if(nWindowRequest != 0)
-                            pnode->RollbackTxResponseWindow(nWindowRequest);
-                        throw;
-                    }
+                    if(pnode->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                        hashLocator, hashTarget, false, LLP::TritiumNode::ACTION::LIST,
+                        config::fClient.load()
+                            ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
+                            : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+                        uint8_t(LLP::TritiumNode::TYPES::BLOCK),
+                        uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+                        TAO::Ledger::Locator(hashLocator),
+                        uint1024_t(hashTarget)
+                    ))
+                        fBranchSyncQueued = true;
                 }
             }
 
@@ -1271,34 +1236,17 @@ namespace TAO
                     /* SPECIFIER::TRANSACTIONS (not SYNC): post-sync fork recovery.
                      * SYNC is rejected as "unsolicited" once fSynchronized==true. */
                     const uint1024_t hashLocator = ChainState::hashBestChain.load();
-                    const uint64_t nWindowRequest = !config::fClient.load()
-                        ? pnode->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                            hashLocator, hashPeerBest)
-                        : 0;
-                    try
-                    {
-                        if(!pnode->PushMessage(LLP::TritiumNode::ACTION::LIST,
-                            config::fClient.load()
-                                ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
-                                : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
-                            uint8_t(LLP::TritiumNode::TYPES::BLOCK),
-                            uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
-                            TAO::Ledger::Locator(hashLocator),
-                            uint1024_t(hashPeerBest)
-                        ))
-                        {
-                            if(nWindowRequest != 0)
-                                pnode->RollbackTxResponseWindow(nWindowRequest);
-                        }
-                        else
-                            fBranchSyncQueued = true;
-                    }
-                    catch(...)
-                    {
-                        if(nWindowRequest != 0)
-                            pnode->RollbackTxResponseWindow(nWindowRequest);
-                        throw;
-                    }
+                    if(pnode->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                        hashLocator, hashPeerBest, false, LLP::TritiumNode::ACTION::LIST,
+                        config::fClient.load()
+                            ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
+                            : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+                        uint8_t(LLP::TritiumNode::TYPES::BLOCK),
+                        uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+                        TAO::Ledger::Locator(hashLocator),
+                        uint1024_t(hashPeerBest)
+                    ))
+                        fBranchSyncQueued = true;
                 }
             }
 
@@ -1607,13 +1555,8 @@ namespace TAO
                                  * fork recovery fires. */
                                 const uint1024_t hashTarget =
                                     TAO::Ledger::ChainState::hashBestChain.load();
-                                const uint64_t nWindowRequest = !config::fClient.load()
-                                    ? pnode->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                                        hashTarget, block.hashPrevBlock)
-                                    : 0;
-                                try
-                                {
-                                if(!pnode->PushMessage(LLP::TritiumNode::ACTION::LIST,
+                                pnode->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                                    hashTarget, block.hashPrevBlock, false, LLP::TritiumNode::ACTION::LIST,
                                     config::fClient.load()
                                         ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
                                         : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
@@ -1621,18 +1564,7 @@ namespace TAO
                                     uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
                                     TAO::Ledger::Locator(hashTarget),
                                     uint1024_t(block.hashPrevBlock)
-                                ))
-                                {
-                                    if(nWindowRequest != 0)
-                                        pnode->RollbackTxResponseWindow(nWindowRequest);
-                                }
-                                }
-                                catch(...)
-                                {
-                                    if(nWindowRequest != 0)
-                                        pnode->RollbackTxResponseWindow(nWindowRequest);
-                                    throw;
-                                }
+                                );
 
                                 /* Random-connection fallback: ask a second distinct
                                  * peer so the node that sent the orphan cannot also
@@ -1646,14 +1578,9 @@ namespace TAO
                                     {
                                         try
                                         {
-                                            const uint64_t nWindowRequest = !config::fClient.load()
-                                                ? pRandom->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
-                                                    hashTarget, block.hashPrevBlock)
-                                                : 0;
-                                            try
-                                            {
                                             /* Same TRANSACTIONS specifier — receiver is synced. */
-                                            if(!pRandom->PushMessage(LLP::TritiumNode::ACTION::LIST,
+                                            pRandom->PushTxResponseRequest(LLP::TxResponseKind::LIST,
+                                                hashTarget, block.hashPrevBlock, true, LLP::TritiumNode::ACTION::LIST,
                                                 config::fClient.load()
                                                     ? uint8_t(LLP::TritiumNode::SPECIFIER::CLIENT)
                                                     : uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
@@ -1661,18 +1588,7 @@ namespace TAO
                                                 uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
                                                 TAO::Ledger::Locator(hashTarget),
                                                 uint1024_t(block.hashPrevBlock)
-                                            ))
-                                            {
-                                                if(nWindowRequest != 0)
-                                                    pRandom->RollbackTxResponseWindow(nWindowRequest);
-                                            }
-                                            }
-                                            catch(...)
-                                            {
-                                                if(nWindowRequest != 0)
-                                                    pRandom->RollbackTxResponseWindow(nWindowRequest);
-                                                throw;
-                                            }
+                                            );
                                         }
                                         catch(const std::exception& e)
                                         {

@@ -788,6 +788,22 @@ namespace
         }
     };
 
+
+    struct GenesisDiskGuard
+    {
+        const uint1024_t hash = TAO::Ledger::ChainState::Genesis();
+        TAO::Ledger::BlockState saved;
+        const bool hadGenesis = LLD::Ledger->ReadBlock(hash, saved);
+
+        ~GenesisDiskGuard()
+        {
+            if(hadGenesis)
+                LLD::Ledger->WriteBlock(hash, saved);
+            else
+                LLD::Ledger->EraseBlock(hash);
+        }
+    };
+
 } /* anonymous namespace */
 
 
@@ -1039,6 +1055,8 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     genesis.nBits         = 1;
     genesis.nNonce        = 1001;
     genesis.nChainTrust   = 0; /* explicitly 0 so the heavier-than relationship is clear */
+    genesis.nMoneySupply  = 1000;
+    genesis.nFeesBurned   = 25;
 
     const uint1024_t hashGenesis = genesis.GetHash();
     REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
@@ -1058,6 +1076,7 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     candidate.nBits         = 1;
     candidate.nNonce        = 1002;
     candidate.nChainTrust   = 1; /* heavier than genesis (nChainTrust 1 > 0) for IsHeavierThan */
+    candidate.nMint         = 100;
 
     const uint1024_t hashCandidate = candidate.GetHash();
 
@@ -1089,9 +1108,147 @@ TEST_CASE("Accept() Case A: outer TxnBegin + SetBest() commits internally, HasOp
     REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
     REQUIRE(hashBestOnDisk == hashCandidate);
 
+    TAO::Ledger::BlockState committed;
+    REQUIRE(LLD::Ledger->ReadBlock(hashCandidate, committed));
+    REQUIRE(committed.nMoneySupply == 1100);
+    REQUIRE(committed.nFeesBurned == 25);
+    REQUIRE(candidate.nMoneySupply == committed.nMoneySupply);
+    REQUIRE(candidate.nFeesBurned == committed.nFeesBurned);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().nMoneySupply == committed.nMoneySupply);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().nFeesBurned == committed.nFeesBurned);
+
     /* Cleanup */
     LLD::Ledger->EraseBlock(hashCandidate);
     LLD::Ledger->EraseBlock(hashGenesis);
+}
+
+
+TEST_CASE("Real SetBest(): rewind publishes the updated tip without its disconnected successor",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    GenesisDiskGuard    genesisDiskGuard;
+
+    const TAO::Ledger::BlockState genesis = TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    TAO::Ledger::ChainState::tStateBest = genesis;
+    TAO::Ledger::ChainState::hashBestChain = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight = genesis.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust = genesis.nChainTrust;
+
+    TAO::Ledger::BlockState first;
+    first.nVersion = 4;
+    first.hashPrevBlock = hashGenesis;
+    first.nChannel = 2;
+    first.nHeight = genesis.nHeight + 1;
+    first.nBits = 1;
+    first.nNonce = 2201;
+    first.nChainTrust = genesis.nChainTrust + 1;
+    first.nMint = 100;
+    REQUIRE(first.SetBest());
+
+    TAO::Ledger::BlockState second = first;
+    second.hashPrevBlock = first.GetHash();
+    second.nHeight++;
+    second.nNonce++;
+    second.nChainTrust++;
+    REQUIRE(second.SetBest());
+
+    REQUIRE(LLD::Ledger->ReadBlock(first.GetHash(), first));
+    REQUIRE(first.hashNextBlock == second.GetHash());
+    REQUIRE(first.SetBest());
+
+    TAO::Ledger::BlockState committed;
+    REQUIRE(LLD::Ledger->ReadBlock(first.GetHash(), committed));
+    REQUIRE(committed.hashNextBlock == 0);
+    REQUIRE(first.hashNextBlock == 0);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().hashNextBlock == 0);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().nMoneySupply == committed.nMoneySupply);
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == first.GetHash());
+    REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == first.nHeight);
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(second.GetHash()));
+    REQUIRE_FALSE(TAO::Ledger::ChainState::fChainReorg.load());
+
+    uint1024_t hashBestOnDisk;
+    REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+    REQUIRE(hashBestOnDisk == first.GetHash());
+
+    LLD::Ledger->EraseBlock(first.GetHash());
+}
+
+
+TEST_CASE("Real SetBest(): debugreorg reads transactions before rewind erases them",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    GenesisDiskGuard    genesisDiskGuard;
+    struct ArgsGuard
+    {
+        const std::map<std::string, std::string> saved = config::mapArgs;
+        ~ArgsGuard() { config::mapArgs = saved; }
+    } argsGuard;
+
+    SECTION("diagnostics disabled")
+    {
+        config::mapArgs["-debugreorg"] = "0";
+    }
+    SECTION("diagnostics enabled")
+    {
+        config::mapArgs["-debugreorg"] = "1";
+    }
+
+    TAO::Ledger::BlockState genesis = TAO::Ledger::ChainState::tStateGenesis;
+    const uint1024_t hashGenesis = genesis.GetHash();
+
+    TAO::Ledger::Transaction firstTx;
+    firstTx.nSequence = 1;
+    firstTx.hashGenesis = uint256_t(0x2203);
+    TAO::Ledger::Transaction secondTx = firstTx;
+    secondTx.nSequence = 2;
+    secondTx.hashPrevTx = firstTx.GetHash();
+    const uint512_t hashFirst = firstTx.GetHash();
+    const uint512_t hashSecond = secondTx.GetHash();
+    REQUIRE(LLD::Ledger->WriteTx(hashFirst, firstTx));
+    REQUIRE(LLD::Ledger->WriteTx(hashSecond, secondTx));
+    REQUIRE(LLD::Ledger->WriteLast(firstTx.hashGenesis, hashSecond));
+
+    TAO::Ledger::BlockState tip;
+    tip.nVersion = 4;
+    tip.hashPrevBlock = hashGenesis;
+    tip.nChannel = 2;
+    tip.nHeight = genesis.nHeight + 1;
+    tip.nBits = 1;
+    tip.nNonce = 2203;
+    tip.nChainTrust = genesis.nChainTrust + 1;
+    tip.vtx = {{TAO::Ledger::TRANSACTION::TRITIUM, hashFirst},
+               {TAO::Ledger::TRANSACTION::TRITIUM, hashSecond}};
+    const uint1024_t hashTip = tip.GetHash();
+    genesis.hashNextBlock = hashTip;
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+    REQUIRE(LLD::Ledger->WriteBlock(hashTip, tip));
+    REQUIRE(LLD::Ledger->IndexBlock(hashFirst, hashTip));
+    REQUIRE(LLD::Ledger->IndexBlock(hashSecond, hashTip));
+    REQUIRE(LLD::Ledger->WriteBestChain(hashTip));
+    TAO::Ledger::ChainState::tStateBest = tip;
+    TAO::Ledger::ChainState::hashBestChain = hashTip;
+    TAO::Ledger::ChainState::nBestHeight = tip.nHeight;
+    TAO::Ledger::ChainState::nBestChainTrust = tip.nChainTrust;
+
+    REQUIRE(genesis.SetBest());
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashTip));
+    REQUIRE_FALSE(LLD::Ledger->HasTx(hashFirst));
+    REQUIRE_FALSE(LLD::Ledger->HasTx(hashSecond));
+    REQUIRE_FALSE(LLD::Ledger->HasIndex(hashFirst));
+    REQUIRE_FALSE(LLD::Ledger->HasIndex(hashSecond));
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+    REQUIRE_FALSE(LLD::HasOpenTransaction());
+    REQUIRE_FALSE(TAO::Ledger::ChainState::fChainReorg.load());
+    LLD::Ledger->EraseLast(firstTx.hashGenesis);
 }
 
 
