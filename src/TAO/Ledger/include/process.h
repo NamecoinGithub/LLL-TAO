@@ -363,6 +363,7 @@ namespace TAO
             PROGRESS,         /* local best chain advanced                    */
             FETCH_QUEUED,     /* locator LIST successfully queued             */
             FETCH_THROTTLED,  /* would fetch, but ORPHAN_REQUEST throttle hit */
+            MISSING_TX_PENDING, /* extracted orphan owns missing-tx recovery */
         };
 
 
@@ -414,8 +415,8 @@ namespace TAO
          *    1. Call AttemptPeerBestChainRecovery when hashPeerBest is a known
          *       foreign tip (may queue one locator LIST + TxResponseWindow on
          *       pnode).
-         *    2. If step 1 was SKIPPED (not FETCH_QUEUED / FETCH_THROTTLED /
-         *       PROGRESS), queue the same locator LIST on pnode as a fallback
+         *    2. If step 1 was SKIPPED (not a queued, throttled, pending missing-tx,
+         *       or progressed recovery), queue the same locator LIST on pnode as a fallback
          *       gated by ShouldSendBranchSyncRequest (stop hash = hashPeerBest
          *       if non-zero, else hashBlock).
          *

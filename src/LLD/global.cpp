@@ -606,7 +606,7 @@ namespace LLD
             return false;
 
         const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-        if(fMemoryOnly != fTxnMemoryOnly)
+        if(fMemoryOnly != fTxnMemoryOnly || (fMemoryOnly && nFlags != nTxnOwnerFlags))
         {
             debug::error(FUNCTION, "transaction mode does not match current owner");
             TxnAbort(nTxnOwnerFlags, nTxnOwnerInstances);

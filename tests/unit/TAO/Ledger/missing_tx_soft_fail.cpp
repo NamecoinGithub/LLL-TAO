@@ -1431,7 +1431,7 @@ TEST_CASE("Connectable incomplete orphan is retained and later redelivery drains
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashB, 212, "unit-test", nullptr);
 
-    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 
@@ -1490,17 +1490,77 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     REQUIRE(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
 
-    LLP::TritiumNode node;
+    class RecoveryNode : public LLP::TritiumNode
+    {
+    public:
+        bool fRejectSend = false;
+        uint64_t GetMaxSendBuffer() const override
+        {
+            return fRejectSend ? 0 : LLP::TritiumNode::GetMaxSendBuffer();
+        }
+    } node;
     node.fd = fds[1];
     node.events = POLLIN;
+    node.nLastPing = runtime::unifiedtimestamp();
 
-    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
-        hashB, 214, "unit-test", &node);
+    const int nCaller = GENERATE(0, 1, 2);
+    uint64_t nExistingWindow = 0;
+    SECTION("Idle peer receives the immediate GET")
+    {
+    }
+    SECTION("In-flight LIST is preserved until it completes")
+    {
+        nExistingWindow = node.OpenTxResponseWindow(LLP::TxResponseKind::LIST, hashRoot, hashB);
+    }
+    SECTION("Unrelated in-flight GET is preserved until it completes")
+    {
+        nExistingWindow = node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashRoot);
+    }
+    SECTION("Full send buffer retains the GET for retry")
+    {
+        node.fRejectSend = true;
+    }
 
-    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    const auto recover = [&]()
+    {
+        bool fBranchSyncQueued = true;
+        const uint32_t nPeerHeight = std::max(uint32_t(214), TAO::Ledger::ChainState::nBestHeight.load());
+        if(nCaller == 0)
+            REQUIRE(TAO::Ledger::AttemptPeerBestChainRecovery(
+                hashB, nPeerHeight, "unit-test", &node, &fBranchSyncQueued)
+                == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
+        else if(nCaller == 1)
+            REQUIRE_FALSE(TAO::Ledger::RequestBestChainBranchRecovery(
+                hashB, nPeerHeight, "unit-test", &node, &fBranchSyncQueued));
+        else
+            REQUIRE_FALSE(TAO::Ledger::RequestMissingTxBranchRecovery(
+                hashB, hashA, nPeerHeight, "unit-test", &node, &fBranchSyncQueued));
+
+        REQUIRE_FALSE(fBranchSyncQueued);
+    };
+    recover();
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 
+    if(nExistingWindow != 0 || node.fRejectSend)
+    {
+        node.Event(LLP::EVENTS::GENERIC);
+        REQUIRE(node.Buffered() == 0);
+        uint8_t byte = 0;
+        REQUIRE(recv(fds[0], &byte, 1, MSG_DONTWAIT) < 0);
+
+        if(nExistingWindow != 0)
+        {
+            node.CloseTxResponseWindowForBlock(hashA);
+            REQUIRE(node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashA, 0, true) == 0);
+            node.RollbackTxResponseWindow(nExistingWindow);
+        }
+
+        node.fRejectSend = false;
+        node.Event(LLP::EVENTS::GENERIC);
+    }
+
+    node.Event(LLP::EVENTS::GENERIC);
     while(node.Buffered() > 0)
     {
         if(node.Flush() <= 0)
@@ -1529,6 +1589,9 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
 
     REQUIRE(vSent == vExpectedGet);
 
+    node.CloseTxResponseWindowForBlock(hashA);
+    REQUIRE(node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashRoot, 0, true) != 0);
+
     node.fd = -1;
     close(fds[0]);
     close(fds[1]);
@@ -1537,7 +1600,7 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashB, 214, "unit-test", &node);
 
-    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 #endif
@@ -1965,11 +2028,7 @@ TEST_CASE("AttemptPeerBestChainRecovery backs off when local best makes no progr
 {
     LedgerGuard env;
 
-    TAO::Ledger::mapOrphans.Clear();
-    TAO::Ledger::mapLastOrphanRequest.clear();
-    TAO::Ledger::mapLastMissing.clear();
-    TAO::Ledger::mapLastMissingProcessTime.clear();
-    TAO::Ledger::setUnrecoverableBlocks.clear();
+    TAO::Ledger::PurgeOrphanRecoveryState("unit-test-bestchain-backoff");
 
     const uint1024_t hashFarTip(0xA100000000000110ULL);
     REQUIRE_FALSE(LLD::Ledger->HasBlock(hashFarTip));
@@ -1983,6 +2042,37 @@ TEST_CASE("AttemptPeerBestChainRecovery backs off when local best makes no progr
     LLP::TritiumNode node;
     node.fd     = fds[1];
     node.events = POLLIN;
+
+    SECTION("Queued request starts backoff")
+    {
+    }
+    SECTION("Branch throttle rejection does not start backoff")
+    {
+        REQUIRE(TAO::Ledger::ShouldSendBranchSyncRequest(hashFarTip));
+        bool fQueued = true;
+        REQUIRE(TAO::Ledger::AttemptPeerBestChainRecovery(
+            hashFarTip, 9999, "unit-test-bestchain-branch-throttled", &node, &fQueued)
+            == TAO::Ledger::PeerBestRecoveryResult::FETCH_THROTTLED);
+        REQUIRE_FALSE(fQueued);
+        TAO::Ledger::mapLastOrphanRequest.clear();
+    }
+    SECTION("Failed queue does not start backoff on a usable connection")
+    {
+        class FullBufferNode : public LLP::TritiumNode
+        {
+        public:
+            uint64_t GetMaxSendBuffer() const override { return 0; }
+        } fullNode;
+
+        bool fQueued = true;
+        REQUIRE(TAO::Ledger::AttemptPeerBestChainRecovery(
+            hashFarTip, 9999, "unit-test-bestchain-queue-failed", &fullNode, &fQueued)
+            == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
+        REQUIRE_FALSE(fQueued);
+        REQUIRE(fullNode.Buffered() == 0);
+        REQUIRE(fullNode.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashFarTip, 0, true) != 0);
+        TAO::Ledger::mapLastOrphanRequest.clear();
+    }
 
     bool fQueued1 = false;
     const auto result1 = TAO::Ledger::AttemptPeerBestChainRecovery(
@@ -2054,11 +2144,12 @@ TEST_CASE("AttemptPeerBestChainRecovery backs off when local best makes no progr
     bool fQueued2 = true;
     const auto result2 = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashFarTip, /*nPeerHeight=*/9999, "unit-test-bestchain-backoff-2", &node, &fQueued2);
-    REQUIRE(result2 == TAO::Ledger::PeerBestRecoveryResult::FETCH_THROTTLED);
+    REQUIRE(result2 == (fQueued1 ? TAO::Ledger::PeerBestRecoveryResult::FETCH_THROTTLED
+                               : TAO::Ledger::PeerBestRecoveryResult::SKIPPED));
     REQUIRE_FALSE(fQueued2);
 #endif
 
-    TAO::Ledger::mapLastOrphanRequest.clear();
+    TAO::Ledger::PurgeOrphanRecoveryState("unit-test-bestchain-backoff-cleanup");
 }
 
 

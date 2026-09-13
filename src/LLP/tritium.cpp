@@ -383,6 +383,8 @@ namespace LLP
                     return;
                 }
 
+                RequestMissingTransactions();
+
                 /* Handle sending the pings to remote node.. */
                 if(nCurrentSession != 0 && nLastPing + 15 < runtime::unifiedtimestamp())
                 {
@@ -626,6 +628,7 @@ namespace LLP
                      * any diagnostic log message. */
                     {
                         LOCK(m_txRespWindowMutex);
+                        m_hashPendingMissingTransactions = 0;
                         if(m_txRespWindow.IsActive())
                         {
                             debug::log(2, NODE, "tx-response-window closed: disconnect",
@@ -4476,7 +4479,8 @@ namespace LLP
     /* Open a bounded SPECIFIER::TRANSACTIONS response window on this peer. */
     uint64_t TritiumNode::OpenTxResponseWindow(const TxResponseKind eKind,
                                                const uint1024_t& hashTarget,
-                                               const uint1024_t& hashStop)
+                                               const uint1024_t& hashStop,
+                                               const bool fPreserveExisting)
     {
         const uint64_t nNow   = runtime::timestamp();
         const uint64_t nTTL   = (eKind == TxResponseKind::LIST)
@@ -4488,6 +4492,10 @@ namespace LLP
 
         uint64_t nRequestId = 0;
         { LOCK(m_txRespWindowMutex);
+            if(fPreserveExisting && m_txRespWindow.IsActive()
+            && !m_txRespWindow.IsExpired(nNow) && !m_txRespWindow.IsBudgetExhausted())
+                return 0;
+
             nRequestId = m_txRespWindow.Open(eKind, nNow, nTTL, nMaxTx, hashTarget, hashStop);
         }
 
@@ -4528,6 +4536,53 @@ namespace LLP
                 " target=", m_txRespWindow.hashTarget.SubString(),
                 " tx_count=", m_txRespWindow.nTxCount,
                 " session=", nCurrentSession);
+        }
+    }
+
+
+    /* Retry deferred missing transactions without disturbing an in-flight response. */
+    void TritiumNode::RequestMissingTransactions(const uint1024_t& hashMissing)
+    {
+        uint1024_t hashPending;
+        { LOCK(m_txRespWindowMutex);
+            if(hashMissing != 0)
+                m_hashPendingMissingTransactions = hashMissing;
+            hashPending = m_hashPendingMissingTransactions;
+        }
+
+        if(hashPending == 0 || config::fClient.load())
+            return;
+
+        uint64_t nWindowRequest = 0;
+        try
+        {
+            nWindowRequest = OpenTxResponseWindow(TxResponseKind::GET, hashPending, 0, true);
+            if(nWindowRequest == 0)
+                return;
+
+            if(!PushMessage(ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS),
+                uint8_t(TYPES::BLOCK), hashPending))
+            {
+                RollbackTxResponseWindow(nWindowRequest);
+                return;
+            }
+
+            { LOCK(m_txRespWindowMutex);
+                if(m_hashPendingMissingTransactions == hashPending)
+                    m_hashPendingMissingTransactions = 0;
+            }
+        }
+        catch(const std::exception& e)
+        {
+            if(nWindowRequest != 0)
+                RollbackTxResponseWindow(nWindowRequest);
+            debug::error(FUNCTION, e.what());
+        }
+        catch(...)
+        {
+            if(nWindowRequest != 0)
+                RollbackTxResponseWindow(nWindowRequest);
+            throw;
         }
     }
 
