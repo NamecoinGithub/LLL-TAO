@@ -179,6 +179,183 @@ namespace TAO
             return std::min(100.0, (100.0 * nBlocks) / nTotals);
         }
 
+        namespace
+        {
+#ifdef UNIT_TESTS
+            static std::function<bool(const BlockState&)> fnCheckpointRepairSetBestHook;
+#endif
+
+            bool VerifyCheckpointRollbackPath(const BlockState& stateBest,
+                                              const BlockState& stateTarget,
+                                              uint32_t& nRollbackDepth)
+            {
+                nRollbackDepth = 0;
+
+                if(stateTarget.IsNull())
+                    return debug::error(FUNCTION, "checkpoint rollback preflight failed: target is null");
+
+                BlockState stateWalk = stateBest;
+                uint1024_t hashWalk = stateWalk.GetHash();
+                const uint1024_t hashTarget = stateTarget.GetHash();
+                if(hashWalk == hashTarget)
+                    return true;
+
+                while(hashWalk != hashTarget)
+                {
+                    if(stateWalk.hashPrevBlock == 0)
+                    {
+                        return debug::error(FUNCTION,
+                            "checkpoint rollback preflight failed: reached genesis before target hash ",
+                            hashTarget.SubString(), " after ", nRollbackDepth, " steps");
+                    }
+
+                    BlockState statePrev;
+                    if(!LLD::Ledger->ReadBlock(stateWalk.hashPrevBlock, statePrev))
+                    {
+                        return debug::error(FUNCTION,
+                            "checkpoint rollback preflight failed: missing ancestor block ",
+                            stateWalk.hashPrevBlock.SubString(), " while walking back from height ",
+                            stateWalk.nHeight, " hash ", hashWalk.SubString());
+                    }
+
+                    const uint1024_t hashPrev = statePrev.GetHash();
+                    if(statePrev.hashNextBlock != hashWalk)
+                    {
+                        return debug::error(FUNCTION,
+                            "checkpoint rollback preflight failed: broken link at height ",
+                            statePrev.nHeight, " hash ", hashPrev.SubString(), " expected next ",
+                            hashWalk.SubString(), " but found ", statePrev.hashNextBlock.SubString());
+                    }
+
+                    if(stateWalk.nHeight == 0 || statePrev.nHeight + 1 != stateWalk.nHeight)
+                    {
+                        return debug::error(FUNCTION,
+                            "checkpoint rollback preflight failed: non-contiguous heights current=",
+                            stateWalk.nHeight, " prev=", statePrev.nHeight, " at hash ",
+                            hashWalk.SubString());
+                    }
+
+                    stateWalk = statePrev;
+                    hashWalk = hashPrev;
+                    ++nRollbackDepth;
+                }
+
+                return true;
+            }
+
+
+            bool RecoverMissingHardcodedCheckpoint(const std::map<uint32_t, uint1024_t>& mapCheckpointList,
+                                                   const bool fAllowRepair)
+            {
+                for(auto it = mapCheckpointList.rbegin(); it != mapCheckpointList.rend(); ++it)
+                {
+                    /* Check that we are within correct height ranges. */
+                    if(it->first > ChainState::tStateBest.load().nHeight)
+                        continue;
+
+                    /* Load the hardcoded checkpoint from disk. */
+                    BlockState stateCheck;
+                    if(LLD::Ledger->ReadBlock(it->second, stateCheck))
+                    {
+                        if(stateCheck.nHeight != it->first)
+                        {
+                            return debug::error(FUNCTION,
+                                "hardcoded checkpoint mismatch at height ", it->first, " hash ",
+                                it->second.SubString(), " read height ", stateCheck.nHeight,
+                                ". Back up data directory and run -reindex or restore a trusted snapshot.");
+                        }
+
+                        continue;
+                    }
+
+                    debug::error(FUNCTION,
+                        "missing hardcoded checkpoint record at height ", it->first, " hash ",
+                        it->second.SubString(), ". No rollback will be attempted by default.");
+
+                    /* Find nearest ancestry block. */
+                    auto iAncestor = it;
+                    ++iAncestor;
+                    if(iAncestor == mapCheckpointList.rend())
+                    {
+                        return debug::error(FUNCTION,
+                            "missing earliest applicable hardcoded checkpoint record. Back up data directory and "
+                            "restore from backup, run -reindex, or rebuild from a trusted snapshot.");
+                    }
+
+                    BlockState stateAncestor;
+                    if(!LLD::Ledger->ReadBlock(iAncestor->second, stateAncestor))
+                    {
+                        return debug::error(FUNCTION,
+                            "missing fallback hardcoded checkpoint record at height ", iAncestor->first, " hash ",
+                            iAncestor->second.SubString(), ". Back up data directory and restore from backup, run "
+                            "-reindex, or rebuild from a trusted snapshot.");
+                    }
+
+                    if(stateAncestor.nHeight != iAncestor->first)
+                    {
+                        return debug::error(FUNCTION,
+                            "fallback hardcoded checkpoint mismatch at height ", iAncestor->first, " hash ",
+                            iAncestor->second.SubString(), " read height ", stateAncestor.nHeight,
+                            ". Back up data directory and run -reindex or restore a trusted snapshot.");
+                    }
+
+                    uint32_t nRollbackDepth = 0;
+                    if(!VerifyCheckpointRollbackPath(ChainState::tStateBest.load(), stateAncestor, nRollbackDepth))
+                    {
+                        return debug::error(FUNCTION,
+                            "unable to prove a complete linked rollback path from current best height ",
+                            ChainState::tStateBest.load().nHeight, " hash ",
+                            ChainState::tStateBest.load().GetHash().SubString(), " to hardcoded ancestor height ",
+                            iAncestor->first, " hash ", iAncestor->second.SubString(),
+                            ". No mutation performed. Back up data directory and restore from backup, run -reindex, "
+                            "or rebuild from a trusted snapshot.");
+                    }
+
+                    debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
+                        " hardcoded checkpoint repair candidate depth=", nRollbackDepth,
+                        " targetHeight=", iAncestor->first, " targetHash=", iAncestor->second.SubString());
+
+                    if(!fAllowRepair)
+                    {
+                        return debug::error(FUNCTION,
+                            "destructive hardcoded checkpoint rollback is disabled by default. Restart with "
+                            "-repaircheckpoints=1 only after backing up the data directory.");
+                    }
+
+                    debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
+                        " REPAIRING TO HARDCODED Ancestor ", iAncestor->first, " Hash ",
+                        iAncestor->second.SubString(), " Depth ", nRollbackDepth);
+
+                    /* Set the best to older block. */
+                    LLD::TransactionGuard transaction;
+                    if(!transaction)
+                        return debug::error(FUNCTION, "failed to begin checkpoint revert transaction");
+
+                    bool fSetBest = false;
+#ifdef UNIT_TESTS
+                    if(fnCheckpointRepairSetBestHook)
+                        fSetBest = fnCheckpointRepairSetBestHook(stateAncestor);
+                    else
+#endif
+                        fSetBest = stateAncestor.SetBest();
+                    if(!fSetBest)
+                    {
+                        LLD::TxnAbort();
+                        return debug::error(FUNCTION, "failed to revert to hardcoded ancestor checkpoint");
+                    }
+                    else if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
+                    {
+                        return debug::error(FUNCTION,
+                            "disk commit failed after reverting to hardcoded ancestor checkpoint");
+                    }
+
+                    break;
+                }
+
+                return true;
+            }
+        }
+
 
         /* Initialize the Chain State. */
         bool ChainState::Initialize()
@@ -223,54 +400,8 @@ namespace TAO
             /* Reverse iterator to find the most recent common ancestor. Skip if not on mainnet*/
             if(!config::fHybrid.load() && !config::fTestNet.load() && !config::fClient.load())
             {
-                BlockState stateFork;
-                for(auto it = mapCheckpoints.rbegin(); it != mapCheckpoints.rend(); ++it)
-                {
-                    /* Check that we are within correct height ranges. */
-                    if(it->first > tStateBest.load().nHeight)
-                        continue;
-
-                    /* Load the block from disk. */
-                    BlockState stateCheck;
-                    if(!LLD::Ledger->ReadBlock(it->second, stateCheck))
-                    {
-                        /* Find nearest ancestory block. */
-                        auto iAncestor = it;
-                        iAncestor++;
-
-                        /* Find the most common ancestor. */
-                        BlockState stateAncestor;
-                        if(LLD::Ledger->ReadBlock(iAncestor->second, stateAncestor))
-                        {
-                            /* Debug output if ancestor was found. */
-                            debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
-                                " REVERTING TO HARDCODED Ancestor ", iAncestor->first, " Hash ", iAncestor->second.SubString());
-
-                            /* Set the best to older block. */
-                            LLD::TransactionGuard transaction;
-                            if(!transaction)
-                                return debug::error(FUNCTION, "failed to begin checkpoint revert transaction");
-
-                            /* Bug fix (call site #4): check return value before committing.
-                             * A failed SetBest() must abort the transaction to avoid committing
-                             * partial / inconsistent disk writes. */
-                            if(!stateAncestor.SetBest())
-                            {
-                                LLD::TxnAbort();
-                                return debug::error(FUNCTION,
-                                    "failed to revert to hardcoded ancestor checkpoint");
-                            }
-                            /* SetBest() commits the transaction internally when it succeeds.
-                             * Guard with HasOpenTransaction() so that the now-closed outer
-                             * transaction is not misreported as a commit failure. */
-                            else if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
-                                return debug::error(FUNCTION,
-                                    "disk commit failed after reverting to hardcoded ancestor checkpoint");
-
-                            break;
-                        }
-                    }
-                }
+                if(!RecoverMissingHardcodedCheckpoint(mapCheckpoints, config::GetBoolArg("-repaircheckpoints", false)))
+                    return false;
             }
 
             /* Rewind the chain a total number of blocks. */
@@ -496,6 +627,21 @@ namespace TAO
 
             return true;
         }
+
+
+#ifdef UNIT_TESTS
+        bool ChainState::RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
+                                                                const bool fAllowRepair)
+        {
+            return RecoverMissingHardcodedCheckpoint(mapCheckpointsTest, fAllowRepair);
+        }
+
+
+        void ChainState::SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook)
+        {
+            fnCheckpointRepairSetBestHook = fnHook;
+        }
+#endif
 
 
         /* Get the hash of the genesis block. */

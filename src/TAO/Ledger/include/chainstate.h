@@ -21,6 +21,9 @@ ________________________________________________________________________________
 
 #include <Util/include/memory.h>
 
+#include <functional>
+#include <map>
+
 /* Global TAO namespace. */
 namespace TAO
 {
@@ -134,6 +137,20 @@ namespace TAO
              *
              **/
             bool RepairCheckpointIfStale();
+
+#ifdef UNIT_TESTS
+            /** RunHardcodedCheckpointRecoveryForTests
+             *
+             *  Unit-test seam for the startup hardcoded-checkpoint recovery path.
+             *  Executes the same recovery logic used by Initialize() against the
+             *  supplied checkpoint map.
+             *
+             **/
+            bool RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
+                                                        bool fAllowRepair);
+
+            void SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook);
+#endif
 
         }
     }
