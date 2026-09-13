@@ -543,6 +543,38 @@ TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
 }
 
 
+TEST_CASE("LLD::TxnAbort mode mismatch releases coordinator ownership",
+          "[lld][txncommit][coordinator]")
+{
+    LedgerGuard guard;
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+
+    /* Mismatched flags must not strand coordinator ownership. */
+    REQUIRE(LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+
+    /* If ownership leaked, this begin would fail as nested/blocked. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+}
+
+
+TEST_CASE("LLD::TxnCommit mode mismatch aborts owner and releases coordinator",
+          "[lld][txncommit][coordinator]")
+{
+    LedgerGuard guard;
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    /* Mismatched commit mode should fail but still release owner state. */
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+
+    /* If ownership leaked, this begin would fail as nested/blocked. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+}
+
+
 TEST_CASE("LLD::HasOpenTransaction covers every MERKLE database",
           "[lld][txncommit][merkle]")
 {

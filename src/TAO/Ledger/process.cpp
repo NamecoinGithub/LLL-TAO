@@ -49,6 +49,7 @@ namespace TAO
                 mapMissingTxCache.erase(hashBlock);
                 mapLastOrphanRequest.erase(hashBlock);
                 mapLastMissingProcessTime.erase(hashBlock);
+                mapPeerBestNoProgress.erase(hashBlock);
             }
 
 
@@ -61,6 +62,81 @@ namespace TAO
                 mapMissingTxCache.clear();
                 mapLastOrphanRequest.clear();
                 mapLastMissingProcessTime.clear();
+                mapPeerBestNoProgress.clear();
+            }
+
+
+            bool ShouldBackoffPeerBestRecovery(const uint1024_t& hashPeerBest)
+            {
+                LOCK(PROCESSING_MUTEX);
+
+                const uint64_t nNow = runtime::timestamp();
+                const uint1024_t hashLocalBest = ChainState::hashBestChain.load();
+                const uint32_t nLocalHeight = ChainState::nBestHeight.load();
+
+                const auto it = mapPeerBestNoProgress.find(hashPeerBest);
+                if(it != mapPeerBestNoProgress.end()
+                && it->second.hashLocalBest == hashLocalBest
+                && it->second.nLocalHeight == nLocalHeight
+                && (nNow - it->second.nLastRequest) < PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS)
+                    return true;
+
+                if(!mapPeerBestNoProgress.count(hashPeerBest)
+                && mapPeerBestNoProgress.size() >= MAX_PEER_BEST_NO_PROGRESS_ENTRIES)
+                    mapPeerBestNoProgress.clear();
+
+                auto& state = mapPeerBestNoProgress[hashPeerBest];
+                state.hashLocalBest = hashLocalBest;
+                state.nLocalHeight = nLocalHeight;
+                state.nLastRequest = nNow;
+                return false;
+            }
+
+
+            void RequestMissingTransactionsForBlock(const uint1024_t& hashMissing,
+                                                    LLP::TritiumNode* pnode)
+            {
+                if(hashMissing == 0 || config::fClient.load())
+                    return;
+
+                LLP::TritiumNode* pSend = pnode;
+                std::shared_ptr<LLP::TritiumNode> pRandom;
+                if(!pSend && LLP::TRITIUM_SERVER)
+                {
+                    pRandom = LLP::TRITIUM_SERVER->RandomConnection();
+                    pSend = pRandom.get();
+                }
+
+                if(!pSend)
+                    return;
+
+                try
+                {
+                    const uint64_t nWindowRequest =
+                        pSend->OpenTxResponseWindow(LLP::TxResponseKind::GET, hashMissing);
+
+                    try
+                    {
+                        if(!pSend->PushMessage(LLP::TritiumNode::ACTION::GET,
+                            uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+                            uint8_t(LLP::TritiumNode::TYPES::BLOCK),
+                            hashMissing))
+                        {
+                            if(nWindowRequest != 0)
+                                pSend->RollbackTxResponseWindow(nWindowRequest);
+                        }
+                    }
+                    catch(...)
+                    {
+                        if(nWindowRequest != 0)
+                            pSend->RollbackTxResponseWindow(nWindowRequest);
+                        throw;
+                    }
+                }
+                catch(const std::exception& e)
+                {
+                    debug::error(FUNCTION, e.what());
+                }
             }
         }
 
@@ -226,6 +302,20 @@ namespace TAO
          * path so PROCESSING_MUTEX is not taken dozens of times per second
          * per peer for the same stuck block. */
         std::map<uint1024_t, uint64_t> mapLastMissingProcessTime;
+
+        struct PeerBestNoProgressState
+        {
+            uint1024_t hashLocalBest = 0;
+            uint32_t nLocalHeight = 0;
+            uint64_t nLastRequest = 0;
+        };
+
+        /* Additional guard against repeated far-gap BESTCHAIN recovery traffic
+         * when local chain state has not advanced between attempts. */
+        std::map<uint1024_t, PeerBestNoProgressState> mapPeerBestNoProgress;
+
+        static const uint64_t PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS = 15;
+        static const uint64_t MAX_PEER_BEST_NO_PROGRESS_ENTRIES = 10000;
 
 
         /* Hard terminal blacklist for blocks that have exhausted all
@@ -751,6 +841,8 @@ namespace TAO
 
                     uint8_t nStatus = 0;
                     Process(*pConnectable, nStatus, pnode, false);
+                    const uint1024_t hashImmediateMissing =
+                        ((nStatus & PROCESS::INCOMPLETE) ? pConnectable->hashMissing : uint1024_t(0));
 
                     const bool fProgress = (nStatus & PROCESS::ACCEPTED) != 0;
                     {
@@ -762,6 +854,9 @@ namespace TAO
                         if((nStatus & PROCESS::INCOMPLETE) && pConnectable->hashMissing != 0)
                             mapLastMissingProcessTime.erase(pConnectable->hashMissing);
                     }
+
+                    if(hashImmediateMissing != 0)
+                        RequestMissingTransactionsForBlock(hashImmediateMissing, pnode);
 
                     if(fProgress)
                     {
@@ -814,6 +909,9 @@ namespace TAO
                  * present, hashDeepestAncestor still defaults to hashPeerBest. */
                 if(!pSend)
                     return PeerBestRecoveryResult::SKIPPED;
+
+                if(ShouldBackoffPeerBestRecovery(hashPeerBest))
+                    return PeerBestRecoveryResult::FETCH_THROTTLED;
 
                 if(!ShouldSendBranchSyncRequest(hashDeepestAncestor))
                     return PeerBestRecoveryResult::FETCH_THROTTLED;
