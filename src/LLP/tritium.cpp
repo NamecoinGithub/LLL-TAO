@@ -4476,7 +4476,8 @@ namespace LLP
     /* Open a bounded SPECIFIER::TRANSACTIONS response window on this peer. */
     uint64_t TritiumNode::OpenTxResponseWindow(const TxResponseKind eKind,
                                                const uint1024_t& hashTarget,
-                                               const uint1024_t& hashStop)
+                                               const uint1024_t& hashStop,
+                                               const bool fPreserveExisting)
     {
         const uint64_t nNow   = runtime::timestamp();
         const uint64_t nTTL   = (eKind == TxResponseKind::LIST)
@@ -4488,6 +4489,10 @@ namespace LLP
 
         uint64_t nRequestId = 0;
         { LOCK(m_txRespWindowMutex);
+            if(fPreserveExisting && m_txRespWindow.IsActive()
+            && !m_txRespWindow.IsExpired(nNow) && !m_txRespWindow.IsBudgetExhausted())
+                return 0;
+
             nRequestId = m_txRespWindow.Open(eKind, nNow, nTTL, nMaxTx, hashTarget, hashStop);
         }
 

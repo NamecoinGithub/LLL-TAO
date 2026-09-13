@@ -87,11 +87,18 @@ namespace TAO
                 const uint32_t nLocalHeight = ChainState::nBestHeight.load();
 
                 const auto it = mapPeerBestNoProgress.find(hashPeerBest);
-                if(it != mapPeerBestNoProgress.end()
+                return it != mapPeerBestNoProgress.end()
                 && it->second.hashLocalBest == hashLocalBest
                 && it->second.nLocalHeight == nLocalHeight
-                && (nNow - it->second.nLastRequest) < PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS)
-                    return true;
+                && (nNow - it->second.nLastRequest) < PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS;
+            }
+
+
+            void RecordPeerBestRecoveryRequest(const uint1024_t& hashPeerBest,
+                                              const uint1024_t& hashLocalBest,
+                                              const uint32_t nLocalHeight)
+            {
+                LOCK(PROCESSING_MUTEX);
 
                 if(!mapPeerBestNoProgress.count(hashPeerBest)
                 && mapPeerBestNoProgress.size() >= MAX_PEER_BEST_NO_PROGRESS_ENTRIES)
@@ -100,8 +107,7 @@ namespace TAO
                 auto& state = mapPeerBestNoProgress[hashPeerBest];
                 state.hashLocalBest = hashLocalBest;
                 state.nLocalHeight = nLocalHeight;
-                state.nLastRequest = nNow;
-                return false;
+                state.nLastRequest = runtime::timestamp();
             }
 
 
@@ -124,8 +130,22 @@ namespace TAO
 
                 try
                 {
-                    const uint64_t nWindowRequest =
-                        pSend->OpenTxResponseWindow(LLP::TxResponseKind::GET, hashMissing);
+                    uint64_t nWindowRequest =
+                        pSend->OpenTxResponseWindow(LLP::TxResponseKind::GET, hashMissing, 0, true);
+                    if(nWindowRequest == 0 && LLP::TRITIUM_SERVER)
+                    {
+                        pRandom = LLP::TRITIUM_SERVER->RandomConnection();
+                        if(pRandom && pRandom.get() != pSend)
+                        {
+                            pSend = pRandom.get();
+                            nWindowRequest = pSend->OpenTxResponseWindow(
+                                LLP::TxResponseKind::GET, hashMissing, 0, true);
+                        }
+                    }
+
+                    /* Leave in-flight responses intact if no idle helper is available. */
+                    if(nWindowRequest == 0)
+                        return;
 
                     try
                     {
@@ -865,7 +885,9 @@ namespace TAO
                         return PeerBestRecoveryResult::PROGRESS;
                     }
 
-                    return PeerBestRecoveryResult::SKIPPED;
+                    return hashImmediateMissing != 0
+                        ? PeerBestRecoveryResult::MISSING_TX_PENDING
+                        : PeerBestRecoveryResult::SKIPPED;
                 }
 
                 /* Active fetch path for both:
@@ -921,6 +943,7 @@ namespace TAO
                 try
                 {
                     const uint1024_t hashTarget = TAO::Ledger::ChainState::hashBestChain.load();
+                    const uint32_t nLocalHeight = TAO::Ledger::ChainState::nBestHeight.load();
                     const uint64_t nWindowRequest = !config::fClient.load()
                         ? pSend->OpenTxResponseWindow(LLP::TxResponseKind::LIST,
                             hashTarget, hashPeerBest)
@@ -941,7 +964,10 @@ namespace TAO
                             pSend->RollbackTxResponseWindow(nWindowRequest);
                     }
                     else
+                    {
                         fPrimaryQueued = true;
+                        RecordPeerBestRecoveryRequest(hashPeerBest, hashTarget, nLocalHeight);
+                    }
                     }
                     catch(...)
                     {
@@ -984,6 +1010,8 @@ namespace TAO
                                         if(nFanoutWindow != 0)
                                             pFanout->RollbackTxResponseWindow(nFanoutWindow);
                                     }
+                                    else if(!fPrimaryQueued)
+                                        RecordPeerBestRecoveryRequest(hashPeerBest, hashTarget, nLocalHeight);
                                 }
                                 catch(...)
                                 {
@@ -1089,6 +1117,7 @@ namespace TAO
                         break;
 
                     case PeerBestRecoveryResult::FETCH_THROTTLED:
+                    case PeerBestRecoveryResult::MISSING_TX_PENDING:
                         fAllowFallback = false;
                         break;
 
@@ -1242,8 +1271,9 @@ namespace TAO
 
                     case PeerBestRecoveryResult::FETCH_QUEUED:
                     case PeerBestRecoveryResult::FETCH_THROTTLED:
+                    case PeerBestRecoveryResult::MISSING_TX_PENDING:
                         /* Coordinator already owns (or deliberately suppressed)
-                         * the LIST — do not second-guess with fallback. */
+                         * recovery — do not second-guess with fallback. */
                         fAllowFallback = false;
                         break;
 

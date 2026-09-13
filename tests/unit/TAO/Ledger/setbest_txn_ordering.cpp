@@ -575,6 +575,44 @@ TEST_CASE("LLD::TxnCommit mode mismatch aborts owner and releases coordinator",
 }
 
 
+TEST_CASE("LLD::TxnCommit MEMPOOL requires the owner's exact memory mode",
+          "[lld][txncommit][coordinator]")
+{
+    ContractGuard guard;
+    uint8_t nOwnerFlags = TAO::Ledger::FLAGS::MEMPOOL;
+    SECTION("MINER owner is aborted") { nOwnerFlags = TAO::Ledger::FLAGS::MINER; }
+    SECTION("SANITIZE owner is aborted") { nOwnerFlags = TAO::Ledger::FLAGS::SANITIZE; }
+    SECTION("MEMPOOL owner is committed") {}
+
+    const auto key = std::make_pair(uint512_t(0x74786e6d6f6465), uint32_t(1));
+    const uint256_t hashCaller(42);
+    const bool fMatchingMode = (nOwnerFlags == TAO::Ledger::FLAGS::MEMPOOL);
+    uint256_t hashRead;
+
+    LLD::TransactionGuard owner(nOwnerFlags, LLD::INSTANCES::CONTRACT);
+    REQUIRE(owner);
+    REQUIRE(LLD::Contract->WriteContract(key, hashCaller, nOwnerFlags));
+    REQUIRE(LLD::Contract->ReadContract(key, hashRead, nOwnerFlags));
+    REQUIRE(hashRead == hashCaller);
+
+    const bool fCommitted =
+        LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::CONTRACT);
+    const bool fOwnerVisible = LLD::Contract->ReadContract(key, hashRead, nOwnerFlags);
+    const bool fMempoolVisible =
+        LLD::Contract->ReadContract(key, hashRead, TAO::Ledger::FLAGS::MEMPOOL);
+    LLD::Contract->EraseContract(key, TAO::Ledger::FLAGS::MEMPOOL);
+
+    CHECK(fCommitted == fMatchingMode);
+    CHECK(fOwnerVisible == fMatchingMode);
+    CHECK(fMempoolVisible == fMatchingMode);
+    CHECK_FALSE(LLD::Contract->ReadContract(key, hashRead, TAO::Ledger::FLAGS::BLOCK));
+
+    LLD::TransactionGuard next(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::CONTRACT);
+    REQUIRE(next);
+    REQUIRE(LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::CONTRACT));
+}
+
+
 TEST_CASE("LLD::HasOpenTransaction covers every MERKLE database",
           "[lld][txncommit][merkle]")
 {

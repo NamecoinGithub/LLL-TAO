@@ -822,7 +822,8 @@ namespace LLP
          *  block response.  Called immediately before queueing the corresponding
          *  ACTION::GET or ACTION::LIST request to this peer.
          *
-         *  Any previously active window on this peer is replaced.
+         *  Any previously active window on this peer is replaced unless preservation
+         *  is requested, in which case a live window prevents opening a new one.
          *
          *  Thread-safe: may be called from another connection's DataThread (for
          *  example when a random helper peer is selected to serve a missing-tx
@@ -831,10 +832,12 @@ namespace LLP
          *  @param[in] eKind       GET (single-block recovery) or LIST (branch recovery).
          *  @param[in] hashTarget  GET block hash or LIST locator target.
          *  @param[in] hashStop    LIST stop hash (zero for GET).
+         *  @param[in] fPreserveExisting  Do not replace a live response window.
          *
+         *  @return Request identifier, or zero if a live window was preserved.
          **/
         uint64_t OpenTxResponseWindow(TxResponseKind eKind, const uint1024_t& hashTarget,
-                                      const uint1024_t& hashStop = 0);
+                                      const uint1024_t& hashStop = 0, bool fPreserveExisting = false);
 
         /** Roll back an unqueueable request without cancelling a newer request. **/
         void RollbackTxResponseWindow(uint64_t nRequestId);
