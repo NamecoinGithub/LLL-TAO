@@ -292,6 +292,9 @@ namespace LLP
     {
         /* Free the ssl object. */
         SetSSL(false);
+
+        /* Close the socket to free the fd. */
+        Close();
     }
 
 
