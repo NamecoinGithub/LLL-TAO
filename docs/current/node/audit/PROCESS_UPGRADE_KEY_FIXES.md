@@ -3,7 +3,7 @@
 **Audience:** reviewers, operators, and agents picking up recovery work  
 **Scope:** ledger `Process()` / peer-best recovery / missing-tx escalation / BESTCHAIN coordination from roughly PR **#656** through the **near-tip orphan-pool exclusion**  
 **Living audit:** [NODE_AUDIT_2026-08-10.md](NODE_AUDIT_2026-08-10.md) · [FOOT_GUNS.md](FOOT_GUNS.md) · [RECCES.md](RECCES.md)  
-**Diagrams:** [process-upgrade-series.md](../../../diagrams/audit/process-upgrade-series.md) · [recovery-coordinator-upgrade.md](../../../diagrams/audit/recovery-coordinator-upgrade.md) · [mempool-recovery-coupling.md](../../../diagrams/audit/mempool-recovery-coupling.md) · [PR #697 review hardening](../../../diagrams/audit/pr697-review-hardening.md)
+**Diagrams:** [process-upgrade-series.md](../../../diagrams/audit/process-upgrade-series.md) · [recovery-coordinator-upgrade.md](../../../diagrams/audit/recovery-coordinator-upgrade.md) · [mempool-recovery-coupling.md](../../../diagrams/audit/mempool-recovery-coupling.md) · [PR #697 review hardening](../../../diagrams/audit/pr697-review-hardening.md) · [PR #697 production regression hotfix](../../../diagrams/audit/pr697-production-regression-hotfix.md)
 
 ---
 
@@ -258,3 +258,15 @@ Chooser scoreboard: [NODE_AUDIT_2026-08-10.md](NODE_AUDIT_2026-08-10.md).
 | missing-tx retry / branch escalation warnings | KF-1 escalation path |
 
 If near-tip skip dominates while the node stays one tip behind with orphans present, verify KF-6 (orphan exclusion) is deployed.
+
+---
+
+## 7. Post-PR #697 production regression hotfixes
+
+| | |
+|--|--|
+| **HF-1 — Extracted incomplete orphan immediate tx recovery** | `AttemptPeerBestChainRecovery` now issues an immediate `GET` with `SPECIFIER::TRANSACTIONS` for `hashMissing` when the extracted connectable orphan returns `INCOMPLETE`, instead of waiting for later redelivery. |
+| **HF-2 — Peer-best no-progress backoff** | Repeated far-tip branch recovery requests are backoff-gated when local best hash/height have not advanced between attempts, suppressing repeated LIST churn during stalled states. |
+| **HF-3 — Coordinator lock-release hardening (LLD)** | Early-return mode-mismatch/recovery-required paths now release transaction ownership/coordinator state rather than returning with owner state stranded. |
+
+See: [PR #697 production regression hotfix diagram](../../../diagrams/audit/pr697-production-regression-hotfix.md).
