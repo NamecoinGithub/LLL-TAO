@@ -40,6 +40,18 @@ namespace TAO
     {
         namespace
         {
+            struct PeerBestNoProgressState
+            {
+                uint1024_t hashLocalBest = 0;
+                uint32_t nLocalHeight = 0;
+                uint64_t nLastRequest = 0;
+            };
+
+            std::map<uint1024_t, PeerBestNoProgressState> mapPeerBestNoProgress;
+
+            static const uint64_t PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS = 15;
+            static const uint64_t MAX_PEER_BEST_NO_PROGRESS_ENTRIES = 10000;
+
             void ClearOrphanRecoveryState(const uint1024_t& hashBlock)
             {
                 mapLastMissing.erase(hashBlock);
@@ -302,21 +314,6 @@ namespace TAO
          * path so PROCESSING_MUTEX is not taken dozens of times per second
          * per peer for the same stuck block. */
         std::map<uint1024_t, uint64_t> mapLastMissingProcessTime;
-
-        struct PeerBestNoProgressState
-        {
-            uint1024_t hashLocalBest = 0;
-            uint32_t nLocalHeight = 0;
-            uint64_t nLastRequest = 0;
-        };
-
-        /* Additional guard against repeated far-gap BESTCHAIN recovery traffic
-         * when local chain state has not advanced between attempts. */
-        std::map<uint1024_t, PeerBestNoProgressState> mapPeerBestNoProgress;
-
-        static const uint64_t PEER_BEST_NO_PROGRESS_BACKOFF_SECONDS = 15;
-        static const uint64_t MAX_PEER_BEST_NO_PROGRESS_ENTRIES = 10000;
-
 
         /* Hard terminal blacklist for blocks that have exhausted all
          * branch-recovery paths.  Checked at the top of Process() so an
