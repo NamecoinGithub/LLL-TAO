@@ -21,6 +21,11 @@ ________________________________________________________________________________
 
 #include <Util/include/memory.h>
 
+#ifdef UNIT_TESTS
+#include <functional>
+#include <map>
+#endif
+
 /* Global TAO namespace. */
 namespace TAO
 {
@@ -100,6 +105,15 @@ namespace TAO
              *
              **/
             bool Initialize();
+
+#ifdef UNIT_TESTS
+            /** Run startup checkpoint recovery with a test checkpoint list. **/
+            bool RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
+                                                        bool fAllowRepair);
+
+            /** Override SetBest during checkpoint recovery tests. **/
+            void SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook);
+#endif
 
 
             /** Genesis

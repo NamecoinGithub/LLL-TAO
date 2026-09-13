@@ -33,16 +33,6 @@ namespace TAO
     /* Ledger Layer namespace. */
     namespace Ledger
     {
-#ifdef UNIT_TESTS
-        namespace ChainState
-        {
-            bool RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
-                                                        bool fAllowRepair);
-            void SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook);
-        }
-#endif
-
-
         /* The best block height in the chain. */
         std::atomic<uint32_t> ChainState::nBestHeight;
 
@@ -246,6 +236,13 @@ namespace TAO
                     }
 
                     const uint1024_t hashPrev = statePrev.GetHash();
+                    if(hashPrev != stateWalk.hashPrevBlock)
+                    {
+                        return debug::error(FUNCTION,
+                            "checkpoint rollback preflight failed: ancestor hash mismatch expected ",
+                            stateWalk.hashPrevBlock.SubString(), " but read ", hashPrev.SubString());
+                    }
+
                     if(statePrev.hashNextBlock != hashWalk)
                     {
                         return debug::error(FUNCTION,
