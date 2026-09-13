@@ -63,6 +63,7 @@ ________________________________________________________________________________
 
 
 #include <climits>
+#include <deque>
 #include <memory>
 #include <iomanip>
 #include <bitset>
@@ -76,6 +77,20 @@ namespace LLP
     /* Inventory class to track recent relays with expiring cache. */
     TritiumNode::Inventory TritiumNode::tInventory;
 
+    namespace
+    {
+        struct MissingTransactionRequest
+        {
+            uint1024_t hashBlock;
+            TritiumNode* owner;
+            bool sent = false;
+        };
+
+        /* Keep admitted work until its response arrives, not merely until enqueue.
+         * Window mutexes always precede this mutex; no peer is called while holding it. */
+        std::mutex MISSING_TRANSACTIONS_MUTEX;
+        std::deque<MissingTransactionRequest> vMissingTransactions;
+    }
 
     /* [Option 3] Global cooldown timestamp for the periodic, chain-tip-independent
      * mempool conflict-reconciliation sweep (see EVENTS::GENERIC below). File-scope
@@ -273,6 +288,7 @@ namespace LLP
     /** Default Destructor **/
     TritiumNode::~TritiumNode()
     {
+        ReleaseMissingTransactions();
     }
 
 
@@ -520,6 +536,7 @@ namespace LLP
             /* Once a connection is terminated, this event will be fired off. */
             case EVENTS::DISCONNECT:
             {
+                ReleaseMissingTransactions();
                 /* Track whether to mark as failure or dropped. */
                 uint8_t nState = ConnectState::DROPPED;
 
@@ -619,23 +636,6 @@ namespace LLP
                     {
                         std::lock_guard<std::mutex> lock(STALE_SYNC_WARNING_MUTEX);
                         ResetStaleSyncWarningEvent(mapStaleSyncWarningStates, nCurrentSession);
-                    }
-
-                    /* Close any active SPECIFIER::TRANSACTIONS response window so a
-                     * subsequent reconnection to the same address starts with a clean
-                     * state.  The window is stored per-peer so closing it here is
-                     * safe; we still hold nCurrentSession (non-zero) which aids
-                     * any diagnostic log message. */
-                    {
-                        LOCK(m_txRespWindowMutex);
-                        m_hashPendingMissingTransactions = 0;
-                        if(m_txRespWindow.IsActive())
-                        {
-                            debug::log(2, NODE, "tx-response-window closed: disconnect",
-                                " session=", nCurrentSession,
-                                " tx_count=", m_txRespWindow.nTxCount);
-                            m_txRespWindow.Close();
-                        }
                     }
 
                     /* Reset session value. */
@@ -2630,7 +2630,7 @@ namespace LLP
                                      * served its purpose.  A GET window would already be closed when
                                      * its single block arrived. */
                                     {
-                                        LOCK(m_txRespWindowMutex);
+                                        RECURSIVE(m_txRespWindowMutex);
                                         if(m_txRespWindow.IsActive() && m_txRespWindow.eKind == TxResponseKind::LIST)
                                         {
                                             debug::log(2, NODE, "tx-response-window closed: LASTINDEX received",
@@ -2971,30 +2971,10 @@ namespace LLP
                              * normal per-tx re-request and escalate to full branch recovery. */
                             if(block.hashMissing != 0)
                             {
-                                std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER->RandomConnection();
+                                std::shared_ptr<TritiumNode> pnode = TRITIUM_SERVER
+                                    ? TRITIUM_SERVER->RandomConnection() : nullptr;
                                 if(pnode != nullptr)
-                                {
-                                    try
-                                    {
-                                        const uint64_t nWindowRequest =
-                                            pnode->OpenTxResponseWindow(TxResponseKind::GET, block.hashMissing);
-                                        try
-                                        {
-                                            if(!pnode->PushMessage(ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS),
-                                                uint8_t(TYPES::BLOCK), block.hashMissing))
-                                                pnode->RollbackTxResponseWindow(nWindowRequest);
-                                        }
-                                        catch(...)
-                                        {
-                                            pnode->RollbackTxResponseWindow(nWindowRequest);
-                                            throw;
-                                        }
-                                    }
-                                    catch(const std::exception& e)
-                                    {
-                                        debug::error(FUNCTION, e.what());
-                                    }
-                                }
+                                    pnode->RequestMissingTransactions(block.hashMissing);
                                 else
                                     debug::notice(NODE, "could not find random connection for missing transactions");
                             }
@@ -3058,29 +3038,14 @@ namespace LLP
                                             TAO::Ledger::ChainState::hashBestChain.load();
                                         const uint1024_t hashStop =
                                             hashBestChain != 0 ? hashBestChain : hashBlock;
-                                        const uint64_t nWindowRequest = !config::fClient.load()
-                                            ? OpenTxResponseWindow(TxResponseKind::LIST, hashTarget, hashStop)
-                                            : 0;
-                                        try
-                                        {
-                                        if(!PushMessage(ACTION::LIST,
+                                        PushTxResponseRequest(TxResponseKind::LIST,
+                                            hashTarget, hashStop, false, ACTION::LIST,
                                             config::fClient.load() ? uint8_t(SPECIFIER::CLIENT) : uint8_t(SPECIFIER::TRANSACTIONS),
                                             uint8_t(TYPES::BLOCK),
                                             uint8_t(TYPES::LOCATOR),
                                             TAO::Ledger::Locator(hashTarget),
                                             uint1024_t(hashStop)
-                                        ))
-                                        {
-                                            if(nWindowRequest != 0)
-                                                RollbackTxResponseWindow(nWindowRequest);
-                                        }
-                                        }
-                                        catch(...)
-                                        {
-                                            if(nWindowRequest != 0)
-                                                RollbackTxResponseWindow(nWindowRequest);
-                                            throw;
-                                        }
+                                        );
                                     }
 
                                     break;
@@ -3118,39 +3083,20 @@ namespace LLP
                                     hashBestChain, hashBlock, nCurrentHeight, NODE.c_str(), this);
 
                                 /* 3. Request the full block + inline transactions from
-                                 *    a different random peer whose disk/mempool state
+                                 *    a different live peer whose disk/mempool state
                                  *    may not be affected by the local fork. */
                                 {
-                                    std::shared_ptr<TritiumNode> pRandomNode =
-                                        TRITIUM_SERVER->RandomConnection();
-                                    if(pRandomNode != nullptr)
+                                    if(TRITIUM_SERVER)
                                     {
-                                        try
+                                        for(const auto& pPeer : TRITIUM_SERVER->GetConnections())
                                         {
-                                            const uint64_t nWindowRequest =
-                                                pRandomNode->OpenTxResponseWindow(TxResponseKind::GET, hashBlock);
-                                            try
-                                            {
-                                            if(!pRandomNode->PushMessage(ACTION::GET,
-                                                uint8_t(SPECIFIER::TRANSACTIONS),
-                                                uint8_t(TYPES::BLOCK),
-                                                hashBlock))
-                                                    pRandomNode->RollbackTxResponseWindow(nWindowRequest);
-                                            }
-                                            catch(...)
-                                            {
-                                                pRandomNode->RollbackTxResponseWindow(nWindowRequest);
-                                                throw;
-                                            }
-                                        }
-                                        catch(const std::exception& e)
-                                        {
-                                            debug::error(FUNCTION, e.what());
+                                            if(pPeer && pPeer.get() != this && pPeer->Connected()
+                                            && pPeer->nCurrentSession != 0
+                                            && pPeer->nCurrentSession != nCurrentSession
+                                            && pPeer->RequestMissingTransactions(hashBlock))
+                                                break;
                                         }
                                     }
-                                    else
-                                        debug::notice(NODE,
-                                            "could not find random connection for block recovery re-fetch");
                                 }
 
                                 /* 4. Distribute missing transaction hash requests across
@@ -3437,7 +3383,7 @@ namespace LLP
                 {
                     bool fAuthorizedByWindow = false;
                     {
-                        LOCK(m_txRespWindowMutex);
+                        RECURSIVE(m_txRespWindowMutex);
                         if(m_txRespWindow.IsActive())
                         {
                             const uint64_t nNow = runtime::timestamp();
@@ -4491,7 +4437,7 @@ namespace LLP
             : TX_RESPONSE_WINDOW_GET_MAX_TX;
 
         uint64_t nRequestId = 0;
-        { LOCK(m_txRespWindowMutex);
+        { RECURSIVE(m_txRespWindowMutex);
             if(fPreserveExisting && m_txRespWindow.IsActive()
             && !m_txRespWindow.IsExpired(nNow) && !m_txRespWindow.IsBudgetExhausted())
                 return 0;
@@ -4512,7 +4458,7 @@ namespace LLP
 
     void TritiumNode::RollbackTxResponseWindow(const uint64_t nRequestId)
     {
-        { LOCK(m_txRespWindowMutex);
+        { RECURSIVE(m_txRespWindowMutex);
             if(!LLP::RollbackTxResponseWindow(m_txRespWindow, nRequestId))
                 return;
 
@@ -4526,10 +4472,18 @@ namespace LLP
 
     void TritiumNode::CloseTxResponseWindowForBlock(const uint1024_t& hashBlock)
     {
-        { LOCK(m_txRespWindowMutex);
+        { RECURSIVE(m_txRespWindowMutex);
             if(!IsMatchingTxResponseBlock(m_txRespWindow, hashBlock))
                 return;
 
+            {
+                LOCK(MISSING_TRANSACTIONS_MUTEX);
+                vMissingTransactions.erase(std::remove_if(vMissingTransactions.begin(),
+                    vMissingTransactions.end(), [&](const MissingTransactionRequest& request)
+                    {
+                        return request.owner == this && request.hashBlock == hashBlock;
+                    }), vMissingTransactions.end());
+            }
             m_txRespWindow.Close();
             debug::log(2, NODE, "tx-response-window closed: matching-block received",
                 " request=", m_txRespWindow.nRequestId,
@@ -4540,50 +4494,101 @@ namespace LLP
     }
 
 
-    /* Retry deferred missing transactions without disturbing an in-flight response. */
-    void TritiumNode::RequestMissingTransactions(const uint1024_t& hashMissing)
+    void TritiumNode::ReleaseMissingTransactions()
     {
-        uint1024_t hashPending;
-        { LOCK(m_txRespWindowMutex);
-            if(hashMissing != 0)
-                m_hashPendingMissingTransactions = hashMissing;
-            hashPending = m_hashPendingMissingTransactions;
-        }
-
-        if(hashPending == 0 || config::fClient.load())
-            return;
-
-        uint64_t nWindowRequest = 0;
-        try
+        RECURSIVE(m_txRespWindowMutex);
+        m_fRecoveryDisconnected = true;
+        if(m_txRespWindow.IsActive())
+            debug::log(2, NODE, "tx-response-window closed: disconnect",
+                " session=", nCurrentSession, " tx_count=", m_txRespWindow.nTxCount);
+        m_txRespWindow.Close();
+        LOCK(MISSING_TRANSACTIONS_MUTEX);
+        for(auto& request : vMissingTransactions)
         {
-            nWindowRequest = OpenTxResponseWindow(TxResponseKind::GET, hashPending, 0, true);
-            if(nWindowRequest == 0)
-                return;
-
-            if(!PushMessage(ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS),
-                uint8_t(TYPES::BLOCK), hashPending))
+            if(request.owner == this)
             {
-                RollbackTxResponseWindow(nWindowRequest);
-                return;
+                request.owner = nullptr;
+                request.sent = false;
+            }
+        }
+    }
+
+
+    /* Retry deferred missing transactions without disturbing an in-flight response. */
+    bool TritiumNode::RequestMissingTransactions(const uint1024_t& hashMissing)
+    {
+        RECURSIVE(m_txRespWindowMutex);
+        if(m_fRecoveryDisconnected || !Connected() || config::fClient.load()
+        || nCurrentSession == 0 || nProtocolVersion == 0)
+            return false;
+
+        uint1024_t hashPending = 0;
+        {
+            LOCK(MISSING_TRANSACTIONS_MUTEX);
+            if(hashMissing != 0)
+            {
+                const auto it = std::find_if(vMissingTransactions.begin(), vMissingTransactions.end(),
+                    [&](const MissingTransactionRequest& request)
+                    {
+                        return request.hashBlock == hashMissing
+                            && (request.owner == this || request.owner == nullptr);
+                    });
+                if(it != vMissingTransactions.end())
+                    it->owner = this;
+                else
+                {
+                    if(vMissingTransactions.size() >= MAX_PENDING_MISSING_TRANSACTIONS)
+                        return false;
+                    vMissingTransactions.push_back({hashMissing, this});
+                }
             }
 
-            { LOCK(m_txRespWindowMutex);
-                if(m_hashPendingMissingTransactions == hashPending)
-                    m_hashPendingMissingTransactions = 0;
+            const uint64_t nNow = runtime::timestamp();
+            if(m_txRespWindow.IsActive() && !m_txRespWindow.IsExpired(nNow)
+            && !m_txRespWindow.IsBudgetExhausted())
+                return hashMissing != 0;
+
+            auto it = std::find_if(vMissingTransactions.begin(), vMissingTransactions.end(),
+                [&](const MissingTransactionRequest& request)
+                {
+                    return !request.sent && (request.owner == this || request.owner == nullptr);
+                });
+            if(it == vMissingTransactions.end())
+                it = std::find_if(vMissingTransactions.begin(), vMissingTransactions.end(),
+                    [&](const MissingTransactionRequest& request)
+                    {
+                        return request.owner == this || request.owner == nullptr;
+                    });
+            if(it == vMissingTransactions.end())
+                return false;
+            it->owner = this;
+            hashPending = it->hashBlock;
+        }
+
+        try
+        {
+            if(PushTxResponseRequest(TxResponseKind::GET, hashPending, 0, true,
+                ACTION::GET, uint8_t(SPECIFIER::TRANSACTIONS), uint8_t(TYPES::BLOCK), hashPending))
+            {
+                /* Rotate, but retain in-flight ownership for disconnect/timeout retries. */
+                LOCK(MISSING_TRANSACTIONS_MUTEX);
+                const auto it = std::find_if(vMissingTransactions.begin(), vMissingTransactions.end(),
+                    [&](const MissingTransactionRequest& request)
+                    {
+                        return request.owner == this && request.hashBlock == hashPending;
+                    });
+                if(it != vMissingTransactions.end())
+                {
+                    it->sent = true;
+                    std::rotate(it, std::next(it), vMissingTransactions.end());
+                }
             }
         }
         catch(const std::exception& e)
         {
-            if(nWindowRequest != 0)
-                RollbackTxResponseWindow(nWindowRequest);
             debug::error(FUNCTION, e.what());
         }
-        catch(...)
-        {
-            if(nWindowRequest != 0)
-                RollbackTxResponseWindow(nWindowRequest);
-            throw;
-        }
+        return true;
     }
 
 

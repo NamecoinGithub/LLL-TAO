@@ -17,6 +17,7 @@ ________________________________________________________________________________
 
 #include <LLP/types/tritium.h>
 #include <LLP/include/version.h>
+#include <LLP/include/global.h>
 #include <LLP/templates/socket.h>
 #include <LLP/include/base_address.h>
 
@@ -49,6 +50,8 @@ ________________________________________________________________________________
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <condition_variable>
+#include <future>
 
 #include <unit/catch2/catch.hpp>
 
@@ -57,6 +60,7 @@ ________________________________________________________________________________
 #ifndef WIN32
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
 #endif
@@ -182,7 +186,347 @@ namespace
             return false;
         }
     };
+
+#ifndef WIN32
+    struct RecoverySyncGuard
+    {
+        const bool synchronized = LLP::TritiumNode::fSynchronized.exchange(false);
+        ~RecoverySyncGuard() { LLP::TritiumNode::fSynchronized.store(synchronized); }
+    };
+
+    class RecoverySocketNode : public LLP::TritiumNode
+    {
+    public:
+        int peer = -1;
+        bool reject = false;
+        bool throwOnSend = false;
+        mutable std::mutex mutex;
+        mutable std::condition_variable condition;
+        mutable bool pauseSend = false;
+        mutable bool sending = false;
+        RecoverySyncGuard syncGuard;
+
+        RecoverySocketNode()
+        {
+            int sockets[2];
+            REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+            fd = sockets[0];
+            peer = sockets[1];
+            fCONNECTED = true;
+            nCurrentSession = LLC::GetRand();
+            nProtocolVersion = LLP::MIN_PROTO_VERSION;
+            nLastPing = runtime::unifiedtimestamp();
+        }
+
+        ~RecoverySocketNode()
+        {
+            close(fd);
+            close(peer);
+            fd = -1;
+        }
+
+        uint64_t GetMaxSendBuffer() const override
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            sending = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return !pauseSend; });
+            if(throwOnSend)
+                throw std::runtime_error("recovery test enqueue failure");
+            return reject ? 0 : LLP::TritiumNode::GetMaxSendBuffer();
+        }
+
+        std::vector<uint8_t> Receive()
+        {
+            while(Buffered() > 0)
+                REQUIRE(Flush() > 0);
+            std::vector<uint8_t> received;
+            uint8_t buffer[4096];
+            for(;;)
+            {
+                const auto n = recv(peer, buffer, sizeof(buffer), MSG_DONTWAIT);
+                if(n <= 0)
+                    break;
+                received.insert(received.end(), buffer, buffer + n);
+            }
+            return received;
+        }
+
+        static std::vector<uint8_t> ExpectedGet(const uint1024_t& hash)
+        {
+            DataStream stream(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+            stream << uint8_t(SPECIFIER::TRANSACTIONS) << uint8_t(TYPES::BLOCK) << hash;
+            return NewMessage(ACTION::GET, stream).GetBytes();
+        }
+    };
+#endif
 }
+
+#ifndef WIN32
+TEST_CASE("Missing transaction recovery retains distinct work in FIFO order",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode node;
+    const uint1024_t first(0xCA0101), second(0xCA0102), third(0xCA0103), stop(0xCA0104);
+    const auto window = node.OpenTxResponseWindow(LLP::TxResponseKind::LIST, first, stop);
+    REQUIRE(node.RequestMissingTransactions(first));
+    REQUIRE(node.RequestMissingTransactions(second));
+    REQUIRE(node.RequestMissingTransactions(first));
+    REQUIRE(node.RequestMissingTransactions(third));
+    REQUIRE(node.Receive().empty());
+    node.RollbackTxResponseWindow(window);
+
+    for(const auto& hash : {first, second, third})
+    {
+        REQUIRE(node.RequestMissingTransactions());
+        REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(hash));
+        node.CloseTxResponseWindowForBlock(hash);
+    }
+    REQUIRE_FALSE(node.RequestMissingTransactions());
+    REQUIRE(node.Receive().empty());
+}
+
+TEST_CASE("Missing transaction recovery survives disconnect and refuses a dead owner",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode source, replacement;
+    const uint1024_t first(0xCA0201), second(0xCA0202);
+    SECTION("Queued GET and pending GET are both transferred")
+    {
+        REQUIRE(source.RequestMissingTransactions(first));
+        REQUIRE(source.Receive() == RecoverySocketNode::ExpectedGet(first));
+    }
+    SECTION("Send-buffer backpressure retains work before disconnect")
+    {
+        source.reject = true;
+        REQUIRE(source.RequestMissingTransactions(first));
+        REQUIRE(source.Receive().empty());
+    }
+    REQUIRE(source.RequestMissingTransactions(second));
+    source.Event(LLP::EVENTS::DISCONNECT, LLP::DISCONNECT::FORCE);
+    REQUIRE_FALSE(source.RequestMissingTransactions(uint1024_t(0xCA0203)));
+
+    for(const auto& hash : {first, second})
+    {
+        replacement.Event(LLP::EVENTS::GENERIC);
+        REQUIRE(replacement.Receive() == RecoverySocketNode::ExpectedGet(hash));
+        replacement.CloseTxResponseWindowForBlock(hash);
+    }
+    REQUIRE_FALSE(replacement.RequestMissingTransactions());
+}
+
+TEST_CASE("Missing transaction queue rejects overflow without evicting admitted work",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode node;
+    node.reject = true;
+    for(size_t i = 1; i <= LLP::TritiumNode::MAX_PENDING_MISSING_TRANSACTIONS; ++i)
+        REQUIRE(node.RequestMissingTransactions(uint1024_t(0xCA1000 + i)));
+    REQUIRE_FALSE(node.RequestMissingTransactions(uint1024_t(0xCAFFFF)));
+    REQUIRE(node.RequestMissingTransactions(uint1024_t(0xCA1001)));
+
+    node.reject = false;
+    for(size_t i = 1; i <= LLP::TritiumNode::MAX_PENDING_MISSING_TRANSACTIONS; ++i)
+    {
+        const uint1024_t hash(0xCA1000 + i);
+        REQUIRE(node.RequestMissingTransactions());
+        REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(hash));
+        node.CloseTxResponseWindowForBlock(hash);
+    }
+    REQUIRE_FALSE(node.RequestMissingTransactions());
+}
+
+TEST_CASE("Pre-handshake peers leave disconnected recovery work for initialized peers",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode source, uninitialized, replacement;
+    const uint1024_t hash(0xCA0801);
+    REQUIRE(source.RequestMissingTransactions(hash));
+    REQUIRE(source.Receive() == RecoverySocketNode::ExpectedGet(hash));
+    source.Event(LLP::EVENTS::DISCONNECT, LLP::DISCONNECT::FORCE);
+
+    SECTION("Neither VERSION nor session has been received")
+    {
+        uninitialized.nCurrentSession = 0;
+        uninitialized.nProtocolVersion = 0;
+    }
+    SECTION("Session initialization is incomplete")
+    {
+        uninitialized.nCurrentSession = 0;
+    }
+    SECTION("Protocol initialization is incomplete")
+    {
+        uninitialized.nProtocolVersion = 0;
+    }
+
+    uninitialized.Event(LLP::EVENTS::GENERIC);
+    REQUIRE(uninitialized.Receive().empty());
+    REQUIRE_FALSE(uninitialized.RequestMissingTransactions(hash));
+    replacement.Event(LLP::EVENTS::GENERIC);
+    REQUIRE(replacement.Receive() == RecoverySocketNode::ExpectedGet(hash));
+    replacement.CloseTxResponseWindowForBlock(hash);
+    REQUIRE_FALSE(replacement.RequestMissingTransactions());
+}
+
+TEST_CASE("Destroyed recovery peers leave their requests globally retriable",
+    "[ledger][process][recovery_queue]")
+{
+    const uint1024_t hash(0xCA0701);
+    {
+        RecoverySocketNode source;
+        REQUIRE(source.RequestMissingTransactions(hash));
+        REQUIRE(source.Receive() == RecoverySocketNode::ExpectedGet(hash));
+    }
+    RecoverySocketNode replacement;
+    replacement.Event(LLP::EVENTS::GENERIC);
+    REQUIRE(replacement.Receive() == RecoverySocketNode::ExpectedGet(hash));
+    replacement.CloseTxResponseWindowForBlock(hash);
+    REQUIRE_FALSE(replacement.RequestMissingTransactions());
+}
+
+TEST_CASE("Missing transaction enqueue exceptions roll back and retain ownership",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode node;
+    const uint1024_t hash(0xCA0301);
+    node.throwOnSend = true;
+    REQUIRE(node.RequestMissingTransactions(hash));
+    const auto probe = node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hash, 0, true);
+    REQUIRE(probe != 0);
+    node.RollbackTxResponseWindow(probe);
+    node.throwOnSend = false;
+    REQUIRE(node.RequestMissingTransactions());
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(hash));
+    node.CloseTxResponseWindowForBlock(hash);
+}
+
+TEST_CASE("Missing transaction retry advances queued work after a response window ends",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode node;
+    const uint1024_t first(0xCA0601), second(0xCA0602);
+    REQUIRE(node.RequestMissingTransactions(first));
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(first));
+    REQUIRE(node.RequestMissingTransactions(second));
+    /* Simulate expiry/replacement without receiving the first response. */
+    const auto expired = node.OpenTxResponseWindow(LLP::TxResponseKind::GET, first);
+    node.RollbackTxResponseWindow(expired);
+    REQUIRE(node.RequestMissingTransactions());
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(second));
+    node.CloseTxResponseWindowForBlock(second);
+    REQUIRE(node.RequestMissingTransactions());
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(first));
+    node.CloseTxResponseWindowForBlock(first);
+}
+
+TEST_CASE("Missing transaction window reservation is serialized through enqueue",
+    "[ledger][process][recovery_queue]")
+{
+    RecoverySocketNode node;
+    const uint1024_t first(0xCA0401), second(0xCA0402);
+    node.pauseSend = true;
+    auto sender = std::async(std::launch::async, [&] { return node.RequestMissingTransactions(first); });
+    {
+        std::unique_lock<std::mutex> lock(node.mutex);
+        node.condition.wait(lock, [&] { return node.sending; });
+    }
+    std::promise<void> competing;
+    auto replacement = std::async(std::launch::async, [&]
+    {
+        competing.set_value();
+        return node.OpenTxResponseWindow(LLP::TxResponseKind::LIST, second);
+    });
+    competing.get_future().wait();
+    const bool blocked = replacement.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+    {
+        std::lock_guard<std::mutex> lock(node.mutex);
+        node.pauseSend = false;
+        node.condition.notify_all();
+    }
+    const bool queued = sender.get();
+    const auto replacementWindow = replacement.get();
+    REQUIRE(blocked);
+    REQUIRE(queued);
+    REQUIRE(replacementWindow != 0);
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(first));
+    node.OpenTxResponseWindow(LLP::TxResponseKind::GET, first);
+    node.CloseTxResponseWindowForBlock(first);
+}
+
+TEST_CASE("Successful recovery fanout is queued even when the primary send fails",
+    "[ledger][process][recovery_queue][bestchain]")
+{
+    LedgerGuard env;
+    struct SocketGuard
+    {
+        int fd = -1;
+        ~SocketGuard() { if(fd >= 0) close(fd); }
+    } listener, remote;
+    listener.fd = socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(listener.fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(bind(listener.fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    REQUIRE(listen(listener.fd, 1) == 0);
+    socklen_t size = sizeof(address);
+    REQUIRE(getsockname(listener.fd, reinterpret_cast<sockaddr*>(&address), &size) == 0);
+
+    LLP::Config configuration(ntohs(address.sin_port));
+    configuration.ENABLE_LISTEN = false;
+    configuration.ENABLE_MANAGER = false;
+    configuration.MAX_THREADS = 1;
+    LLP::Server<LLP::TritiumNode> server(configuration);
+    struct ServerGuard
+    {
+        LLP::Server<LLP::TritiumNode>* previous = LLP::TRITIUM_SERVER;
+        ~ServerGuard() { LLP::TRITIUM_SERVER = previous; }
+    } restore;
+    LLP::TRITIUM_SERVER = &server;
+    std::shared_ptr<LLP::TritiumNode> unused;
+    REQUIRE(server.ConnectNode("127.0.0.1", unused));
+    remote.fd = accept(listener.fd, nullptr, nullptr);
+    REQUIRE(remote.fd >= 0);
+    const auto peers = server.GetConnections();
+    REQUIRE(peers.size() == 1);
+
+    RecoverySocketNode primary;
+    primary.reject = true;
+    const uint1024_t tip(0xCA0501);
+    TAO::Ledger::mapLastOrphanRequest.erase(tip);
+    bool primaryQueued = true;
+    const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
+        tip, TAO::Ledger::ChainState::nBestHeight.load() + 100, "fanout-test", &primary, &primaryQueued);
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::FETCH_QUEUED);
+    REQUIRE_FALSE(primaryQueued);
+    REQUIRE(primary.Receive().empty());
+    REQUIRE(peers.front()->OpenTxResponseWindow(LLP::TxResponseKind::GET, tip, 0, true) == 0);
+
+    DataStream expected(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    expected << uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS)
+             << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+             << uint8_t(LLP::TritiumNode::TYPES::LOCATOR)
+             << TAO::Ledger::Locator(TAO::Ledger::ChainState::hashBestChain.load()) << tip;
+    const auto bytes = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, expected).GetBytes();
+    std::vector<uint8_t> received;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while(std::search(received.begin(), received.end(), bytes.begin(), bytes.end()) == received.end()
+       && std::chrono::steady_clock::now() < deadline)
+    {
+        peers.front()->Flush();
+        pollfd descriptor{remote.fd, POLLIN, 0};
+        if(poll(&descriptor, 1, 100) > 0)
+        {
+            uint8_t buffer[4096];
+            const auto n = recv(remote.fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+            if(n > 0)
+                received.insert(received.end(), buffer, buffer + n);
+        }
+    }
+    REQUIRE(std::search(received.begin(), received.end(), bytes.begin(), bytes.end()) != received.end());
+    TAO::Ledger::mapLastOrphanRequest.erase(tip);
+}
+#endif
 
 
 TEST_CASE("Missing transactions yield a soft INCOMPLETE, never a REJECT", "[ledger][process]")
@@ -1431,7 +1775,8 @@ TEST_CASE("Connectable incomplete orphan is retained and later redelivery drains
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashB, 212, "unit-test", nullptr);
 
-    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
+    /* No connection accepted ownership; callers must remain free to fall back. */
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 
@@ -1499,6 +1844,10 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
             return fRejectSend ? 0 : LLP::TritiumNode::GetMaxSendBuffer();
         }
     } node;
+    RecoverySyncGuard syncGuard;
+    node.fCONNECTED = true;
+    node.nCurrentSession = LLC::GetRand();
+    node.nProtocolVersion = LLP::MIN_PROTO_VERSION;
     node.fd = fds[1];
     node.events = POLLIN;
     node.nLastPing = runtime::unifiedtimestamp();
@@ -1600,7 +1949,7 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     const auto result = TAO::Ledger::AttemptPeerBestChainRecovery(
         hashB, 214, "unit-test", &node);
 
-    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
+    REQUIRE(result == TAO::Ledger::PeerBestRecoveryResult::SKIPPED);
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 #endif
@@ -2879,6 +3228,7 @@ TEST_CASE("BESTCHAIN NOTIFY uses post-parse BESTHEIGHT for far-gap recovery",
     node.fd = socketPair.fds[1];
     node.events = POLLIN;
     node.nCurrentSession = 1;
+    node.nProtocolVersion = LLP::MIN_PROTO_VERSION;
     node.nCurrentHeight = nLocalHeight;
     node.Subscribe(
         LLP::TritiumNode::SUBSCRIPTION::BLOCK
