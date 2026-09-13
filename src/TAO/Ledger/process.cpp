@@ -128,47 +128,7 @@ namespace TAO
                 if(!pSend)
                     return;
 
-                try
-                {
-                    uint64_t nWindowRequest =
-                        pSend->OpenTxResponseWindow(LLP::TxResponseKind::GET, hashMissing, 0, true);
-                    if(nWindowRequest == 0 && LLP::TRITIUM_SERVER)
-                    {
-                        pRandom = LLP::TRITIUM_SERVER->RandomConnection();
-                        if(pRandom && pRandom.get() != pSend)
-                        {
-                            pSend = pRandom.get();
-                            nWindowRequest = pSend->OpenTxResponseWindow(
-                                LLP::TxResponseKind::GET, hashMissing, 0, true);
-                        }
-                    }
-
-                    /* Leave in-flight responses intact if no idle helper is available. */
-                    if(nWindowRequest == 0)
-                        return;
-
-                    try
-                    {
-                        if(!pSend->PushMessage(LLP::TritiumNode::ACTION::GET,
-                            uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
-                            uint8_t(LLP::TritiumNode::TYPES::BLOCK),
-                            hashMissing))
-                        {
-                            if(nWindowRequest != 0)
-                                pSend->RollbackTxResponseWindow(nWindowRequest);
-                        }
-                    }
-                    catch(...)
-                    {
-                        if(nWindowRequest != 0)
-                            pSend->RollbackTxResponseWindow(nWindowRequest);
-                        throw;
-                    }
-                }
-                catch(const std::exception& e)
-                {
-                    debug::error(FUNCTION, e.what());
-                }
+                pSend->RequestMissingTransactions(hashMissing);
             }
         }
 

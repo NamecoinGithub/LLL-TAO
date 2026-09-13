@@ -1490,9 +1490,18 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     REQUIRE(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
 
-    LLP::TritiumNode node;
+    class RecoveryNode : public LLP::TritiumNode
+    {
+    public:
+        bool fRejectSend = false;
+        uint64_t GetMaxSendBuffer() const override
+        {
+            return fRejectSend ? 0 : LLP::TritiumNode::GetMaxSendBuffer();
+        }
+    } node;
     node.fd = fds[1];
     node.events = POLLIN;
+    node.nLastPing = runtime::unifiedtimestamp();
 
     const int nCaller = GENERATE(0, 1, 2);
     uint64_t nExistingWindow = 0;
@@ -1506,6 +1515,10 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     SECTION("Unrelated in-flight GET is preserved until it completes")
     {
         nExistingWindow = node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashRoot);
+    }
+    SECTION("Full send buffer retains the GET for retry")
+    {
+        node.fRejectSend = true;
     }
 
     const auto recover = [&]()
@@ -1529,19 +1542,25 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashA));
     REQUIRE(TAO::Ledger::mapOrphans.Contains(hashB));
 
-    if(nExistingWindow != 0)
+    if(nExistingWindow != 0 || node.fRejectSend)
     {
+        node.Event(LLP::TritiumNode::EVENTS::GENERIC);
         REQUIRE(node.Buffered() == 0);
         uint8_t byte = 0;
         REQUIRE(recv(fds[0], &byte, 1, MSG_DONTWAIT) < 0);
 
-        node.CloseTxResponseWindowForBlock(hashA);
-        REQUIRE(node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashA, 0, true) == 0);
-        node.RollbackTxResponseWindow(nExistingWindow);
+        if(nExistingWindow != 0)
+        {
+            node.CloseTxResponseWindowForBlock(hashA);
+            REQUIRE(node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashA, 0, true) == 0);
+            node.RollbackTxResponseWindow(nExistingWindow);
+        }
 
-        recover();
+        node.fRejectSend = false;
+        node.Event(LLP::TritiumNode::EVENTS::GENERIC);
     }
 
+    node.Event(LLP::TritiumNode::EVENTS::GENERIC);
     while(node.Buffered() > 0)
     {
         if(node.Flush() <= 0)
@@ -1569,6 +1588,9 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
         LLP::TritiumNode::ACTION::GET, ssExpectedGet).GetBytes();
 
     REQUIRE(vSent == vExpectedGet);
+
+    node.CloseTxResponseWindowForBlock(hashA);
+    REQUIRE(node.OpenTxResponseWindow(LLP::TxResponseKind::GET, hashRoot, 0, true) != 0);
 
     node.fd = -1;
     close(fds[0]);

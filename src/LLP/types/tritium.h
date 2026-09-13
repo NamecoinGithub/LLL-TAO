@@ -525,6 +525,10 @@ namespace LLP
          *  sync peer fires off a GET to a randomly-selected helper peer). **/
         TxResponseWindow m_txRespWindow;
 
+        /** Latest missing block awaiting an idle window or send-buffer capacity.
+         *  Protected by m_txRespWindowMutex; retried by EVENTS::GENERIC. **/
+        uint1024_t m_hashPendingMissingTransactions = 0;
+
         /** Mutex protecting m_txRespWindow against concurrent DataThread access. **/
         std::mutex m_txRespWindowMutex;
 
@@ -844,6 +848,10 @@ namespace LLP
 
         /** Close a GET window only when its requested block was received. **/
         void CloseTxResponseWindowForBlock(const uint1024_t& hashBlock);
+
+        /** Queue missing-block transactions without replacing an in-flight response.
+         *  A zero hash retries the retained request without adding a new one. **/
+        void RequestMissingTransactions(const uint1024_t& hashMissing = 0);
 
 
         /** NewMessage
