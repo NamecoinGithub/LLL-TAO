@@ -67,12 +67,26 @@ ________________________________________________________________________________
 #include <condition_variable>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <unit/catch2/catch.hpp>
+
+namespace TAO
+{
+    namespace Ledger
+    {
+        namespace ChainState
+        {
+            bool RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
+                                                        bool fAllowRepair);
+            void SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook);
+        }
+    }
+}
 
 namespace
 {
@@ -803,6 +817,114 @@ namespace
                 LLD::Ledger->EraseBlock(hash);
         }
     };
+
+
+    struct ArgsMapGuard
+    {
+        const std::map<std::string, std::string> saved = config::mapArgs;
+        ~ArgsMapGuard()
+        {
+            config::mapArgs = saved;
+        }
+    };
+
+
+    struct FlagGuard
+    {
+        const bool savedClient  = config::fClient.load();
+        const bool savedHybrid  = config::fHybrid.load();
+        const bool savedTestNet = config::fTestNet.load();
+
+        ~FlagGuard()
+        {
+            config::fClient.store(savedClient);
+            config::fHybrid.store(savedHybrid);
+            config::fTestNet.store(savedTestNet);
+        }
+    };
+
+
+    struct CheckpointChainFixture
+    {
+        TAO::Ledger::BlockState genesis;
+        TAO::Ledger::BlockState one;
+        TAO::Ledger::BlockState two;
+        TAO::Ledger::BlockState three;
+        uint1024_t hashGenesis;
+        uint1024_t hashOne;
+        uint1024_t hashTwo;
+        uint1024_t hashThree;
+    };
+
+
+    struct CheckpointRepairHookGuard
+    {
+        ~CheckpointRepairHookGuard()
+        {
+            TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook({});
+        }
+    };
+
+
+    CheckpointChainFixture BuildCheckpointChainFixture(const uint64_t nNonceBase)
+    {
+        CheckpointChainFixture fixture;
+
+        fixture.genesis = TAO::Ledger::ChainState::tStateGenesis;
+        REQUIRE_FALSE(fixture.genesis.IsNull());
+        fixture.genesis.hashPrevBlock = 0;
+        fixture.genesis.hashNextBlock = 0;
+        fixture.hashGenesis = fixture.genesis.GetHash();
+
+        fixture.one = fixture.genesis;
+        fixture.one.hashPrevBlock = fixture.hashGenesis;
+        fixture.one.hashNextBlock = 0;
+        fixture.one.nHeight = 1;
+        fixture.one.nNonce = nNonceBase + 1;
+        fixture.one.nTime = nNonceBase + 1;
+        fixture.one.nChainTrust = fixture.genesis.nChainTrust + 10;
+        fixture.hashOne = fixture.one.GetHash();
+
+        fixture.two = fixture.one;
+        fixture.two.hashPrevBlock = fixture.hashOne;
+        fixture.two.hashNextBlock = 0;
+        fixture.two.nHeight = 2;
+        fixture.two.nNonce = nNonceBase + 2;
+        fixture.two.nTime = nNonceBase + 2;
+        fixture.two.nChainTrust = fixture.one.nChainTrust + 10;
+        fixture.hashTwo = fixture.two.GetHash();
+
+        fixture.three = fixture.two;
+        fixture.three.hashPrevBlock = fixture.hashTwo;
+        fixture.three.hashNextBlock = 0;
+        fixture.three.nHeight = 3;
+        fixture.three.nNonce = nNonceBase + 3;
+        fixture.three.nTime = nNonceBase + 3;
+        fixture.three.nChainTrust = fixture.two.nChainTrust + 10;
+        fixture.hashThree = fixture.three.GetHash();
+
+        fixture.genesis.hashPrevBlock = 0;
+        fixture.genesis.hashNextBlock = fixture.hashOne;
+        fixture.one.hashNextBlock = fixture.hashTwo;
+        fixture.two.hashNextBlock = fixture.hashThree;
+        fixture.three.hashNextBlock = 0;
+
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashGenesis, fixture.genesis));
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashOne, fixture.one));
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashTwo, fixture.two));
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashThree, fixture.three));
+        REQUIRE(LLD::Ledger->WriteBestChain(fixture.hashThree));
+
+        TAO::Ledger::ChainState::tStateGenesis = fixture.genesis;
+        TAO::Ledger::ChainState::tStateBest = fixture.three;
+        TAO::Ledger::ChainState::hashBestChain = fixture.hashThree;
+        TAO::Ledger::ChainState::nBestHeight = fixture.three.nHeight;
+        TAO::Ledger::ChainState::nBestChainTrust = fixture.three.nChainTrust;
+        TAO::Ledger::ChainState::hashCheckpoint = 0;
+        TAO::Ledger::ChainState::nCheckpointHeight = 0;
+
+        return fixture;
+    }
 
 } /* anonymous namespace */
 
@@ -1597,6 +1719,219 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         LLD::Client->WriteBestChain(savedBest);
     else
         LLD::Client->Erase(std::string("hashbestchain"));
+}
+
+
+TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default and preflighted",
+          "[ledger][chainstate][checkpoint][startup][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    ArgsMapGuard        argsGuard;
+    FlagGuard           flagGuard;
+    CheckpointRepairHookGuard repairHookGuard;
+
+    config::fClient.store(false);
+    config::fHybrid.store(false);
+    config::fTestNet.store(true);
+
+    SECTION("all applicable checkpoints present: startup recovery path is a no-op")
+    {
+        const auto fixture = BuildCheckpointChainFixture(31000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState&)
+            {
+                ++nSetBestCalls;
+                return true;
+            });
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, fixture.hashTwo}
+        };
+
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(nSetBestCalls == 0);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+    }
+
+    SECTION("newest applicable checkpoint missing: default startup is non-destructive")
+    {
+        const auto fixture = BuildCheckpointChainFixture(32000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState&)
+            {
+                ++nSetBestCalls;
+                return true;
+            });
+        const uint1024_t hashMissingCheckpoint(0x77770001);
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, hashMissingCheckpoint}
+        };
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(nSetBestCalls == 0);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+    }
+
+    SECTION("earliest applicable checkpoint missing: iterator boundary is safe")
+    {
+        const auto fixture = BuildCheckpointChainFixture(33000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState&)
+            {
+                ++nSetBestCalls;
+                return true;
+            });
+        const uint1024_t hashMissingEarliest(0x77770002);
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, hashMissingEarliest}
+        };
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(nSetBestCalls == 0);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("opt-in repair refuses rollback when ancestry walk is unreadable")
+    {
+        const auto fixture = BuildCheckpointChainFixture(34000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState&)
+            {
+                ++nSetBestCalls;
+                return true;
+            });
+        const uint1024_t hashMissingCheckpoint(0x77770003);
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, hashMissingCheckpoint}
+        };
+
+        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, true));
+        REQUIRE(nSetBestCalls == 0);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+    }
+
+    SECTION("opt-in repair succeeds only after full rollback path preflight")
+    {
+        const auto fixture = BuildCheckpointChainFixture(35000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState& stateAncestor)
+            {
+                ++nSetBestCalls;
+                TAO::Ledger::ChainState::tStateBest = stateAncestor;
+                TAO::Ledger::ChainState::hashBestChain = stateAncestor.GetHash();
+                TAO::Ledger::ChainState::nBestHeight = stateAncestor.nHeight;
+                TAO::Ledger::ChainState::nBestChainTrust = stateAncestor.nChainTrust;
+                return LLD::Ledger->WriteBestChain(stateAncestor.GetHash());
+            });
+        const uint1024_t hashMissingCheckpoint(0x77770004);
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, hashMissingCheckpoint}
+        };
+
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, true));
+        REQUIRE(nSetBestCalls == 1);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashOne);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashOne);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == 1);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashOne);
+    }
+
+    SECTION("opt-in repair can use the first older readable checkpoint after consecutive gaps")
+    {
+        const auto fixture = BuildCheckpointChainFixture(36000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState& stateAncestor)
+            {
+                ++nSetBestCalls;
+                TAO::Ledger::ChainState::tStateBest = stateAncestor;
+                TAO::Ledger::ChainState::hashBestChain = stateAncestor.GetHash();
+                TAO::Ledger::ChainState::nBestHeight = stateAncestor.nHeight;
+                TAO::Ledger::ChainState::nBestChainTrust = stateAncestor.nChainTrust;
+                return LLD::Ledger->WriteBestChain(stateAncestor.GetHash());
+            });
+
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, uint1024_t(0x77770005)},
+            {3, uint1024_t(0x77770006)}
+        };
+
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, true));
+        REQUIRE(nSetBestCalls == 1);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashOne);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashOne);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("opt-in repair treats invalid checkpoint records like missing while searching older fallback")
+    {
+        const auto fixture = BuildCheckpointChainFixture(37000);
+        uint32_t nSetBestCalls = 0;
+        TAO::Ledger::ChainState::SetCheckpointRepairSetBestHook(
+            [&nSetBestCalls](const TAO::Ledger::BlockState& stateAncestor)
+            {
+                ++nSetBestCalls;
+                TAO::Ledger::ChainState::tStateBest = stateAncestor;
+                TAO::Ledger::ChainState::hashBestChain = stateAncestor.GetHash();
+                TAO::Ledger::ChainState::nBestHeight = stateAncestor.nHeight;
+                TAO::Ledger::ChainState::nBestChainTrust = stateAncestor.nChainTrust;
+                return LLD::Ledger->WriteBestChain(stateAncestor.GetHash());
+            });
+
+        std::map<uint32_t, uint1024_t> checkpoints =
+        {
+            {1, fixture.hashOne},
+            {2, fixture.hashThree}
+        };
+
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, true));
+        REQUIRE(nSetBestCalls == 1);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashOne);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashOne);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
 }
 
 
