@@ -38,6 +38,7 @@ ________________________________________________________________________________
 #include <TAO/Register/include/verify.h>
 
 #include <TAO/Ledger/include/ambassador.h>
+#include <TAO/Ledger/include/admissibility.h>
 #include <TAO/Ledger/include/developer.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/checkpoints.h>
@@ -1451,6 +1452,8 @@ namespace TAO
         /** Connect a block state into chain. **/
         bool BlockState::Connect()
         {
+            ResetLastConnectState();
+
             /* Get a copy of our block hash. */
             const uint1024_t hashBlock = GetHash();
 
@@ -1488,7 +1491,10 @@ namespace TAO
                         /* Check for the last hash. */
                         uint512_t hashLast = 0;
                         if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast))
+                        {
+                            SetLastConnectMissingDependency();
                             return debug::error(FUNCTION, "failed to read last on non-genesis");
+                        }
 
                         /* Check that the last transaction is correct. */
                         if(tx.hashPrevTx != hashLast)

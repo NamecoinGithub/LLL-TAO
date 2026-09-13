@@ -4472,6 +4472,11 @@ namespace LLP
 
     void TritiumNode::CloseTxResponseWindowForBlock(const uint1024_t& hashBlock)
     {
+        uint64_t nRequestId = 0;
+        uint1024_t hashTarget = 0;
+        uint32_t nTxCount = 0;
+        uint32_t nSession = 0;
+
         { RECURSIVE(m_txRespWindowMutex);
             if(!IsMatchingTxResponseBlock(m_txRespWindow, hashBlock))
                 return;
@@ -4484,13 +4489,19 @@ namespace LLP
                         return request.owner == this && request.hashBlock == hashBlock;
                     }), vMissingTransactions.end());
             }
+            nRequestId = m_txRespWindow.nRequestId;
+            hashTarget = m_txRespWindow.hashTarget;
+            nTxCount = m_txRespWindow.nTxCount;
+            nSession = nCurrentSession;
             m_txRespWindow.Close();
-            debug::log(2, NODE, "tx-response-window closed: matching-block received",
-                " request=", m_txRespWindow.nRequestId,
-                " target=", m_txRespWindow.hashTarget.SubString(),
-                " tx_count=", m_txRespWindow.nTxCount,
-                " session=", nCurrentSession);
         }
+
+        TAO::Ledger::ClearPeerBestRecoveryState(hashBlock);
+        debug::log(2, NODE, "tx-response-window closed: matching-block received",
+            " request=", nRequestId,
+            " target=", hashTarget.SubString(),
+            " tx_count=", nTxCount,
+            " session=", nSession);
     }
 
 

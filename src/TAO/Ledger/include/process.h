@@ -323,6 +323,16 @@ namespace TAO
         void PurgeOrphanRecoveryState(const char* pszReason = nullptr);
 
 
+        /** ClearPeerBestRecoveryState
+         *
+         *  Clears the per-candidate no-progress/backoff state for a peer-best
+         *  recovery target.  Call this only when the corresponding block/tx
+         *  response actually arrived or when the candidate was pruned.
+         *
+         **/
+        void ClearPeerBestRecoveryState(const uint1024_t& hashPeerBest);
+
+
         /** ShouldSendBranchSyncRequest
          *
          *  Throttle-gated check for whether a locator-anchored branch-sync LIST
