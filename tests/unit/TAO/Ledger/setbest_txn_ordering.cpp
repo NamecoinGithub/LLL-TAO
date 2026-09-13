@@ -1813,7 +1813,7 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
             {2, hashMissingCheckpoint}
         };
 
-        REQUIRE_FALSE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
         REQUIRE(nSetBestCalls == 0);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
@@ -1840,7 +1840,7 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
             {1, hashMissingEarliest}
         };
 
-        REQUIRE_FALSE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
+        REQUIRE(TAO::Ledger::ChainState::RunHardcodedCheckpointRecoveryForTests(checkpoints, false));
         REQUIRE(nSetBestCalls == 0);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
@@ -2047,6 +2047,69 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
         REQUIRE(nSetBestCalls == 1);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashOne);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashOne);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+}
+
+
+TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip predecessor holes",
+          "[ledger][chainstate][startup][repair][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+    BestChainDiskGuard  bestChainGuard;
+    GenesisDiskGuard    genesisGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    ArgsMapGuard        argsGuard;
+    FlagGuard           flagGuard;
+
+    config::fClient.store(false);
+    config::fHybrid.store(false);
+    config::fTestNet.store(false);
+
+    SECTION("missing predecessor near best tip fails startup audit without mutation")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38000, blocksGuard);
+        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 16));
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+    }
+
+    SECTION("repairchain restores missing hash-key lookup from height recovery data")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38100, blocksGuard);
+        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Write(std::make_pair(std::string("height"), uint32_t(2)), fixture.two));
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
+
+        TAO::Ledger::BlockState restored;
+        REQUIRE(LLD::Ledger->ReadBlock(fixture.hashTwo, restored));
+        REQUIRE(restored.GetHash() == fixture.hashTwo);
+        REQUIRE(restored.hashNextBlock == fixture.hashThree);
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain refuses mutation when predecessor data is genuinely unavailable")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38200, blocksGuard);
+        REQUIRE(LLD::Ledger->EraseBlock(fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(std::make_pair(std::string("height"), uint32_t(2))));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 }
