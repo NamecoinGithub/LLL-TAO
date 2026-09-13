@@ -1426,6 +1426,13 @@ TEST_CASE("Recoverable peer-best activation failure requests one retry and succe
     REQUIRE_FALSE(fQueued2);
     REQUIRE(node.Receive().empty());
 
+    node.CloseTxResponseWindowForBlock(uint1024_t(0xA50000FFULL));
+    bool fQueuedUnrelated = true;
+    const auto resultUnrelated = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashCandidate, candidate.nHeight, "unit-test-activation-missing-last-unrelated-close", &node, &fQueuedUnrelated);
+    REQUIRE(resultUnrelated == TAO::Ledger::PeerBestRecoveryResult::FETCH_THROTTLED);
+    REQUIRE_FALSE(fQueuedUnrelated);
+
     REQUIRE(LLD::Ledger->WriteLast(hashGenesis, hashPrevTx));
     node.CloseTxResponseWindowForBlock(hashCandidate);
 

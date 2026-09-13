@@ -311,12 +311,6 @@ namespace TAO::API
                 break;
 
             const bool fActiveSession = Authentication::Active(tx.hashGenesis);
-            if(fActiveSession && !tx.IsFirst())
-            {
-                TAO::API::Transaction txPrevIndex;
-                if(!LLD::Sessions->ReadTx(tx.hashPrevTx, txPrevIndex))
-                    throw Exception(-32, "Failed to index previous transaction ", tx.hashPrevTx.ToString());
-            }
 
             /* Execute the operations layer. */
             if(!TAO::Ledger::mempool.Accept(tx))
@@ -338,6 +332,8 @@ namespace TAO::API
                     if(!tIndex.Delete(hashTx))
                         debug::warning(FUNCTION, "failed to rollback partial index ", VARIABLE(hashTx.SubString()));
 
+                    TAO::Ledger::mempool.Remove(hashTx);
+
                     LLD::TransactionGuard rollback(TAO::Ledger::FLAGS::MEMPOOL);
                     if(rollback)
                     {
@@ -347,7 +343,6 @@ namespace TAO::API
                             LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL);
                     }
 
-                    TAO::Ledger::mempool.Remove(hashTx);
                     throw Exception(-32, "Failed to index accepted transaction: ", strIndexError);
                 }
 
