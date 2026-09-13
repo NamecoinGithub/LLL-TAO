@@ -106,6 +106,8 @@ namespace
         uint1024_t savedBestHash;
         uint32_t savedBestHeight;
         uint64_t savedBestTrust;
+        uint1024_t savedCheckpointHash;
+        uint32_t savedCheckpointHeight;
 
         ChainStateGuard()
         : savedGenesis(TAO::Ledger::ChainState::tStateGenesis)
@@ -113,6 +115,8 @@ namespace
         , savedBestHash(TAO::Ledger::ChainState::hashBestChain.load())
         , savedBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
         , savedBestTrust(TAO::Ledger::ChainState::nBestChainTrust.load())
+        , savedCheckpointHash(TAO::Ledger::ChainState::hashCheckpoint.load())
+        , savedCheckpointHeight(TAO::Ledger::ChainState::nCheckpointHeight.load())
         {
         }
 
@@ -123,6 +127,8 @@ namespace
             TAO::Ledger::ChainState::hashBestChain = savedBestHash;
             TAO::Ledger::ChainState::nBestHeight.store(savedBestHeight);
             TAO::Ledger::ChainState::nBestChainTrust.store(savedBestTrust);
+            TAO::Ledger::ChainState::hashCheckpoint = savedCheckpointHash;
+            TAO::Ledger::ChainState::nCheckpointHeight.store(savedCheckpointHeight);
         }
     };
 
@@ -1351,6 +1357,7 @@ TEST_CASE("Recoverable peer-best activation failure requests one retry and succe
     stateRoot.nChainTrust = 1000;
 
     const uint1024_t hashRoot = stateRoot.GetHash();
+    stateRoot.hashCheckpoint = hashRoot;
     REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
 
     TAO::Ledger::ChainState::tStateGenesis = stateRoot;
@@ -1358,6 +1365,8 @@ TEST_CASE("Recoverable peer-best activation failure requests one retry and succe
     TAO::Ledger::ChainState::hashBestChain = hashRoot;
     TAO::Ledger::ChainState::nBestHeight.store(stateRoot.nHeight);
     TAO::Ledger::ChainState::nBestChainTrust.store(stateRoot.nChainTrust);
+    TAO::Ledger::ChainState::hashCheckpoint = hashRoot;
+    TAO::Ledger::ChainState::nCheckpointHeight.store(stateRoot.nHeight);
 
     const uint256_t hashGenesis(0xA5000001ULL);
     const uint512_t hashPrevTx(0xA5000002ULL);
@@ -1394,6 +1403,7 @@ TEST_CASE("Recoverable peer-best activation failure requests one retry and succe
     candidate.nChainTrust = stateRoot.nChainTrust + 1;
     candidate.vtx.clear();
     candidate.vtx.emplace_back(TAO::Ledger::TRANSACTION::TRITIUM, hashTx);
+    candidate.hashCheckpoint = hashRoot;
 
     const uint1024_t hashCandidate = candidate.GetHash();
     REQUIRE(LLD::Ledger->WriteBlock(hashCandidate, candidate));

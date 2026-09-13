@@ -992,58 +992,66 @@ namespace TAO
             if(ShouldBackoffPeerBestRecovery(hashPeerBest))
                 return PeerBestRecoveryResult::FETCH_THROTTLED;
 
-            LOCK(PROCESSING_MUTEX);
-
-            const TAO::Ledger::BlockState stateBest = ChainState::tStateBest.load();
-            if(hashPeerBest == stateBest.GetHash())
-                return PeerBestRecoveryResult::SKIPPED;
-
-            if(!statePeer.IsHeavierThan(stateBest))
-                return PeerBestRecoveryResult::SKIPPED;
-
-            TAO::Ledger::BlockState stateAncestor;
-            uint32_t nConnectDepth = 0;
-            uint32_t nDisconnectDepth = 0;
-            if(!FindCommonAncestor(statePeer, stateBest, stateAncestor, nConnectDepth, nDisconnectDepth))
-                return PeerBestRecoveryResult::SKIPPED;
-
-            debug::warning(FUNCTION, ANSI_COLOR_BRIGHT_YELLOW, "=== PEER_BEST_RECOVERY ===", ANSI_COLOR_RESET,
-                " source=", (pszSource ? pszSource : "peer"),
-                " peer_best=", hashPeerBest.SubString(),
-                " peer_height=", statePeer.nHeight,
-                " advertised_height=", nPeerHeight,
-                " current_best=", stateBest.GetHash().SubString(),
-                " current_height=", stateBest.nHeight,
-                " ancestor=", stateAncestor.GetHash().SubString(),
-                " disconnect=", nDisconnectDepth,
-                " connect=", nConnectDepth,
-                " action=validated-activation");
-
-            if(!ActivateCandidateBestChain(statePeer, pszSource, true))
+            TAO::Ledger::BlockState stateBest;
+            bool fMissingDependency = false;
             {
-                if(TakeLastConnectMissingDependency())
-                {
-                    const bool fMissingQueued =
-                        RequestMissingTransactionsForBlock(hashPeerBest, pnode);
+                LOCK(PROCESSING_MUTEX);
 
-                    if(fMissingQueued)
-                    {
-                        RecordPeerBestRecoveryRequest(hashPeerBest, stateBest.GetHash(), stateBest.nHeight);
+                stateBest = ChainState::tStateBest.load();
+                if(hashPeerBest == stateBest.GetHash())
+                    return PeerBestRecoveryResult::SKIPPED;
 
-                        debug::warning(FUNCTION, ANSI_COLOR_BRIGHT_YELLOW, "=== PEER_BEST_RECOVERY ===",
-                            ANSI_COLOR_RESET,
-                            " source=", (pszSource ? pszSource : "peer"),
-                            " peer_best=", hashPeerBest.SubString(),
-                            " peer_height=", statePeer.nHeight,
-                            " action=missing-local-dependency-requested");
+                if(!statePeer.IsHeavierThan(stateBest))
+                    return PeerBestRecoveryResult::SKIPPED;
 
-                        return PeerBestRecoveryResult::MISSING_TX_PENDING;
-                    }
-                }
+                TAO::Ledger::BlockState stateAncestor;
+                uint32_t nConnectDepth = 0;
+                uint32_t nDisconnectDepth = 0;
+                if(!FindCommonAncestor(statePeer, stateBest, stateAncestor, nConnectDepth, nDisconnectDepth))
+                    return PeerBestRecoveryResult::SKIPPED;
 
-                debug::error(FUNCTION, "peer best recovery candidate validation failed");
-                return PeerBestRecoveryResult::SKIPPED;
+                debug::warning(FUNCTION, ANSI_COLOR_BRIGHT_YELLOW, "=== PEER_BEST_RECOVERY ===", ANSI_COLOR_RESET,
+                    " source=", (pszSource ? pszSource : "peer"),
+                    " peer_best=", hashPeerBest.SubString(),
+                    " peer_height=", statePeer.nHeight,
+                    " advertised_height=", nPeerHeight,
+                    " current_best=", stateBest.GetHash().SubString(),
+                    " current_height=", stateBest.nHeight,
+                    " ancestor=", stateAncestor.GetHash().SubString(),
+                    " disconnect=", nDisconnectDepth,
+                    " connect=", nConnectDepth,
+                    " action=validated-activation");
+
+                if(ActivateCandidateBestChain(statePeer, pszSource, true))
+                    goto peer_best_activation_succeeded;
+
+                fMissingDependency = TakeLastConnectMissingDependency();
             }
+
+            if(fMissingDependency)
+            {
+                const bool fMissingQueued =
+                    RequestMissingTransactionsForBlock(hashPeerBest, pnode);
+
+                if(fMissingQueued)
+                {
+                    RecordPeerBestRecoveryRequest(hashPeerBest, stateBest.GetHash(), stateBest.nHeight);
+
+                    debug::warning(FUNCTION, ANSI_COLOR_BRIGHT_YELLOW, "=== PEER_BEST_RECOVERY ===",
+                        ANSI_COLOR_RESET,
+                        " source=", (pszSource ? pszSource : "peer"),
+                        " peer_best=", hashPeerBest.SubString(),
+                        " peer_height=", statePeer.nHeight,
+                        " action=missing-local-dependency-requested");
+
+                    return PeerBestRecoveryResult::MISSING_TX_PENDING;
+                }
+            }
+
+            debug::error(FUNCTION, "peer best recovery candidate validation failed");
+            return PeerBestRecoveryResult::SKIPPED;
+
+        peer_best_activation_succeeded:
 
             debug::log(0, ANSI_COLOR_BRIGHT_GREEN, "=== PEER_BEST_RECOVERED ===", ANSI_COLOR_RESET,
                 " best=", ChainState::hashBestChain.load().SubString(),
