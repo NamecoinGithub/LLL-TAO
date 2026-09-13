@@ -15,6 +15,7 @@ ________________________________________________________________________________
 
 #include <LLP/include/global.h>
 
+#include <TAO/Ledger/include/admissibility.h>
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/create.h>
@@ -108,6 +109,13 @@ namespace TAO
                 state.hashLocalBest = hashLocalBest;
                 state.nLocalHeight = nLocalHeight;
                 state.nLastRequest = runtime::timestamp();
+            }
+
+
+            void ClearPeerBestRecoveryRequest(const uint1024_t& hashPeerBest)
+            {
+                LOCK(PROCESSING_MUTEX);
+                mapPeerBestNoProgress.erase(hashPeerBest);
             }
 
 
@@ -615,6 +623,8 @@ namespace TAO
                                         const char* pszSource,
                                         bool fTransaction)
         {
+            ResetLastConnectState();
+
             const TAO::Ledger::BlockState stateBest = ChainState::tStateBest.load();
             if(!stateCandidate.IsHeavierThan(stateBest) || stateCandidate.fConflicted)
                 return false;
@@ -979,6 +989,9 @@ namespace TAO
                     : PeerBestRecoveryResult::SKIPPED;
             }
 
+            if(ShouldBackoffPeerBestRecovery(hashPeerBest))
+                return PeerBestRecoveryResult::FETCH_THROTTLED;
+
             LOCK(PROCESSING_MUTEX);
 
             const TAO::Ledger::BlockState stateBest = ChainState::tStateBest.load();
@@ -1008,6 +1021,26 @@ namespace TAO
 
             if(!ActivateCandidateBestChain(statePeer, pszSource, true))
             {
+                if(TakeLastConnectMissingDependency())
+                {
+                    const bool fMissingQueued =
+                        RequestMissingTransactionsForBlock(hashPeerBest, pnode);
+
+                    if(fMissingQueued)
+                    {
+                        RecordPeerBestRecoveryRequest(hashPeerBest, stateBest.GetHash(), stateBest.nHeight);
+
+                        debug::warning(FUNCTION, ANSI_COLOR_BRIGHT_YELLOW, "=== PEER_BEST_RECOVERY ===",
+                            ANSI_COLOR_RESET,
+                            " source=", (pszSource ? pszSource : "peer"),
+                            " peer_best=", hashPeerBest.SubString(),
+                            " peer_height=", statePeer.nHeight,
+                            " action=missing-local-dependency-requested");
+
+                        return PeerBestRecoveryResult::MISSING_TX_PENDING;
+                    }
+                }
+
                 debug::error(FUNCTION, "peer best recovery candidate validation failed");
                 return PeerBestRecoveryResult::SKIPPED;
             }
@@ -1325,6 +1358,15 @@ namespace TAO
                 " mapMissingBranchEscalations=cleared",
                 " mapLastMissingProcessTime=cleared",
                 " mapLastOrphanRequest=cleared");
+        }
+
+
+        void ClearPeerBestRecoveryState(const uint1024_t& hashPeerBest)
+        {
+            if(hashPeerBest == 0)
+                return;
+
+            ClearPeerBestRecoveryRequest(hashPeerBest);
         }
 
         /* Maximum number of unique incomplete-block hashes tracked in

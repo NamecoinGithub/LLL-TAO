@@ -99,6 +99,34 @@ namespace
     };
 
 
+    struct ChainStateGuard
+    {
+        TAO::Ledger::BlockState savedGenesis;
+        TAO::Ledger::BlockState savedBest;
+        uint1024_t savedBestHash;
+        uint32_t savedBestHeight;
+        uint64_t savedBestTrust;
+
+        ChainStateGuard()
+        : savedGenesis(TAO::Ledger::ChainState::tStateGenesis)
+        , savedBest(TAO::Ledger::ChainState::tStateBest.load())
+        , savedBestHash(TAO::Ledger::ChainState::hashBestChain.load())
+        , savedBestHeight(TAO::Ledger::ChainState::nBestHeight.load())
+        , savedBestTrust(TAO::Ledger::ChainState::nBestChainTrust.load())
+        {
+        }
+
+        ~ChainStateGuard()
+        {
+            TAO::Ledger::ChainState::tStateGenesis = savedGenesis;
+            TAO::Ledger::ChainState::tStateBest = savedBest;
+            TAO::Ledger::ChainState::hashBestChain = savedBestHash;
+            TAO::Ledger::ChainState::nBestHeight.store(savedBestHeight);
+            TAO::Ledger::ChainState::nBestChainTrust.store(savedBestTrust);
+        }
+    };
+
+
     /** MissingBlock
      *
      *  A minimal Block subclass whose Check() passes but populates vMissing,
@@ -1302,6 +1330,112 @@ TEST_CASE("Failed candidate activation preserves the active best chain",
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashBestBefore);
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load() == stateBestBefore);
 }
+
+
+#ifndef WIN32
+TEST_CASE("Recoverable peer-best activation failure requests one retry and succeeds after dependency arrival",
+    "[ledger][process][bestchain][recovery_queue]")
+{
+    LedgerGuard env;
+    ChainStateGuard stateGuard;
+    RecoverySocketNode node;
+
+    TAO::Ledger::BlockState stateRoot;
+    stateRoot.nVersion = 4;
+    stateRoot.hashPrevBlock = 0;
+    stateRoot.nChannel = 2;
+    stateRoot.nHeight = 400;
+    stateRoot.nBits = 1;
+    stateRoot.nNonce = 0x4001;
+    stateRoot.nTime = runtime::unifiedtimestamp();
+    stateRoot.nChainTrust = 1000;
+
+    const uint1024_t hashRoot = stateRoot.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashRoot, stateRoot));
+
+    TAO::Ledger::ChainState::tStateGenesis = stateRoot;
+    TAO::Ledger::ChainState::tStateBest = stateRoot;
+    TAO::Ledger::ChainState::hashBestChain = hashRoot;
+    TAO::Ledger::ChainState::nBestHeight.store(stateRoot.nHeight);
+    TAO::Ledger::ChainState::nBestChainTrust.store(stateRoot.nChainTrust);
+
+    const uint256_t hashGenesis(0xA5000001ULL);
+    const uint512_t hashPrevTx(0xA5000002ULL);
+
+    TAO::Ledger::Transaction txPrev;
+    txPrev.hashGenesis = hashGenesis;
+    txPrev.nSequence = 0;
+    txPrev.nTimestamp = stateRoot.nTime;
+    txPrev.hashNext = 0;
+    txPrev.hashRecovery = 0;
+    REQUIRE(LLD::Ledger->WriteTx(hashPrevTx, txPrev));
+
+    TAO::Ledger::Transaction tx;
+    tx.hashGenesis = hashGenesis;
+    tx.hashPrevTx = hashPrevTx;
+    tx.nSequence = 1;
+    tx.nTimestamp = stateRoot.nTime + 1;
+    tx.nKeyType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+    tx.nNextType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+    tx.hashNext = uint256_t(0xA5000003ULL);
+    tx.vchPubKey.assign(64, 0x11);
+
+    txPrev.hashNext = tx.PrevHash();
+    REQUIRE(LLD::Ledger->WriteTx(hashPrevTx, txPrev));
+
+    const uint512_t hashTx = tx.GetHash();
+    REQUIRE(LLD::Ledger->WriteTx(hashTx, tx));
+
+    TAO::Ledger::BlockState candidate = stateRoot;
+    candidate.hashPrevBlock = hashRoot;
+    candidate.nHeight = stateRoot.nHeight + 1;
+    candidate.nNonce += 1;
+    candidate.nTime += 1;
+    candidate.nChainTrust = stateRoot.nChainTrust + 1;
+    candidate.vtx.clear();
+    candidate.vtx.emplace_back(TAO::Ledger::TRANSACTION::TRITIUM, hashTx);
+
+    const uint1024_t hashCandidate = candidate.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashCandidate, candidate));
+
+    bool fQueued1 = true;
+    const auto result1 = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashCandidate, candidate.nHeight, "unit-test-activation-missing-last", &node, &fQueued1);
+
+    REQUIRE(result1 == TAO::Ledger::PeerBestRecoveryResult::MISSING_TX_PENDING);
+    REQUIRE_FALSE(fQueued1);
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashRoot);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load() == stateRoot);
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(hashCandidate));
+
+    bool fQueued2 = true;
+    const auto result2 = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashCandidate, candidate.nHeight, "unit-test-activation-missing-last-repeat", &node, &fQueued2);
+
+    REQUIRE(result2 == TAO::Ledger::PeerBestRecoveryResult::FETCH_THROTTLED);
+    REQUIRE_FALSE(fQueued2);
+    REQUIRE(node.Receive().empty());
+
+    REQUIRE(LLD::Ledger->WriteLast(hashGenesis, hashPrevTx));
+    node.CloseTxResponseWindowForBlock(hashCandidate);
+
+    bool fQueued3 = true;
+    const auto result3 = TAO::Ledger::AttemptPeerBestChainRecovery(
+        hashCandidate, candidate.nHeight, "unit-test-activation-missing-last-recovered", &node, &fQueued3);
+
+    REQUIRE(result3 == TAO::Ledger::PeerBestRecoveryResult::PROGRESS);
+    REQUIRE_FALSE(fQueued3);
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashCandidate);
+    REQUIRE(node.Receive().empty());
+
+    LLD::Ledger->EraseLast(hashGenesis);
+    LLD::Ledger->EraseTx(hashTx);
+    LLD::Ledger->EraseTx(hashPrevTx);
+    LLD::Ledger->EraseBlock(hashCandidate);
+    LLD::Ledger->EraseBlock(hashRoot);
+}
+#endif
 
 
 TEST_CASE("Synchronization requires the advertised hash to be active",

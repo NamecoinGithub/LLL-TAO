@@ -4484,6 +4484,7 @@ namespace LLP
                         return request.owner == this && request.hashBlock == hashBlock;
                     }), vMissingTransactions.end());
             }
+            TAO::Ledger::ClearPeerBestRecoveryState(hashBlock);
             m_txRespWindow.Close();
             debug::log(2, NODE, "tx-response-window closed: matching-block received",
                 " request=", m_txRespWindow.nRequestId,

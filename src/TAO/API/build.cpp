@@ -264,6 +264,7 @@ namespace TAO::API
             }
 
             /* Build our transactions in batches of 99 contracts at a time. */
+            const uint64_t nBatchStart = nIndex;
             std::vector<TAO::Operation::Contract> vBuild;
             for( ; vBuild.size() < nLimits && nIndex < vContracts.size(); ++nIndex)
                 vBuild.emplace_back(std::move(vContracts[nIndex]));
@@ -284,9 +285,6 @@ namespace TAO::API
             /* Add the contract fees. */
             if(!AddFee(tx) && nIndex < vContracts.size() && tx.Size() == 99) //we check +1 so we know we have an available index
                 tx << vContracts[nIndex++]; //add additional contract and iterate our index
-
-            /* Track our total contracts. */
-            nTotal += tx.Size();
 
             /* Execute the operations layer. */
             if(!tx.Build())
@@ -312,13 +310,21 @@ namespace TAO::API
             if(!Authentication::Unlocked(nUnlockedActions, jParams) && !CheckParameter(jParams, "pin", "string, number"))
                 break;
 
+            const bool fActiveSession = Authentication::Active(tx.hashGenesis);
+            if(fActiveSession && !tx.IsFirst())
+            {
+                TAO::API::Transaction txPrevIndex;
+                if(!LLD::Sessions->ReadTx(tx.hashPrevTx, txPrevIndex))
+                    throw Exception(-32, "Failed to index previous transaction ", tx.hashPrevTx.ToString());
+            }
+
             /* Execute the operations layer. */
             if(!TAO::Ledger::mempool.Accept(tx))
                 throw Exception(-32, "Failed to accept");
 
             /* Check that we have an active session to index for. */
             const uint512_t hashTx = tx.GetHash();
-            if(Authentication::Active(tx.hashGenesis))
+            if(fActiveSession)
             {
                 /* Build an API transaction. */
                 TAO::API::Transaction tIndex =
@@ -326,12 +332,34 @@ namespace TAO::API
 
                 /* Index the transaction to the database. */
                 if(!tIndex.Index(hashTx))
-                    debug::warning(FUNCTION, "failed to index ", VARIABLE(hashTx.SubString()));
+                {
+                    const std::string strIndexError = debug::GetLastError();
+
+                    if(!tIndex.Delete(hashTx))
+                        debug::warning(FUNCTION, "failed to rollback partial index ", VARIABLE(hashTx.SubString()));
+
+                    LLD::TransactionGuard rollback(TAO::Ledger::FLAGS::MEMPOOL);
+                    if(rollback)
+                    {
+                        if(!tx.Disconnect(TAO::Ledger::FLAGS::MEMPOOL))
+                            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL);
+                        else
+                            LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL);
+                    }
+
+                    TAO::Ledger::mempool.Remove(hashTx);
+                    throw Exception(-32, "Failed to index accepted transaction: ", strIndexError);
+                }
 
                 /* Debug output for notifications. */
                 if(nUnlockedActions & TAO::Ledger::PinUnlock::NOTIFICATIONS)
-                    debug::log(0, FUNCTION, "Indexed ", hashTx.SubString(), " completed ", nTotal, "/", vContracts.size(), " (", (nTotal * 100.0) / vContracts.size(), "%) contracts");
+                {
+                    const uint64_t nCompleted = nTotal + (nIndex - nBatchStart);
+                    debug::log(0, FUNCTION, "Indexed ", hashTx.SubString(), " completed ", nCompleted, "/", vContracts.size(), " (", (nCompleted * 100.0) / vContracts.size(), "%) contracts");
+                }
             }
+
+            nTotal += (nIndex - nBatchStart);
 
             /* Add our hashes to a return vector. */
             vHashes.push_back(hashTx);
