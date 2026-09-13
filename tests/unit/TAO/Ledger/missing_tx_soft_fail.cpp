@@ -1544,7 +1544,7 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
 
     if(nExistingWindow != 0 || node.fRejectSend)
     {
-        node.Event(LLP::TritiumNode::EVENTS::GENERIC);
+        node.Event(LLP::EVENTS::GENERIC);
         REQUIRE(node.Buffered() == 0);
         uint8_t byte = 0;
         REQUIRE(recv(fds[0], &byte, 1, MSG_DONTWAIT) < 0);
@@ -1557,10 +1557,10 @@ TEST_CASE("AttemptPeerBestChainRecovery immediately requests missing tx for extr
         }
 
         node.fRejectSend = false;
-        node.Event(LLP::TritiumNode::EVENTS::GENERIC);
+        node.Event(LLP::EVENTS::GENERIC);
     }
 
-    node.Event(LLP::TritiumNode::EVENTS::GENERIC);
+    node.Event(LLP::EVENTS::GENERIC);
     while(node.Buffered() > 0)
     {
         if(node.Flush() <= 0)
