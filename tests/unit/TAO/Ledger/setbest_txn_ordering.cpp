@@ -54,6 +54,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/genesis_block.h>
+#include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/retarget.h>
 #include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/types/mempool.h>
@@ -382,6 +383,7 @@ namespace
     struct SyncProfileGuard
     {
         const std::map<std::string, std::string> savedArgs = config::mapArgs;
+        const std::map<std::string, std::vector<std::string>> savedMultiArgs = config::mapMultiArgs;
 
         SyncProfileGuard()
         {
@@ -393,6 +395,7 @@ namespace
         {
             TAO::Ledger::SyncProfile::Reset();
             config::mapArgs = savedArgs;
+            config::mapMultiArgs = savedMultiArgs;
         }
     };
 
@@ -517,6 +520,86 @@ TEST_CASE("Sync profile skips empty applies but preserves every recovery marker"
     REQUIRE(JournalSize("_TRUST") == nTrustJournalBefore);
 
     LLD::Ledger->Erase(keyLedger);
+}
+
+
+TEST_CASE("Sync profile parses bare switches and explicit intervals",
+          "[ledger][syncprofile]")
+{
+    SyncProfileGuard syncProfileGuard;
+    config::mapArgs.erase("-syncprofile");
+    config::mapMultiArgs.erase("-syncprofile");
+    REQUIRE_FALSE(TAO::Ledger::SyncProfile::Enabled());
+
+    const auto option = GENERATE("-syncprofile", "-syncprofile=", "-syncprofile=3",
+                                 "-syncprofile=0", "-syncprofile=-1");
+    const char* argv[] = {"nexus", option};
+    config::ParseParameters(2, argv);
+
+    const bool enabled = std::string(option) != "-syncprofile=0"
+                      && std::string(option) != "-syncprofile=-1";
+    REQUIRE(TAO::Ledger::SyncProfile::Enabled() == enabled);
+    TAO::Ledger::SyncProfile::RecordBlockReceived();
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nBlocksReceived == (enabled ? 1 : 0));
+}
+
+
+TEST_CASE("Sync profile counts only explicitly sync-originated Process deliveries",
+          "[ledger][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    SyncProfileGuard syncProfileGuard;
+    const bool fSyncOrigin = GENERATE(false, true);
+    const bool fSkipCheck = GENERATE(false, true);
+
+    struct ProfileBlock : TAO::Ledger::Block
+    {
+        bool fAccept = true;
+
+        bool Check(bool = false) const override { return true; }
+        bool Accept() const override { return fAccept; }
+    } block;
+    block.hashPrevBlock = TAO::Ledger::ChainState::hashBestChain.load();
+    block.nNonce = 707;
+    REQUIRE(LLD::Ledger->HasBlock(block.hashPrevBlock));
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(block.GetHash()));
+
+    uint8_t expectedStatus = 0;
+    SECTION("accepted") { expectedStatus = TAO::Ledger::PROCESS::ACCEPTED; }
+    SECTION("rejected")
+    {
+        block.fAccept = false;
+        expectedStatus = TAO::Ledger::PROCESS::REJECTED;
+    }
+    SECTION("orphaned")
+    {
+        block.hashPrevBlock = uint1024_t(707);
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(block.hashPrevBlock));
+        expectedStatus = TAO::Ledger::PROCESS::ORPHAN;
+    }
+
+    struct OrphanGuard
+    {
+        uint1024_t hash;
+        ~OrphanGuard()
+        {
+            std::lock_guard<std::mutex> lock(TAO::Ledger::PROCESSING_MUTEX);
+            TAO::Ledger::mapOrphans.Remove(hash);
+        }
+    } orphanGuard{block.GetHash()};
+
+    uint8_t nStatus = 0;
+    if(fSyncOrigin)
+        TAO::Ledger::Process(block, nStatus, nullptr, fSkipCheck, true);
+    else
+        TAO::Ledger::Process(block, nStatus, nullptr, fSkipCheck);
+
+    REQUIRE(nStatus == expectedStatus);
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nBlocksReceived == (fSyncOrigin ? 1 : 0));
+    REQUIRE(snapshot.nBlocksAccepted == (fSyncOrigin && (nStatus & TAO::Ledger::PROCESS::ACCEPTED) ? 1 : 0));
+    REQUIRE(snapshot.nBlocksRejected == (fSyncOrigin && (nStatus & TAO::Ledger::PROCESS::REJECTED) ? 1 : 0));
+    REQUIRE(snapshot.nBlocksOrphaned == (fSyncOrigin && (nStatus & TAO::Ledger::PROCESS::ORPHAN) ? 1 : 0));
 }
 
 
@@ -702,7 +785,7 @@ TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
 }
 
 
-TEST_CASE("Mempool transaction entrypoints wait without holding the mempool mutex",
+TEST_CASE("Mempool entrypoints only wait for transactional work without holding the mempool mutex",
           "[lld][txncommit][concurrency][mempool]")
 {
     LedgerGuard guard;
@@ -729,7 +812,10 @@ TEST_CASE("Mempool transaction entrypoints wait without holding the mempool mute
         else
             pool.Check();
     });
-    const bool fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const bool fReachedExpectedPoint = (nOperation == 2
+        ? waitFuture.wait_for(std::chrono::seconds(2))
+        : contender.wait_for(std::chrono::seconds(2))) == std::future_status::ready;
+    const bool fWaiting = waitFuture.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
     auto reader = std::async(std::launch::async, [&]() { return pool.Has(uint512_t(0xCAFF02)); });
     const bool fReadWhileOwned = reader.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
 
@@ -737,7 +823,8 @@ TEST_CASE("Mempool transaction entrypoints wait without holding the mempool mute
     contender.get();
     const bool fFound = reader.get();
     LLD::SetTxnCoordinatorWaitHook({});
-    REQUIRE(fWaiting);
+    REQUIRE(fReachedExpectedPoint);
+    REQUIRE(fWaiting == (nOperation == 2));
     REQUIRE(fReadWhileOwned);
     REQUIRE_FALSE(fFound);
 }

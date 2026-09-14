@@ -32,6 +32,260 @@ ________________________________________________________________________________
 #include <unit/catch2/catch.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
+
+namespace
+{
+    TAO::Ledger::Transaction CoordinatorTestTransaction(const TAO::Register::Address& address)
+    {
+        TAO::Ledger::Transaction tx;
+        tx.hashGenesis = TAO::Ledger::Credentials::Genesis(LLC::GetRand256().ToString().c_str());
+        tx.nTimestamp = runtime::timestamp();
+        tx.nKeyType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+        tx.nNextType = TAO::Ledger::SIGNATURE::BRAINPOOL;
+        tx.NextHash(LLC::GetRand512());
+        const std::string strHybrid = config::GetArg("-hybrid", "");
+        tx.hashPrevTx = LLC::SK512(strHybrid.begin(), strHybrid.end());
+        const auto account = TAO::Register::CreateAccount(uint256_t(0));
+        tx[0] << uint8_t(TAO::Operation::OP::CREATE) << address
+              << uint8_t(TAO::Register::REGISTER::OBJECT) << account.GetState();
+        REQUIRE(tx.Build());
+        REQUIRE(tx.Sign(LLC::GetRand512()));
+        return tx;
+    }
+}
+
+TEST_CASE("Mempool preflight and empty orphan drains do not reserve the coordinator",
+          "[mempool][mempool_coordinator]")
+{
+    TAO::Ledger::Mempool pool;
+    std::future<bool> contender;
+    bool fCompleted = false;
+    const bool fOrphans = GENERATE(false, true);
+    {
+        LLD::TransactionCoordinatorGuard coordinator;
+        contender = std::async(std::launch::async, [&]()
+        {
+            if(fOrphans)
+            {
+                pool.ProcessOrphans(uint512_t(0xCAFF03));
+                return true;
+            }
+            return !pool.Accept(TAO::Ledger::Transaction());
+        });
+        fCompleted = contender.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    }
+    const bool fResult = contender.get();
+    REQUIRE(fCompleted);
+    REQUIRE(fResult);
+}
+
+TEST_CASE("Mempool admission rechecks concurrent insertion after waiting without its mutex",
+          "[mempool][mempool_coordinator]")
+{
+    TAO::Ledger::Mempool pool;
+    const TAO::Register::Address address(TAO::Register::Address::ACCOUNT);
+    const auto tx = CoordinatorTestTransaction(address);
+    const bool fDuplicate = GENERATE(false, true);
+    auto competing = tx;
+    if(!fDuplicate)
+    {
+        competing.nTimestamp++;
+        competing.hashCache = 0;
+    }
+
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::atomic<bool> notified{false};
+    std::future<bool> contender;
+    bool fWaiting = false;
+    bool fMutexAvailable = false;
+    bool fInserted = false;
+    {
+        LLD::TransactionCoordinatorGuard coordinator;
+        LLD::SetTxnCoordinatorWaitHook([&]()
+        {
+            if(!notified.exchange(true))
+                waiting.set_value();
+        });
+        contender = std::async(std::launch::async, [&]() { return pool.Accept(tx); });
+        fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        fMutexAvailable = pool.MUTEX.try_lock();
+        if(fMutexAvailable)
+        {
+            fInserted = pool.AddUnchecked(competing);
+            pool.MUTEX.unlock();
+        }
+    }
+    const bool fAccepted = contender.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+
+    REQUIRE(fWaiting);
+    REQUIRE(fMutexAvailable);
+    REQUIRE(fInserted);
+    REQUIRE_FALSE(fAccepted);
+    TAO::Register::State state;
+    REQUIRE_FALSE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+TEST_CASE("Mempool orphan drain validates detached entries without retaining its mutex",
+          "[mempool][mempool_coordinator]")
+{
+    TAO::Ledger::Mempool pool;
+    const TAO::Register::Address address(TAO::Register::Address::ACCOUNT);
+    const uint512_t key = LLC::GetRand512();
+    auto parent = CoordinatorTestTransaction(TAO::Register::Address(TAO::Register::Address::ACCOUNT));
+    parent.NextHash(key);
+    parent.hashCache = 0;
+    REQUIRE(parent.Sign(LLC::GetRand512()));
+
+    auto child = CoordinatorTestTransaction(address);
+    child.hashGenesis = parent.hashGenesis;
+    child.nSequence = 1;
+    child.hashPrevTx = parent.GetHash();
+    child.hashCache = 0;
+    REQUIRE(child.Build());
+    REQUIRE(child.Sign(key));
+    REQUIRE_FALSE(pool.Accept(child));
+    REQUIRE(pool.Has(child.GetHash()));
+    REQUIRE(LLD::Ledger->WriteTx(parent.GetHash(), parent));
+    REQUIRE(LLD::Ledger->WriteLast(parent.hashGenesis, parent.GetHash()));
+
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::atomic<bool> notified{false};
+    std::future<void> contender;
+    bool fWaiting = false;
+    bool fMutexAvailable = false;
+    {
+        LLD::TransactionCoordinatorGuard coordinator;
+        LLD::SetTxnCoordinatorWaitHook([&]()
+        {
+            if(!notified.exchange(true))
+                waiting.set_value();
+        });
+        contender = std::async(std::launch::async, [&]() { pool.ProcessOrphans(parent.GetHash()); });
+        fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        fMutexAvailable = pool.MUTEX.try_lock();
+        if(fMutexAvailable)
+            pool.MUTEX.unlock();
+    }
+    contender.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+    TAO::Register::State state;
+    const bool fState = LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL);
+    std::vector<uint512_t> hashes;
+    pool.List(hashes);
+    LLD::Ledger->EraseLast(parent.hashGenesis);
+    LLD::Ledger->EraseTx(parent.GetHash());
+    LLD::Register->EraseState(address, TAO::Ledger::FLAGS::MEMPOOL);
+
+    REQUIRE(fWaiting);
+    REQUIRE(fMutexAvailable);
+    REQUIRE(fState);
+    REQUIRE(std::find(hashes.begin(), hashes.end(), child.GetHash()) != hashes.end());
+}
+
+TEST_CASE("Mempool revalidates a disk tip changed while admission waits",
+          "[mempool][mempool_coordinator]")
+{
+    TAO::Ledger::Mempool pool;
+    const TAO::Register::Address address(TAO::Register::Address::ACCOUNT);
+    const auto parent = CoordinatorTestTransaction(TAO::Register::Address(TAO::Register::Address::ACCOUNT));
+    auto tx = CoordinatorTestTransaction(address);
+    tx.hashGenesis = parent.hashGenesis;
+    tx.nSequence = 1;
+    tx.hashPrevTx = parent.GetHash();
+    tx.hashCache = 0;
+    REQUIRE(tx.Build());
+    REQUIRE(tx.Sign(LLC::GetRand512()));
+    REQUIRE(LLD::Ledger->WriteTx(parent.GetHash(), parent));
+    REQUIRE(LLD::Ledger->WriteLast(parent.hashGenesis, parent.GetHash()));
+
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::atomic<bool> notified{false};
+    std::future<bool> contender;
+    bool fWaiting = false;
+    bool fUpdated = false;
+    {
+        LLD::TransactionCoordinatorGuard coordinator;
+        LLD::SetTxnCoordinatorWaitHook([&]()
+        {
+            if(!notified.exchange(true))
+                waiting.set_value();
+        });
+        contender = std::async(std::launch::async, [&]() { return pool.Accept(tx); });
+        fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        fUpdated = LLD::Ledger->WriteLast(parent.hashGenesis, LLC::GetRand512());
+    }
+    const bool fAccepted = contender.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+    LLD::Ledger->EraseLast(parent.hashGenesis);
+    LLD::Ledger->EraseTx(parent.GetHash());
+
+    REQUIRE(fWaiting);
+    REQUIRE(fUpdated);
+    REQUIRE_FALSE(fAccepted);
+    REQUIRE(pool.Conflicts() == 1);
+    TAO::Register::State state;
+    REQUIRE_FALSE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+TEST_CASE("Mempool Check re-admits resolved roots and drains real conflict dependents",
+          "[mempool][mempool_coordinator]")
+{
+    auto& pool = TAO::Ledger::mempool;
+    const TAO::Register::Address childAddress(TAO::Register::Address::ACCOUNT);
+    const TAO::Register::Address tailAddress(TAO::Register::Address::ACCOUNT);
+    const uint512_t childKey = LLC::GetRand512();
+    const uint512_t tailKey = LLC::GetRand512();
+    auto parent = CoordinatorTestTransaction(TAO::Register::Address(TAO::Register::Address::ACCOUNT));
+    parent.NextHash(childKey);
+    parent.hashCache = 0;
+    REQUIRE(parent.Sign(LLC::GetRand512()));
+    auto child = CoordinatorTestTransaction(childAddress);
+    child.hashGenesis = parent.hashGenesis;
+    child.nSequence = 1;
+    child.hashPrevTx = parent.GetHash();
+    child.NextHash(tailKey);
+    child.hashCache = 0;
+    REQUIRE(child.Build());
+    REQUIRE(child.Sign(childKey));
+    auto tail = CoordinatorTestTransaction(tailAddress);
+    tail.hashGenesis = parent.hashGenesis;
+    tail.nSequence = 2;
+    tail.hashPrevTx = child.GetHash();
+    tail.hashCache = 0;
+    REQUIRE(tail.Build());
+    REQUIRE(tail.Sign(tailKey));
+
+    REQUIRE(LLD::Ledger->WriteTx(parent.GetHash(), parent));
+    REQUIRE(LLD::Ledger->WriteLast(parent.hashGenesis, LLC::GetRand512()));
+    REQUIRE_FALSE(pool.Accept(child));
+    REQUIRE_FALSE(pool.Accept(tail));
+    REQUIRE(LLD::Ledger->WriteLast(parent.hashGenesis, parent.GetHash()));
+    pool.Check();
+
+    TAO::Register::State state;
+    const bool fChildState = LLD::Register->ReadState(childAddress, state, TAO::Ledger::FLAGS::MEMPOOL);
+    const bool fTailState = LLD::Register->ReadState(tailAddress, state, TAO::Ledger::FLAGS::MEMPOOL);
+    std::vector<uint512_t> hashes;
+    pool.List(hashes);
+    pool.Remove(tail.GetHash());
+    pool.Remove(child.GetHash());
+    LLD::Register->EraseState(childAddress, TAO::Ledger::FLAGS::MEMPOOL);
+    LLD::Register->EraseState(tailAddress, TAO::Ledger::FLAGS::MEMPOOL);
+    LLD::Ledger->EraseLast(parent.hashGenesis);
+    LLD::Ledger->EraseTx(parent.GetHash());
+
+    REQUIRE(fChildState);
+    REQUIRE(fTailState);
+    REQUIRE(std::find(hashes.begin(), hashes.end(), child.GetHash()) != hashes.end());
+    REQUIRE(std::find(hashes.begin(), hashes.end(), tail.GetHash()) != hashes.end());
+}
 
 TEST_CASE( "Mempool and memory sequencing tests", "[mempool]")
 {
@@ -964,8 +1218,13 @@ TEST_CASE( "Mempool and memory sequencing tests", "[mempool]")
             //accept all transactions in random ordering
             for(auto& tx : vTX)
             {
-                //all tx's with no prev and not the first should fail because they will all be ORPHAN
-                if(!TAO::Ledger::mempool.Has(tx.hashPrevTx) && tx.nSequence != 0)
+                /* Has also includes queued orphans; only a live predecessor
+                 * allows immediate admission rather than further queueing. */
+                TAO::Ledger::Transaction txPrev;
+                bool fConflicted = false;
+                const bool fLivePrev = TAO::Ledger::mempool.Get(tx.hashPrevTx, txPrev, fConflicted)
+                    && !fConflicted;
+                if(!fLivePrev && tx.nSequence != 0)
                 {
                     REQUIRE_FALSE(TAO::Ledger::mempool.Accept(tx));
                 }

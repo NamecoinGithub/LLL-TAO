@@ -242,12 +242,18 @@ namespace LLP
     template <class PacketType>
     bool BaseConnection<PacketType>::WritePacket(const PacketType& PACKET, bool fPriority)
     {
+        RECURSIVE(SOCKET_MUTEX);
+
+        if(Buffered() == 0)
+            nBundleBufferLimit.store(0);
+
         bool fQueued = false;
 
         /* Per-connection buffer limit — mining connections return a larger value
          * (5 MB by default) so push notifications are not dropped under normal
-         * mining pressure.
-         * Virtual dispatch; no mutex, minimal overhead on the hot path. */
+         * mining pressure.  Ordinary writes are always constrained to this
+         * configured maximum: the oversized-bundle allowance must not be
+         * refilled by unrelated traffic as the bundle drains. */
         const uint64_t nMaxSendBuffer = GetMaxSendBuffer();
 
         /* Get the bytes of the packet. */
@@ -259,9 +265,15 @@ namespace LLP
          * The old hardcoded 1 KB was meaningless for large mining buffers. */
         const uint64_t nReserve = std::max(uint64_t(1024), nMaxSendBuffer / 100);
 
+        /* While an oversized bundle occupies the queue, only small control
+         * messages (e.g. LASTINDEX) may use the narrow reserve above it. */
+        const uint64_t nBundleLimit = nBundleBufferLimit.load();
+
         /* Stop sending packets if send buffer is full. */
         if(Buffered() + vBytes.size() + nReserve < nMaxSendBuffer
-        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer)) //catch for critical messages (< reserve)
+        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer) //catch for critical messages (< reserve)
+        || (fBufferFull.load() && nBundleLimit != 0 && vBytes.size() <= nReserve
+            && Buffered() + vBytes.size() < nBundleLimit)) //control reserve above an active oversized bundle
         {
             /* Debug dump of message type. */
             debug::log(4, NODE, "sent packet (", vBytes.size(), " bytes)");
@@ -303,6 +315,68 @@ namespace LLP
             FLUSH_CONDITION->notify_all();
 
         return fQueued;
+    }
+
+    template <class PacketType>
+    bool BaseConnection<PacketType>::WritePackets(const std::vector<PacketType>& vPackets)
+    {
+        RECURSIVE(SOCKET_MUTEX);
+
+        const uint64_t nBuffered = Buffered();
+        if(nBuffered == 0)
+            nBundleBufferLimit.store(0);
+        else if(nBundleBufferLimit.load() != 0)
+        {
+            fBufferFull.store(true);
+            return false;
+        }
+
+        std::vector<uint8_t> vBytes;
+        uint64_t nReserve = 0;
+        bool fOversized = false;
+        for(const auto& packet : vPackets)
+        {
+            const auto bytes = packet.GetBytes();
+            const uint64_t nMaxSendBuffer = GetMaxSendBuffer();
+            nReserve = std::max(nReserve, std::max(uint64_t(1024), nMaxSendBuffer / 100));
+            const uint64_t nRequired = nBuffered + vBytes.size() + bytes.size() + nReserve;
+
+            /* Bulk bundles must not consume the reserve needed by LASTINDEX. */
+            if(nRequired >= nMaxSendBuffer)
+            {
+                if(nBuffered != 0 || nMaxSendBuffer <= nReserve)
+                {
+                    fBufferFull.store(true);
+                    return false;
+                }
+
+                /* A block's transaction bodies can exceed the normal queue
+                 * limit. Admit one such bundle only on an empty queue. */
+                fOversized = true;
+            }
+
+            vBytes.insert(vBytes.end(), bytes.begin(), bytes.end());
+        }
+
+        /* No packet reaches the socket until every member has been admitted.
+         * The same lock excludes both ordinary writers and Flush(). */
+        if(fOversized)
+            nBundleBufferLimit.store(vBytes.size() + nReserve + 1);
+
+        if(!vBytes.empty() && Write(vBytes, vBytes.size()) < 0)
+        {
+            nBundleBufferLimit.store(0);
+            return false;
+        }
+
+        PACKETS.fetch_add(vPackets.size());
+        if(fOversized && Buffered())
+            fBufferFull.store(true);
+
+        if(FLUSH_CONDITION && Buffered())
+            FLUSH_CONDITION->notify_all();
+
+        return true;
     }
 
 

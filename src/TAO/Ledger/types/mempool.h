@@ -182,6 +182,13 @@ namespace TAO
 
         private:
 
+            /** Validate and commit one transaction without recursively draining queues. */
+            bool AcceptTransaction(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode,
+                                   std::vector<uint512_t>& vResolved, bool& fCommitted);
+
+            /** Reconcile under the coordinator, deferring recursive admission until unlocked. */
+            void CheckTransactions(std::vector<TAO::Ledger::Transaction>& vResolved);
+
             /** The transactions in the ledger memory pool. **/
             std::map<uint512_t, Legacy::Transaction> mapLegacy;
 
@@ -220,10 +227,11 @@ namespace TAO
             std::map<uint512_t, TAO::Ledger::Transaction> mapConflictDependentsByIndex;
 
 
-            /** Nesting depth of ProcessConflictDependents. Accept()'s terminal
+            /** Per-thread nesting depth of ProcessConflictDependents. Accept()'s terminal
              *  dependent drain is skipped while this is non-zero so the outer
              *  while-loop owns forward progress (O(1) stack for long tails). **/
-            uint32_t nConflictDepDrainDepth;
+            static thread_local uint32_t nConflictDepDrainDepth;
+            static thread_local uint32_t nOrphanDrainDepth;
 
 
             /** Per-genesis count of consecutive DEFERRED_LOCAL_STATE passes in
@@ -385,11 +393,13 @@ namespace TAO
              *
              *  @param[in] tx The transaction to add.
              *  @param[in] pnode The node that transaction is accepted from.
+             *  @param[out] pfCommitted Optional: set true only when this call
+             *              committed the transaction into the live mempool.
              *
-             *  @return true if added.
+             *  @return true if committed into the mempool.
              *
              **/
-            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr);
+            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr, bool* pfCommitted = nullptr);
 
 
             /** Accept

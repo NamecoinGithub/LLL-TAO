@@ -38,6 +38,9 @@ namespace TAO
 
                 uint64_t ReportIntervalSeconds()
                 {
+                    if(config::HasArg("-syncprofile") && config::GetArg("-syncprofile", "").empty())
+                        return 10;
+
                     const int64_t nInterval = config::GetArg("-syncprofile", 0);
                     return (nInterval <= 0 ? 0 : static_cast<uint64_t>(std::max<int64_t>(1, nInterval)));
                 }
