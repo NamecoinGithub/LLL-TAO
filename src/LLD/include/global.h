@@ -43,6 +43,17 @@ namespace LLD
     extern TrustDB*      Trust;
     extern LegacyDB*     Legacy;
 
+    /** Reserve the coordinator before locks used by transaction callbacks.
+     *  Recursive reservations do not open or change transaction ownership. */
+    class TransactionCoordinatorGuard
+    {
+    public:
+        TransactionCoordinatorGuard();
+        ~TransactionCoordinatorGuard();
+        TransactionCoordinatorGuard(const TransactionCoordinatorGuard&) = delete;
+        TransactionCoordinatorGuard& operator=(const TransactionCoordinatorGuard&) = delete;
+    };
+
     /** Use this to track database instances to use with our ACID transactions. **/
     struct INSTANCES
     {

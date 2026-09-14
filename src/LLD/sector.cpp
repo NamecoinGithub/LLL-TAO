@@ -729,23 +729,20 @@ namespace LLD
         if(!pTransaction)
             return false;
 
-        if(pTransaction->mapTransactions.empty()
-        && pTransaction->setKeychain.empty()
-        && pTransaction->mapIndex.empty()
-        && pTransaction->setErasedData.empty())
-            return true;
-
         runtime::timer timerCheckpoint;
         runtime::timer timerFsync;
-        timerCheckpoint.Start();
+        const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
+        if(fProfile)
+            timerCheckpoint.Start();
 
         /* A durable journal must never reference newly created keychain storage
          * whose file and directory entries have not reached stable storage. */
-        timerFsync.Start();
+        if(fProfile)
+            timerFsync.Start();
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain storage");
 
-        /* Set commit message into journal. */
+        /* Recovery requires a commit marker from every participant, including empty ones. */
         pTransaction->ssJournal << std::string("commit");
 
         /* Create an append only stream. */
@@ -753,6 +750,9 @@ namespace LLD
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat").c_str(), "ab");
         if(!stream)
             return debug::error(FUNCTION, "failed to open journal file");
+
+        /* Even a failed write or sync may leave journal bytes that abort must discard. */
+        fTxnReleaseRequired = true;
 
         /* Write to the file.  */
         const std::vector<uint8_t>& vBytes = pTransaction->ssJournal.Bytes();
@@ -781,10 +781,12 @@ namespace LLD
         if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
-        timerFsync.Stop();
-        timerCheckpoint.Stop();
-        fTxnReleaseRequired = true;
-        TAO::Ledger::SyncProfile::RecordTxnCheckpoint(1, timerCheckpoint.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        if(fProfile)
+        {
+            timerFsync.Stop();
+            timerCheckpoint.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnCheckpoint(1, timerCheckpoint.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        }
 
         return true;
     }
@@ -808,8 +810,12 @@ namespace LLD
 
         runtime::timer timerRelease;
         runtime::timer timerFsync;
-        timerRelease.Start();
-        timerFsync.Start();
+        const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
+        if(fProfile)
+        {
+            timerRelease.Start();
+            timerFsync.Start();
+        }
 
         /* Durably truncate the transaction journal. */
         const std::string strJournal =
@@ -830,10 +836,13 @@ namespace LLD
         if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
-        timerFsync.Stop();
-        timerRelease.Stop();
         fTxnReleaseRequired = false;
-        TAO::Ledger::SyncProfile::RecordTxnRelease(1, timerRelease.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        if(fProfile)
+        {
+            timerFsync.Stop();
+            timerRelease.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnRelease(1, timerRelease.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        }
 
         return true;
     }
@@ -861,7 +870,9 @@ namespace LLD
 
         runtime::timer timerApply;
         runtime::timer timerFsync;
-        timerApply.Start();
+        const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
+        if(fProfile)
+            timerApply.Start();
 
         pSectorKeys->BeginDurabilityTracking();
 
@@ -921,7 +932,8 @@ namespace LLD
         }
 
         /* Make the applied data and keychain durable before its journal can be released. */
-        timerFsync.Start();
+        if(fProfile)
+            timerFsync.Start();
         for(const uint16_t nSectorFile : setSectorFiles)
         {
             const std::string strPath = debug::safe_printstr(
@@ -935,14 +947,18 @@ namespace LLD
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
-        timerFsync.Stop();
+        if(fProfile)
+            timerFsync.Stop();
 
         /* Cleanup the transaction object. */
         delete pTransaction;
         pTransaction = nullptr;
 
-        timerApply.Stop();
-        TAO::Ledger::SyncProfile::RecordTxnApply(1, timerApply.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        if(fProfile)
+        {
+            timerApply.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnApply(1, timerApply.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+        }
 
         return true;
     }
@@ -1098,6 +1114,12 @@ namespace LLD
         {
             return debug::error(FUNCTION, strName, " transaction journal parse failed: ", e.what()),
                    RECOVERY::FAILED;
+        }
+
+        /* A valid but uncommitted journal must be discarded before the next transaction. */
+        {
+            LOCK(TRANSACTION_MUTEX);
+            fTxnReleaseRequired = true;
         }
 
         debug::log(0, FUNCTION, strName, " transaction journal never reached commit");

@@ -816,8 +816,10 @@ namespace LLP
          *  @param[in] nSpecifier The type of block to send off.
          *  @param[in] rBlock The block state we want to send off.
          *
+         *  @return true if the block and requested transactions were queued.
+         *
          **/
-        void PushBlock(const uint8_t nSpecifier, const TAO::Ledger::BlockState& rBlock);
+        bool PushBlock(const uint8_t nSpecifier, const TAO::Ledger::BlockState& rBlock);
 
 
         /** OpenTxResponseWindow

@@ -28,6 +28,8 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/timelocks.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/state.h>
+#include <TAO/Ledger/types/syncblock.h>
+#include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/tritium.h>
 #include <TAO/Ledger/types/credentials.h>
 #include <TAO/Ledger/types/locator.h>
@@ -3684,43 +3686,117 @@ TEST_CASE("Post-sync state: nSyncSession==0 and fSynchronized==true after Sync()
 }
 
 
-TEST_CASE("LIST batches continue from the final sent block under buffer pressure (source guard)",
+#ifndef WIN32
+TEST_CASE("LIST batches continue from the final queued block under buffer pressure",
     "[llp][list][lastindex]")
 {
-    const char* vCandidates[] = {
-        "src/LLP/tritium.cpp",
-        "./src/LLP/tritium.cpp",
-        "../src/LLP/tritium.cpp",
-        "../../src/LLP/tritium.cpp",
-    };
-
-    std::string strSource;
-    for(const char* psz : vCandidates)
+    LedgerGuard ledgerGuard;
+    ChainStateGuard chainGuard;
+    struct FixtureGuard
     {
-        std::ifstream f(psz, std::ios::in | std::ios::binary);
-        if(!f.is_open())
-            continue;
+        const std::map<std::string, std::string> savedArgs = config::mapArgs;
+        const bool fClient = config::fClient.exchange(false);
+        std::vector<uint1024_t> hashes;
+        uint512_t hashProducer = 0;
 
-        std::ostringstream ss;
-        ss << f.rdbuf();
-        strSource = ss.str();
-        if(!strSource.empty())
-            break;
-    }
+        ~FixtureGuard()
+        {
+            for(const auto& hash : hashes)
+                LLD::Ledger->EraseBlock(hash);
+            if(hashProducer != 0)
+                LLD::Ledger->EraseTx(hashProducer);
+            config::mapArgs = savedArgs;
+            config::fClient.store(fClient);
+        }
+    } fixture;
 
-    if(strSource.empty())
+    class ListSocketNode : public RecoverySocketNode
     {
-        WARN("tritium.cpp not reachable from CWD; skipping source guard");
-        SUCCEED();
-        return;
-    }
+    public:
+        mutable uint32_t nSends = 0;
+        mutable bool fRejected = false;
+        uint32_t nRejectSend = 0;
 
-    REQUIRE(strSource.find("PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), hashStart);")
-        != std::string::npos);
-    REQUIRE(strSource.find("stateLast.hashPrevBlock when fBufferFull was true") != std::string::npos);
-    REQUIRE(strSource.find("PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), stateLast.hashPrevBlock);")
-        == std::string::npos);
+        uint64_t GetMaxSendBuffer() const override
+        {
+            if(++nSends == nRejectSend)
+            {
+                fRejected = true;
+                return 0;
+            }
+            return LLP::TritiumNode::GetMaxSendBuffer();
+        }
+    } node;
+
+    const auto nSpecifier = GENERATE(
+        LLP::TritiumNode::SPECIFIER::SYNC,
+        LLP::TritiumNode::SPECIFIER::CLIENT,
+        LLP::TritiumNode::SPECIFIER::TRANSACTIONS);
+    const bool fSequential = GENERATE(false, true);
+    const uint32_t nRejectSend = GENERATE(0u, 1u, 2u);
+    config::mapArgs["-sequentialsync"] = fSequential ? "1" : "0";
+    config::mapArgs["-batchlimit"] = "10";
+    DataStream subscription(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    subscription << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX);
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::SUBSCRIBE, subscription);
+    REQUIRE(node.ProcessPacket());
+    node.Receive();
+    node.nSends = 0;
+    node.nRejectSend = nRejectSend;
+
+    TAO::Ledger::Transaction producer;
+    producer.hashGenesis = uint256_t(0xCA9001);
+    fixture.hashProducer = producer.GetHash();
+    REQUIRE(LLD::Ledger->WriteTx(fixture.hashProducer, producer));
+    std::vector<TAO::Ledger::BlockState> states(3);
+    for(size_t i = 0; i < states.size(); ++i)
+    {
+        states[i].nVersion = 7;
+        states[i].nChannel = 2;
+        states[i].nHeight = 45000 + i;
+        states[i].nNonce = 0xCA9000 + i;
+        states[i].vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fixture.hashProducer});
+        if(i > 0)
+            states[i].hashPrevBlock = states[i - 1].GetHash();
+        fixture.hashes.push_back(states[i].GetHash());
+    }
+    for(size_t i = 0; i < states.size(); ++i)
+    {
+        if(i + 1 < states.size())
+            states[i].hashNextBlock = fixture.hashes[i + 1];
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashes[i], states[i]));
+    }
+    TAO::Ledger::ChainState::hashBestChain.store(fixture.hashes.back());
+
+    DataStream request(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    request << uint8_t(nSpecifier) << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+        << uint8_t(LLP::TritiumNode::TYPES::UINT1024_T) << fixture.hashes[1] << fixture.hashes[2];
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, request);
+    REQUIRE(node.ProcessPacket());
+    REQUIRE(node.fRejected == (nRejectSend != 0));
+
+    const uint32_t nQueued = nRejectSend == 0 ? 2 : nRejectSend - 1;
+    std::vector<uint8_t> expected;
+    for(uint32_t i = 1; i <= nQueued; ++i)
+    {
+        DataStream block(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        if(nSpecifier == LLP::TritiumNode::SPECIFIER::SYNC)
+            block << uint8_t(nSpecifier) << TAO::Ledger::SyncBlock(states[i], true);
+        else if(nSpecifier == LLP::TritiumNode::SPECIFIER::CLIENT)
+            block << uint8_t(nSpecifier) << TAO::Ledger::ClientBlock(states[i]);
+        else
+            block << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << TAO::Ledger::TritiumBlock(states[i]);
+        const auto bytes = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, block).GetBytes();
+        expected.insert(expected.end(), bytes.begin(), bytes.end());
+    }
+    DataStream lastIndex(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    lastIndex << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << fixture.hashes[nQueued];
+    const auto notification = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, lastIndex).GetBytes();
+    expected.insert(expected.end(), notification.begin(), notification.end());
+    REQUIRE(node.Receive() == expected);
 }
+#endif
 
 
 TEST_CASE("Sync completion height guard prevents stale half-chain finalization", "[ledger][process]")

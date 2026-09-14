@@ -73,6 +73,7 @@ ________________________________________________________________________________
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -318,7 +319,7 @@ namespace
 
     /* Build a journal that applies a simple key/value write. */
     DataStream MakeWriteJournal(const std::pair<std::string, uint32_t>& key,
-                                const uint32_t nValue)
+                                const uint32_t nValue, const bool fCommit = true)
     {
         DataStream ssKey(SER_LLD, LLD::DATABASE_VERSION);
         ssKey << key;
@@ -329,7 +330,8 @@ namespace
 
         DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
         ssJournal << std::string("write") << ssKey.Bytes() << ssData.Bytes();
-        ssJournal << std::string("commit");
+        if(fCommit)
+            ssJournal << std::string("commit");
         return ssJournal;
     }
 
@@ -485,7 +487,7 @@ TEST_CASE("LLD::TxnBegin opens every crash-recovery participant",
 }
 
 
-TEST_CASE("Sync profile skips empty consensus participants during durable phases",
+TEST_CASE("Sync profile skips empty applies but preserves every recovery marker",
           "[lld][txncommit][syncprofile]")
 {
     LedgerGuard ledgerGuard;
@@ -509,9 +511,9 @@ TEST_CASE("Sync profile skips empty consensus participants during durable phases
     const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
     REQUIRE(snapshot.nTxnOpenedParticipants == 5);
     REQUIRE(snapshot.nTxnTouchedParticipants == 1);
-    REQUIRE(snapshot.nTxnCheckpointParticipants == 1);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 5);
     REQUIRE(snapshot.nTxnApplyParticipants == 1);
-    REQUIRE(snapshot.nTxnReleaseParticipants == 1);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 5);
     REQUIRE(JournalSize("_TRUST") == nTrustJournalBefore);
 
     LLD::Ledger->Erase(keyLedger);
@@ -542,9 +544,9 @@ TEST_CASE("Sync profile counts every touched consensus participant",
     const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
     REQUIRE(snapshot.nTxnOpenedParticipants == 5);
     REQUIRE(snapshot.nTxnTouchedParticipants == 2);
-    REQUIRE(snapshot.nTxnCheckpointParticipants == 2);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 5);
     REQUIRE(snapshot.nTxnApplyParticipants == 2);
-    REQUIRE(snapshot.nTxnReleaseParticipants == 2);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 5);
     REQUIRE(LLD::Ledger->Exists(keyLedger));
     REQUIRE(LLD::Trust->Exists(keyTrust));
 
@@ -553,7 +555,29 @@ TEST_CASE("Sync profile counts every touched consensus participant",
 }
 
 
-TEST_CASE("Sync profile avoids O(N x all participants) durable barriers for sequential ledger-only commits",
+TEST_CASE("Disabled sync profiling leaves transaction counters and timers unchanged",
+          "[lld][txncommit][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    SyncProfileGuard syncProfileGuard;
+    config::mapArgs.erase("-syncprofile");
+    REQUIRE_FALSE(TAO::Ledger::SyncProfile::Enabled());
+    const auto key = std::make_pair(std::string("syncprofile-disabled"), 1u);
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(1)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnOpenedParticipants == 0);
+    REQUIRE(snapshot.nTxnTouchedParticipants == 0);
+    REQUIRE(snapshot.nTxnCoordinatorWaitUs == 0);
+    REQUIRE(snapshot.nTxnCheckpointUs == 0);
+    REQUIRE(snapshot.nTxnApplyUs == 0);
+    REQUIRE(snapshot.nTxnReleaseUs == 0);
+    LLD::Ledger->Erase(key);
+}
+
+
+TEST_CASE("Sync profile avoids empty applies for sequential ledger-only commits",
           "[lld][txncommit][syncprofile]")
 {
     LedgerGuard ledgerGuard;
@@ -578,9 +602,9 @@ TEST_CASE("Sync profile avoids O(N x all participants) durable barriers for sequ
     const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
     REQUIRE(snapshot.nTxnOpenedParticipants == 5 * nIterations);
     REQUIRE(snapshot.nTxnTouchedParticipants == nIterations);
-    REQUIRE(snapshot.nTxnCheckpointParticipants == nIterations);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 5 * nIterations);
     REQUIRE(snapshot.nTxnApplyParticipants == nIterations);
-    REQUIRE(snapshot.nTxnReleaseParticipants == nIterations);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 5 * nIterations);
 }
 
 
@@ -675,6 +699,83 @@ TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
     REQUIRE(fSawContenderWaiting);
     REQUIRE_FALSE(fAcquiredBeforeRelease);
     REQUIRE(fContenderAcquired.load());
+}
+
+
+TEST_CASE("Mempool transaction entrypoints wait without holding the mempool mutex",
+          "[lld][txncommit][concurrency][mempool]")
+{
+    LedgerGuard guard;
+    TAO::Ledger::Mempool pool;
+    const uint8_t nFlags = GENERATE(
+        TAO::Ledger::FLAGS::BLOCK, TAO::Ledger::FLAGS::MINER, TAO::Ledger::FLAGS::SANITIZE);
+    const uint32_t nOperation = GENERATE(0u, 1u, 2u);
+    REQUIRE(LLD::TxnBegin(nFlags, LLD::INSTANCES::LEDGER));
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::atomic<bool> notified{false};
+    LLD::SetTxnCoordinatorWaitHook([&]()
+    {
+        if(!notified.exchange(true))
+            waiting.set_value();
+    });
+
+    auto contender = std::async(std::launch::async, [&]()
+    {
+        if(nOperation == 0)
+            pool.Accept(TAO::Ledger::Transaction());
+        else if(nOperation == 1)
+            pool.ProcessOrphans(uint512_t(0xCAFF01));
+        else
+            pool.Check();
+    });
+    const bool fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    auto reader = std::async(std::launch::async, [&]() { return pool.Has(uint512_t(0xCAFF02)); });
+    const bool fReadWhileOwned = reader.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+
+    LLD::TxnAbort(nFlags, LLD::INSTANCES::LEDGER);
+    contender.get();
+    const bool fFound = reader.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+    REQUIRE(fWaiting);
+    REQUIRE(fReadWhileOwned);
+    REQUIRE_FALSE(fFound);
+}
+
+
+TEST_CASE("Coordinator reservation survives recursive guards and transaction release",
+          "[lld][txncommit][concurrency][mempool]")
+{
+    LedgerGuard guard;
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::future<bool> contender;
+    bool fWaiting = false;
+    bool fBlockedAfterCommit = false;
+    {
+        LLD::TransactionCoordinatorGuard outer;
+        {
+            LLD::TransactionCoordinatorGuard inner;
+            REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY));
+            REQUIRE_FALSE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY));
+            REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY));
+        }
+        LLD::SetTxnCoordinatorWaitHook([&]() { waiting.set_value(); });
+        contender = std::async(std::launch::async, [&]()
+        {
+            const bool fAcquired = LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+            if(fAcquired)
+                LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+            return fAcquired;
+        });
+        fWaiting = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        fBlockedAfterCommit = contender.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout;
+    }
+    const bool fAcquired = contender.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+    REQUIRE(fWaiting);
+    REQUIRE(fBlockedAfterCommit);
+    REQUIRE(fAcquired);
 }
 
 
@@ -1113,6 +1214,10 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
     RealCodeLedgerGuard ledgerGuard;
     ChainStateGuard     chainGuard;
     BestChainDiskGuard  bestChainGuard;
+    SyncProfileGuard syncProfileGuard;
+    const bool fProfile = GENERATE(false, true);
+    if(!fProfile)
+        config::mapArgs.erase("-syncprofile");
 
     /* ---- Minimal genesis block written to disk ---- */
     TAO::Ledger::BlockState genesis;
@@ -1158,6 +1263,14 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 
     /* ---- Invoke real SetBest() ---- */
     REQUIRE_FALSE(badBlock.SetBest());
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    if(fProfile)
+        REQUIRE(snapshot.nSetBestUs > 0);
+    else
+    {
+        REQUIRE(snapshot.nSetBestUs == 0);
+        REQUIRE(snapshot.nConnectUs == 0);
+    }
 
     /* ---- (a) ChainState atomics must be unchanged ---- */
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
@@ -3588,6 +3701,100 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
 }
 
 
+TEST_CASE("Recovery rolls forward a partial apply with empty group participants",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ClientGuard clientGuard;
+    LogicalGuard logicalGuard;
+    struct ModeGuard
+    {
+        const bool saved = config::fClient.load();
+        ~ModeGuard() { config::fClient.store(saved); }
+    } modeGuard;
+    const bool fClient = GENERATE(false, true);
+    config::fClient.store(fClient);
+    const uint8_t nFlags = TAO::Ledger::FLAGS::BLOCK;
+    const uint16_t nInstances = fClient ? LLD::INSTANCES::MERKLE : LLD::INSTANCES::CONSENSUS;
+    const auto key = std::make_pair(std::string("recovery-partial-empty"), uint32_t(fClient));
+    LLD::Contract->Erase(key);
+    LLD::Ledger->Erase(key);
+    LLD::Client->Erase(key);
+
+    LLD::TransactionGuard transaction(nFlags, nInstances);
+    REQUIRE(transaction);
+    REQUIRE(LLD::Contract->Write(key, uint32_t(71)));
+    if(fClient)
+        REQUIRE(LLD::Client->Write(key, uint32_t(72)));
+    else
+        REQUIRE(LLD::Ledger->Write(key, uint32_t(72)));
+
+    REQUIRE(LLD::Contract->TxnCheckpoint());
+    REQUIRE(LLD::Register->TxnCheckpoint());
+    if(fClient)
+    {
+        REQUIRE(LLD::Logical->TxnCheckpoint());
+        REQUIRE(LLD::Client->TxnCheckpoint());
+    }
+    else
+    {
+        REQUIRE(LLD::Trust->TxnCheckpoint());
+        REQUIRE(LLD::Legacy->TxnCheckpoint());
+        REQUIRE(LLD::Ledger->TxnCheckpoint());
+    }
+    REQUIRE(LLD::Contract->TxnCommit());
+    REQUIRE(LLD::TxnRecovery());
+    LLD::TxnAbort(nFlags, nInstances);
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Contract->Read(key, nValue));
+    REQUIRE(nValue == 71);
+    if(fClient)
+        REQUIRE(LLD::Client->Read(key, nValue));
+    else
+        REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 72);
+    LLD::Contract->Erase(key);
+    LLD::Ledger->Erase(key);
+    LLD::Client->Erase(key);
+}
+
+
+#ifdef __linux__
+TEST_CASE("Failed checkpoint writes still require durable journal release",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    const std::filesystem::path path = config::GetDataDir() + "_LEDGER/journal.dat";
+    struct JournalGuard
+    {
+        std::filesystem::path path;
+        ~JournalGuard()
+        {
+            std::filesystem::remove(path);
+            LLD::Ledger->TxnRelease();
+        }
+    } journalGuard{path};
+    REQUIRE(LLD::Ledger->TxnRelease());
+    std::filesystem::remove(path);
+    std::filesystem::create_symlink("/dev/full", path);
+
+    LLD::Ledger->TxnBegin();
+    REQUIRE(LLD::Ledger->Write(std::make_pair(std::string("checkpoint-write-failure"), 1u), uint32_t(1)));
+    REQUIRE_FALSE(LLD::Ledger->TxnCheckpoint());
+    /* /dev/full also rejects fsync: release must attempt it, not silently succeed. */
+    REQUIRE_FALSE(LLD::Ledger->TxnRelease());
+    REQUIRE(std::filesystem::remove(path));
+    REQUIRE(LLD::Ledger->TxnRelease());
+    REQUIRE(JournalSize("_LEDGER") == 0);
+}
+#endif
+
+
 TEST_CASE("Recovered touched participant still truncates its durable journal on release",
           "[lld][txncommit][recovery][syncprofile]")
 {
@@ -3611,6 +3818,78 @@ TEST_CASE("Recovered touched participant still truncates its durable journal on 
     REQUIRE(snapshot.nTxnReleaseParticipants == 1);
 
     LLD::Ledger->Erase(keyLedger);
+}
+
+
+TEST_CASE("LLD::TxnRecovery discards uncommitted journals before a later checkpoint",
+          "[lld][txncommit][recovery][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    SyncProfileGuard syncProfileGuard;
+
+    const auto abortedKey = std::make_pair(std::string("recovery-aborted"), 1u);
+    const auto committedKey = std::make_pair(std::string("recovery-next"), 1u);
+    LLD::Ledger->Erase(abortedKey);
+    LLD::Ledger->Erase(committedKey);
+
+    for(const auto* name : {"_CONTRACT", "_REGISTER", "_TRUST", "_LEGACY"})
+        REQUIRE(WriteRecoveryJournal(name, MakeWriteJournal(abortedKey, 41)));
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeWriteJournal(abortedKey, 42, false)));
+    REQUIRE(JournalSize("_LEDGER") > 0);
+
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_LEDGER") == 0);
+    REQUIRE_FALSE(LLD::Ledger->Exists(abortedKey));
+    REQUIRE_FALSE(LLD::Contract->Exists(abortedKey));
+    REQUIRE_FALSE(LLD::Register->Exists(abortedKey));
+    REQUIRE_FALSE(LLD::Trust->Exists(abortedKey));
+    REQUIRE_FALSE(LLD::Legacy->Exists(abortedKey));
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnReleaseParticipants == 5);
+
+    /* Simulate another crash after a new checkpoint, without applying it first. */
+    LLD::Ledger->TxnBegin();
+    REQUIRE(LLD::Ledger->Write(committedKey, uint32_t(43)));
+    REQUIRE(LLD::Ledger->TxnCheckpoint());
+    REQUIRE(LLD::Ledger->TxnRecovery() == LLD::RECOVERY::COMPLETE);
+    REQUIRE(LLD::Ledger->TxnCommit());
+    REQUIRE(LLD::Ledger->TxnRelease());
+    REQUIRE_FALSE(LLD::Ledger->Exists(abortedKey));
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(committedKey, nValue));
+    REQUIRE(nValue == 43);
+    LLD::Ledger->Erase(committedKey);
+}
+
+
+TEST_CASE("Recovery release leaves missing and empty participant journals untouched",
+          "[lld][txncommit][recovery][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    SyncProfileGuard syncProfileGuard;
+    const std::filesystem::path path = config::GetDataDir() + "_LEDGER/journal.dat";
+    REQUIRE(LLD::Ledger->TxnRelease());
+
+    SECTION("missing journal")
+    {
+        std::filesystem::remove(path);
+        REQUIRE(LLD::Ledger->TxnRecovery() == LLD::RECOVERY::INCOMPLETE);
+        REQUIRE(LLD::Ledger->TxnRelease());
+        REQUIRE_FALSE(std::filesystem::exists(path));
+    }
+    SECTION("empty journal")
+    {
+        REQUIRE(WriteRecoveryJournal("_LEDGER", DataStream(SER_LLD, LLD::DATABASE_VERSION)));
+        const auto lastWrite = std::filesystem::last_write_time(path);
+        REQUIRE(LLD::Ledger->TxnRecovery() == LLD::RECOVERY::INCOMPLETE);
+        REQUIRE(LLD::Ledger->TxnRelease());
+        REQUIRE(std::filesystem::last_write_time(path) == lastWrite);
+        REQUIRE(std::filesystem::file_size(path) == 0);
+    }
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnReleaseParticipants == 0);
 }
 
 

@@ -43,7 +43,7 @@ namespace LLD
 
 
     /* Serialize every transaction that uses shared in-memory transaction objects. */
-    static std::mutex TRANSACTION_COORDINATOR;
+    static std::recursive_mutex TRANSACTION_COORDINATOR;
     static thread_local bool fTxnOwner = false;
     static thread_local bool fTxnMemoryOnly = false;
     static thread_local uint8_t nTxnOwnerFlags = 0;
@@ -100,6 +100,44 @@ namespace LLD
     #ifdef UNIT_TESTS
     static std::function<void()> fnTxnCoordinatorWaitHook;
     #endif
+
+    static void AcquireTransactionCoordinator()
+    {
+        std::unique_lock<std::recursive_mutex> lock(TRANSACTION_COORDINATOR, std::defer_lock);
+        const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
+        runtime::timer timerWait;
+        if(fProfile)
+            timerWait.Start();
+        #ifdef UNIT_TESTS
+        if(!lock.try_lock())
+        {
+            if(fnTxnCoordinatorWaitHook)
+                fnTxnCoordinatorWaitHook();
+
+            lock.lock();
+        }
+        #else
+        lock.lock();
+        #endif
+        if(fProfile)
+        {
+            timerWait.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnCoordinatorWait(timerWait.ElapsedMicroseconds());
+        }
+        lock.release();
+    }
+
+
+    TransactionCoordinatorGuard::TransactionCoordinatorGuard()
+    {
+        AcquireTransactionCoordinator();
+    }
+
+
+    TransactionCoordinatorGuard::~TransactionCoordinatorGuard()
+    {
+        TRANSACTION_COORDINATOR.unlock();
+    }
 
 
     static void ReleaseMemoryTransactions(const uint8_t nFlags, const uint16_t nInstances)
@@ -509,25 +547,7 @@ namespace LLD
                 return false;
             }
 
-            #ifdef UNIT_TESTS
-            runtime::timer timerWait;
-            timerWait.Start();
-            if(!TRANSACTION_COORDINATOR.try_lock())
-            {
-                if(fnTxnCoordinatorWaitHook)
-                    fnTxnCoordinatorWaitHook();
-
-                TRANSACTION_COORDINATOR.lock();
-            }
-            timerWait.Stop();
-            TAO::Ledger::SyncProfile::RecordTxnCoordinatorWait(timerWait.ElapsedMicroseconds());
-            #else
-            runtime::timer timerWait;
-            timerWait.Start();
-            TRANSACTION_COORDINATOR.lock();
-            timerWait.Stop();
-            TAO::Ledger::SyncProfile::RecordTxnCoordinatorWait(timerWait.ElapsedMicroseconds());
-            #endif
+            AcquireTransactionCoordinator();
 
             if(fTxnRecoveryRequired.load())
             {
@@ -688,9 +708,10 @@ namespace LLD
             return true;
         }
 
-        TAO::Ledger::SyncProfile::RecordTxnParticipants(
-            CountParticipants(nReleaseInstances),
-            CountTouchedParticipants(nReleaseInstances));
+        if(TAO::Ledger::SyncProfile::Enabled())
+            TAO::Ledger::SyncProfile::RecordTxnParticipants(
+                CountParticipants(nReleaseInstances),
+                CountTouchedParticipants(nReleaseInstances));
 
         if(fTxnRecoveryRequired.load())
         {
