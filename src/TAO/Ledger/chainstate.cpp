@@ -399,9 +399,7 @@ namespace TAO
                             stateWalk.nHeight, " hash ", hashWalk.SubString(), " references missing predecessor ",
                             stateWalk.hashPrevBlock.SubString());
 
-                        const uint32_t nRepairDepth = (nBound > (nDepth + 1))
-                            ? (nBound - (nDepth + 1))
-                            : 1;
+                        const uint32_t nRepairDepth = nBound - nDepth;
                         if(BuildHeightIndexedRepairSuffix(nRepairDepth, audit))
                         {
                             if(audit.fCanRepairFromHeight)

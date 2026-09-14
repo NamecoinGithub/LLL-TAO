@@ -664,17 +664,6 @@ namespace TAO
             if(!LLD::Ledger->ReadBlock(hashPrevBlock, statePrev))
                 return debug::error(FUNCTION, "previous block state not found");
 
-            /* Check the Height of Block to Previous Block. */
-            if(statePrev.nHeight + 1 != nHeight)
-                return debug::error(FUNCTION, "incorrect block height.");
-
-            /* Channel switched output. */
-            if(GetChannel() != CHANNEL::PRIME && config::nVerbose >= 2)
-            {
-                debug::log(2, "  proof:  ", (GetChannel() == 0 ? StakeHash() : ProofHash()).SubString());
-                debug::log(2, "  target: ", LLC::CBigNum().SetCompact(nBits).getuint1024().SubString());
-            }
-
             const uint1024_t hashPrevRead = statePrev.GetHash();
             if(hashPrevRead != hashPrevBlock)
             {
@@ -685,6 +674,17 @@ namespace TAO
                     " block_height=", nHeight,
                     " prev_height=", statePrev.nHeight,
                     " channel=", uint32_t(GetChannel()));
+            }
+
+            /* Check the Height of Block to Previous Block. */
+            if(statePrev.nHeight + 1 != nHeight)
+                return debug::error(FUNCTION, "incorrect block height.");
+
+            /* Channel switched output. */
+            if(GetChannel() != CHANNEL::PRIME && config::nVerbose >= 2)
+            {
+                debug::log(2, "  proof:  ", (GetChannel() == 0 ? StakeHash() : ProofHash()).SubString());
+                debug::log(2, "  target: ", LLC::CBigNum().SetCompact(nBits).getuint1024().SubString());
             }
 
             const uint32_t nExpectedBits = GetNextTargetRequired(statePrev, GetChannel());

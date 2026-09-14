@@ -57,6 +57,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
+#include <TAO/Ledger/types/tritium.h>
 
 #include <Util/include/args.h>
 #include <Util/include/debug.h>
@@ -2106,6 +2107,48 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
 }
 
 
+TEST_CASE("Tritium acceptance checks predecessor identity before height",
+          "[ledger][tritium][accept][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    FlagGuard flagGuard;
+    config::fClient.store(false);
+
+    TAO::Ledger::BlockState statePrev;
+    statePrev.nVersion = 7;
+    statePrev.nHeight = 10;
+    statePrev.nNonce = 38300;
+    const uint1024_t hashPrev = statePrev.GetHash();
+    blocksGuard.hashes.push_back(hashPrev);
+
+    TAO::Ledger::TritiumBlock block;
+    block.hashPrevBlock = hashPrev;
+    block.nHeight = 12;
+    std::string strExpectedError = "previous block identity mismatch";
+
+    SECTION("wrong identity at the expected height")
+    {
+        ++statePrev.nNonce;
+        block.nHeight = 11;
+    }
+    SECTION("wrong identity at a different height")
+    {
+        ++statePrev.nNonce;
+    }
+    SECTION("correct identity at a different height")
+    {
+        strExpectedError = "incorrect block height.";
+    }
+
+    REQUIRE(LLD::Ledger->WriteBlock(hashPrev, statePrev));
+    debug::GetLastError();
+    REQUIRE_FALSE(block.Accept());
+    REQUIRE(debug::GetLastError().find(strExpectedError) != std::string::npos);
+    REQUIRE_FALSE(LLD::HasOpenTransaction());
+}
+
+
 TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip predecessor holes",
           "[ledger][chainstate][startup][repair][real]")
 {
@@ -2227,6 +2270,46 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         REQUIRE(restoredTwo.GetHash() == fixture.hashTwo);
         REQUIRE(restoredOne.hashNextBlock == fixture.hashTwo);
         REQUIRE(restoredTwo.hashNextBlock == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain requires an anchor within the exact remaining scan depth")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38106, blocksGuard);
+        std::vector<uint1024_t> vMissing;
+        uint32_t nDepth = 3;
+
+        SECTION("one missing alias at the tip")
+        {
+            vMissing = {fixture.hashTwo};
+            nDepth = 2;
+        }
+        SECTION("one missing alias after a readable predecessor")
+        {
+            vMissing = {fixture.hashOne};
+        }
+        SECTION("two consecutive missing aliases")
+        {
+            vMissing = {fixture.hashTwo, fixture.hashOne};
+        }
+
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->Erase(hash, true));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, nDepth - 1));
+        for(const auto& hash : vMissing)
+            REQUIRE_FALSE(LLD::Ledger->HasBlock(hash));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, nDepth));
+        for(const auto& hash : vMissing)
+        {
+            TAO::Ledger::BlockState restored;
+            REQUIRE(LLD::Ledger->ReadBlock(hash, restored));
+            REQUIRE(restored.GetHash() == hash);
+        }
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 
