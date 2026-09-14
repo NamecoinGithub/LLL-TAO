@@ -3,7 +3,7 @@
 
 **Branch:** `STATELESS-NODE`  
 **Canonical PRs:** LLL-TAO #274, #278 · NexusMiner #167, #169, #170  
-**Last updated:** 2026-02-24
+**Last updated:** 2026-09-14
 
 ---
 
@@ -43,6 +43,45 @@ block.nHeight  ==  ChainState::tStateBest.nHeight + 1
 ```
 
 It must hold for every block on every channel, at the moment `AddBlockData()` is called.
+
+### PR #706: ancestry recovery and mismatch diagnostics
+
+The acceptance rule remains `statePrev.nHeight + 1 == block.nHeight`; PR #706 does
+not relax height or difficulty validation. A hash lookup must first prove
+`statePrev.GetHash() == block.hashPrevBlock`. Otherwise, an alias returning a
+different block at a different height incorrectly appears to be a `+1` height
+mismatch. Acceptance now reports predecessor identity corruption before checking
+height, and a genuine difficulty mismatch reports the block and predecessor
+hashes, both heights, channel, observed `nBits`, and expected target bits.
+
+There was also a separate off-by-one error in the startup repair budget:
+`nBound - (nDepth + 1)` removed the iteration needed to validate the readable
+anchor after collecting a missing predecessor suffix. For example, one missing
+alias with two scan levels remaining needs one iteration to recover the candidate
+and one to prove its anchor. Passing `nBound - nDepth` permits this exact-boundary
+repair without extending the audit bound. This explains refusal of a recoverable
+chain; it does **not** establish why an alias originally became missing.
+
+With `-repairchain=1`, recovery restores only hash aliases whose height-index
+records prove the expected hash, contiguous height, and successor link. A suffix
+must re-anchor to a validated hash-readable predecessor, or terminate at the
+configured genesis hash with height zero and no predecessor. Previously, a
+recovered genesis candidate stopped the loop before being recognized as an
+anchor, so even this fully proven repair was refused. Non-genesis zero-predecessor
+roots and incorrect successor links remain rejected. Repairs are staged in a
+transaction, re-audited before commit, and do not rewind the best tip.
+
+Offline audit evidence also distinguishes keychain-only entries from sector
+records, excludes them from sector comparisons, and requires hash identity before
+claiming child/predecessor link consistency. Height lookup alone is not proof.
+
+Regression coverage in `tests/unit/TAO/Ledger/setbest_txn_ordering.cpp` checks
+exact-boundary repair and out-of-bound refusal, genesis-only and multi-alias
+recovery, invalid-root refusal without mutation, and identity/height/difficulty
+error separation including the difficulty diagnostic fields. Without repair
+opt-in, a detected ancestry hole still fails startup without mutation; if proof
+is unavailable, back up the data directory and restore a trusted backup or
+snapshot rather than bypassing validation.
 
 ---
 

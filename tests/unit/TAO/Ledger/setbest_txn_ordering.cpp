@@ -54,9 +54,11 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/genesis_block.h>
+#include <TAO/Ledger/include/retarget.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
+#include <TAO/Ledger/types/tritium.h>
 
 #include <Util/include/args.h>
 #include <Util/include/debug.h>
@@ -74,6 +76,7 @@ ________________________________________________________________________________
 #include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1899,6 +1902,8 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 
+
+
     SECTION("opt-in repair refuses rollback when ancestry walk is unreadable")
     {
         const auto fixture = BuildCheckpointChainFixture(34000, blocksGuard);
@@ -2104,6 +2109,72 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
 }
 
 
+TEST_CASE("Tritium acceptance checks predecessor identity before height and difficulty",
+          "[ledger][tritium][accept][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    FlagGuard flagGuard;
+    config::fClient.store(false);
+
+    TAO::Ledger::BlockState statePrev;
+    statePrev.nVersion = 7;
+    statePrev.nHeight = 10;
+    statePrev.nNonce = 38300;
+    const uint1024_t hashPrev = statePrev.GetHash();
+    blocksGuard.hashes.push_back(hashPrev);
+
+    TAO::Ledger::TritiumBlock block;
+    block.hashPrevBlock = hashPrev;
+    block.nHeight = 12;
+    std::string strExpectedError = "previous block identity mismatch";
+    uint32_t nExpectedBits = 0;
+    bool fDifficultyMismatch = false;
+
+    SECTION("wrong identity at the expected height")
+    {
+        ++statePrev.nNonce;
+        block.nHeight = 11;
+    }
+    SECTION("wrong identity at a different height")
+    {
+        ++statePrev.nNonce;
+    }
+    SECTION("correct identity at a different height")
+    {
+        strExpectedError = "incorrect block height.";
+    }
+    SECTION("correct predecessor with mismatched difficulty")
+    {
+        block.nVersion = 7;
+        block.nHeight = statePrev.nHeight + 1;
+        block.nChannel = TAO::Ledger::CHANNEL::HASH;
+        nExpectedBits = TAO::Ledger::GetNextTargetRequired(statePrev, block.GetChannel());
+        block.nBits = nExpectedBits ^ 1;
+        strExpectedError = "incorrect proof-of-work/proof-of-stake";
+        fDifficultyMismatch = true;
+    }
+
+    REQUIRE(LLD::Ledger->WriteBlock(hashPrev, statePrev));
+    debug::GetLastError();
+    REQUIRE_FALSE(block.Accept());
+    const std::string strError = debug::GetLastError();
+    REQUIRE(strError.find(strExpectedError) != std::string::npos);
+    if(fDifficultyMismatch)
+    {
+        REQUIRE(strError.find("block=" + block.GetHash().SubString()) != std::string::npos);
+        REQUIRE(strError.find(" prev=" + hashPrev.SubString()) != std::string::npos);
+        REQUIRE(strError.find(" prev_height=" + std::to_string(statePrev.nHeight)) != std::string::npos);
+        REQUIRE(strError.find(" block_height=" + std::to_string(block.nHeight)) != std::string::npos);
+        REQUIRE(strError.find(" channel=" + std::to_string(block.GetChannel())) != std::string::npos);
+        std::ostringstream bits;
+        bits << " nBits=0x" << std::hex << block.nBits << " expected=0x" << nExpectedBits;
+        REQUIRE(strError.find(bits.str()) != std::string::npos);
+    }
+    REQUIRE_FALSE(LLD::HasOpenTransaction());
+}
+
+
 TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip predecessor holes",
           "[ledger][chainstate][startup][repair][real]")
 {
@@ -2205,21 +2276,155 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         REQUIRE(byHeight.hashNextBlock == 0);
     }
 
+    SECTION("repairchain restores a consecutive missing suffix when the height index proves it")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38105, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashOne));
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
+
+        TAO::Ledger::BlockState restoredOne;
+        TAO::Ledger::BlockState restoredTwo;
+        REQUIRE(LLD::Ledger->ReadBlock(fixture.hashOne, restoredOne));
+        REQUIRE(LLD::Ledger->ReadBlock(fixture.hashTwo, restoredTwo));
+        REQUIRE(restoredOne.GetHash() == fixture.hashOne);
+        REQUIRE(restoredTwo.GetHash() == fixture.hashTwo);
+        REQUIRE(restoredOne.hashNextBlock == fixture.hashTwo);
+        REQUIRE(restoredTwo.hashNextBlock == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain requires an anchor within the exact remaining scan depth")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38106, blocksGuard);
+        std::vector<uint1024_t> vMissing;
+        uint32_t nDepth = 3;
+
+        SECTION("one missing alias at the tip")
+        {
+            vMissing = {fixture.hashTwo};
+            nDepth = 2;
+        }
+        SECTION("one missing alias after a readable predecessor")
+        {
+            vMissing = {fixture.hashOne};
+        }
+        SECTION("two consecutive missing aliases")
+        {
+            vMissing = {fixture.hashTwo, fixture.hashOne};
+        }
+
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->Erase(hash, true));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, nDepth - 1));
+        for(const auto& hash : vMissing)
+            REQUIRE_FALSE(LLD::Ledger->HasBlock(hash));
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, nDepth));
+        for(const auto& hash : vMissing)
+        {
+            TAO::Ledger::BlockState restored;
+            REQUIRE(LLD::Ledger->ReadBlock(hash, restored));
+            REQUIRE(restored.GetHash() == hash);
+        }
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain uses only a verified genesis as a terminal height-index anchor")
+    {
+        HeightIndexDiskGuard heightZeroGuard(0);
+        bool fValidRoot = true;
+        bool fRecoverSuffix = false;
+        bool fWrongSuccessor = false;
+
+        SECTION("missing genesis alias") {}
+        SECTION("missing suffix through genesis")
+        {
+            fRecoverSuffix = true;
+        }
+        SECTION("non-genesis zero-prev root")
+        {
+            ++TAO::Ledger::ChainState::tStateGenesis.nNonce;
+            fValidRoot = false;
+        }
+        SECTION("genesis with the wrong successor")
+        {
+            fWrongSuccessor = true;
+            fValidRoot = false;
+        }
+
+        auto fixture = BuildCheckpointChainFixture(38107, blocksGuard);
+        if(fixture.hashGenesis != TAO::Ledger::ChainState::Genesis())
+            blocksGuard.hashes.push_back(fixture.hashGenesis);
+        if(fWrongSuccessor)
+        {
+            fixture.genesis.hashNextBlock = fixture.hashTwo;
+            REQUIRE(LLD::Ledger->WriteBlock(fixture.hashGenesis, fixture.genesis));
+        }
+
+        std::vector<uint1024_t> vMissing = {fixture.hashGenesis};
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(0), fixture.hashGenesis));
+        if(fRecoverSuffix)
+        {
+            REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+            REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+            vMissing.insert(vMissing.end(), {fixture.hashOne, fixture.hashTwo});
+        }
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->Erase(hash, true));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 3));
+        for(const auto& hash : vMissing)
+            REQUIRE_FALSE(LLD::Ledger->HasBlock(hash));
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 3) == fValidRoot);
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->HasBlock(hash) == fValidRoot);
+        if(fValidRoot)
+        {
+            TAO::Ledger::BlockState restored;
+            REQUIRE(LLD::Ledger->ReadBlock(fixture.hashGenesis, restored));
+            REQUIRE(restored.GetHash() == TAO::Ledger::ChainState::Genesis());
+            REQUIRE(restored.nHeight == 0);
+            REQUIRE(restored.hashPrevBlock == 0);
+            REQUIRE(restored.hashNextBlock == fixture.hashOne);
+            REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 3));
+        }
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
     SECTION("failed ancestry revalidation aborts the staged predecessor repair")
     {
         auto fixture = BuildCheckpointChainFixture(38110, blocksGuard);
         REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
         REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        bool fExpectRepair = false;
+        bool fExpectHashOnePresent = true;
 
         SECTION("another predecessor is unavailable")
         {
             REQUIRE(LLD::Ledger->EraseBlock(fixture.hashOne));
             REQUIRE_FALSE(LLD::Ledger->Exists(std::make_pair(std::string("height"), uint32_t(1))));
+            fExpectHashOnePresent = false;
         }
         SECTION("another predecessor is recoverable")
         {
             REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
             REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+            fExpectRepair = true;
         }
         SECTION("an older predecessor has an invalid successor link")
         {
@@ -2232,14 +2437,15 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
             REQUIRE(LLD::Ledger->WriteBlock(fixture.hashOne, fixture.one));
         }
 
-        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
-        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16) == fExpectRepair);
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo) == fExpectRepair);
         REQUIRE_FALSE(LLD::HasOpenTransaction());
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         TAO::Ledger::BlockState byHeight;
         REQUIRE(LLD::Ledger->ReadBlock(uint32_t(2), byHeight));
         REQUIRE(byHeight.GetHash() == fixture.hashTwo);
         REQUIRE(byHeight.hashNextBlock == fixture.hashThree);
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashOne) == fExpectHashOnePresent);
         uint1024_t hashBestDisk;
         REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
         REQUIRE(hashBestDisk == fixture.hashThree);
@@ -2268,6 +2474,24 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain refuses a consecutive suffix repair that never re-anchors to a verified predecessor")
+    {
+        auto fixture = BuildCheckpointChainFixture(38210, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+
+        auto genesis = fixture.genesis;
+        genesis.hashNextBlock = 0;
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashGenesis, genesis));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashOne));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 }
@@ -2513,7 +2737,29 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE");
         REQUIRE(summary["hash_key"]["matches"] == true);
         REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"] == true);
         REQUIRE(summary["candidate"]["valid_child_link"] == true);
+        REQUIRE(summary["child_link"]["checked"] == true);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == true);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == true);
+
+        summary = Run({target, "-auditblockchild=" + other.GetHash().ToString()}, 0);
+        REQUIRE(summary["candidate"]["valid_child_link"] == false);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == false);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == false);
+
+        TAO::Ledger::BlockState child = other;
+        child.hashPrevBlock = hash;
+        REQUIRE(writer.Write(child.GetHash(), child, "block"));
+        summary = Run({target, "-auditblockchild=" + child.GetHash().ToString()}, 0);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == true);
+        REQUIRE(writer.Index(other.GetHash(), child.GetHash()));
+        summary = Run({target, "-auditblockchild=" + other.GetHash().ToString()}, 0);
+        REQUIRE(summary["child_link"]["readable"] == true);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(writer.Write(other.GetHash(), other, "block"));
 
         REQUIRE(writer.Index(heightKey, other.GetHash()));
         summary = Run({target}, 0);
@@ -2546,6 +2792,7 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["height_index"]["height"] == 42);
         REQUIRE(summary["height_index"]["matches"] == true);
         REQUIRE(summary["raw_scan"]["found"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"].is_null());
 
         REQUIRE(writer.Index(heightKey, other.GetHash()));
         summary = Run({target}, 0);
@@ -2560,15 +2807,31 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["raw_scan"]["found"] == false);
 
         REQUIRE(writer.Write(hash, other, "block"));
-        summary = Run({target, "-auditblockstartfile=99999"}, 0);
+        summary = Run({target, "-auditblockstartfile=99999",
+            "-auditblockchild=" + std::string(256, '0')}, 0);
         REQUIRE(summary["status"] == "FOUND");
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
         REQUIRE(summary["hash_key"]["matches"] == false);
         REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == false);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == true);
         REQUIRE(writer.Erase(heightKey, true));
         summary = Run({target, "-auditblockstartfile=99999"}, 0);
         REQUIRE(summary["status"] == "NOT_FOUND");
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
+
+        REQUIRE(writer.Write(hash));
+        REQUIRE(writer.Write(heightKey));
+        summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99999"}, 0);
+        for(const std::string& key : {"hash_key", "height_index"})
+        {
+            REQUIRE(summary[key]["exists"] == true);
+            REQUIRE(summary[key]["keychain_only"] == true);
+            REQUIRE(summary[key]["readable"] == false);
+            REQUIRE(summary[key]["oversized"] == false);
+        }
+        REQUIRE(summary["alias_relation"]["comparable"] == false);
+        REQUIRE(summary["alias_relation"]["same_sector"].is_null());
     }
 
     {
@@ -2729,6 +2992,51 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     std::filesystem::remove(pathSector);
     std::filesystem::create_directory(pathSector);
     Run({target, "-auditblockstartfile=99999", "-lldmeters=1"}, 3);
+
+    std::filesystem::remove(pathSector);
+    std::filesystem::create_directories(pathIndex.parent_path());
+    std::ofstream(pathIndex, std::ios::binary).close();
+    std::filesystem::resize_file(pathIndex, uint64_t(nBuckets) * 4);
+    {
+        Database writer(strDatabase, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets, 1024);
+        REQUIRE(writer.Write(hash, state, "block"));
+    }
+
+    {
+        const auto pathDuplicate = pathLedger / "datachain/_block.65535";
+        DataStream recordDuplicate(SER_LLD, LLD::DATABASE_VERSION);
+        recordDuplicate << std::string("block") << state;
+        std::ofstream stream(pathDuplicate, std::ios::binary);
+        WriteCompactSize(stream, recordDuplicate.size());
+        stream.write(reinterpret_cast<const char*>(recordDuplicate.Bytes().data()), recordDuplicate.size());
+        stream.close();
+
+        LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
+            LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
+        DataStream ssHashKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHashKey << hash;
+
+        DataStream ssHeightKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHeightKey << std::make_pair(std::string("height"), uint32_t(42));
+
+        LLD::SectorKey cHash;
+        REQUIRE(keychain.Get(ssHashKey.Bytes(), cHash));
+        LLD::SectorKey cHeight(cHash);
+        cHeight.nSectorFile = 65535;
+        cHeight.nSectorStart = 0;
+        cHeight.nSectorSize = recordDuplicate.size() + GetSizeOfCompactSize(recordDuplicate.size());
+        cHeight.SetKey(ssHeightKey.Bytes());
+        REQUIRE(keychain.Put(cHeight));
+
+        auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=65535",
+            "-auditblockendfile=65535"}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS");
+        REQUIRE(summary["hash_key"]["matches"] == true);
+        REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["alias_relation"]["comparable"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"] == false);
+    }
 }
 #endif
 

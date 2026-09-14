@@ -75,7 +75,11 @@ namespace LLD
     {
         bool     fExists{false};
         bool     fReadable{false};
+        bool     fKeychainOnly{false};
         bool     fOversized{false};
+        uint8_t  nState{0};
+        uint32_t nSectorFile{0};
+        uint64_t nSectorStart{0};
         uint64_t nSectorSize{0};
     };
 
