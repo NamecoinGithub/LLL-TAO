@@ -2571,6 +2571,40 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
     }
 
+    {
+        /* Claim a sector size the writer could never produce so the bounded alias reads must
+         * report the damaged aliases instead of allocating the claimed record. */
+        LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
+            LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
+
+        DataStream ssHashKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHashKey << hash;
+
+        LLD::SectorKey cKey;
+        REQUIRE(keychain.Get(ssHashKey.Bytes(), cKey));
+        cKey.nSectorSize = uint32_t(MAX_SIZE) + 64;
+        REQUIRE(keychain.Put(cKey));
+
+        DataStream ssHeightKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHeightKey << std::make_pair(std::string("height"), uint32_t(42));
+
+        LLD::SectorKey cHeight(cKey);
+        cHeight.SetKey(ssHeightKey.Bytes());
+        REQUIRE(keychain.Put(cHeight));
+    }
+
+    {
+        auto oversized = Run({target, "-auditblockheight=42", "-auditblockstartfile=99999"}, 0);
+        REQUIRE(oversized["status"] == "NOT_FOUND");
+        REQUIRE(oversized["classification"] == "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_MISSING");
+        REQUIRE(oversized["hash_key"]["exists"] == true);
+        REQUIRE(oversized["hash_key"]["readable"] == false);
+        REQUIRE(oversized["hash_key"]["oversized"] == true);
+        REQUIRE(oversized["height_index"]["exists"] == true);
+        REQUIRE(oversized["height_index"]["readable"] == false);
+        REQUIRE(oversized["height_index"]["oversized"] == true);
+    }
+
     std::filesystem::remove_all(pathLedger / "keychain");
     std::filesystem::remove(pathLedger / "datachain/_block.00000");
     const auto pathSector = pathLedger / "datachain/_block.99999";
@@ -2674,6 +2708,23 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     REQUIRE(summary["height_index"]["matches"] == false);
     for(size_t i = 0; i < offsets.size(); ++i)
         REQUIRE(summary["candidates"][i]["sector_offset"] == offsets[i]);
+
+    const uint64_t nMaxScanSize = uint64_t(LLD::MAX_SECTOR_FILE_SIZE) + MAX_SIZE + GetSizeOfCompactSize(MAX_SIZE);
+    std::ofstream(pathSector, std::ios::binary | std::ios::trunc).close();
+    std::filesystem::resize_file(pathSector, nMaxScanSize);
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["raw_scan"]["files_scanned"] == 1);
+    REQUIRE(summary["raw_scan"]["files_skipped"] == 0);
+    REQUIRE(summary["raw_scan"]["oversized_file"] == false);
+
+    std::filesystem::resize_file(pathSector, nMaxScanSize + 1);
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["status"] == "NOT_FOUND");
+    REQUIRE(summary["classification"] == "RAW_SECTOR_FILE_OVERSIZED");
+    REQUIRE(summary["raw_scan"]["oversized_file"] == true);
+    REQUIRE(summary["raw_scan"]["files_scanned"] == 0);
+    REQUIRE(summary["raw_scan"]["files_skipped"] == 1);
+    REQUIRE(summary["raw_scan"]["records_scanned"] == 0);
 
     std::filesystem::remove(pathSector);
     std::filesystem::create_directory(pathSector);

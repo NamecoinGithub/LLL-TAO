@@ -44,6 +44,12 @@ namespace LLD
     namespace
     {
         static constexpr uint32_t MAX_AUDIT_SECTOR_FILE = 99999;
+
+        /* Maximum bytes an offline audit will read from a single sector file. The writer only
+         * rotates files once the current file exceeds MAX_SECTOR_FILE_SIZE, so a valid file can
+         * overrun the limit by a single maximum sized record. */
+        static const uint64_t MAX_AUDIT_SECTOR_FILE_SIZE = static_cast<uint64_t>(MAX_SECTOR_FILE_SIZE)
+            + MAX_SIZE + GetSizeOfCompactSize(MAX_SIZE);
     }
 
     namespace
@@ -1409,6 +1415,19 @@ namespace LLD
                 continue;
             }
 
+            /* Bound the scan to the largest byte extent the writer can legitimately produce so a
+             * sparse or corrupt sector file cannot be read in its entirety. */
+            if(nFileSize > MAX_AUDIT_SECTOR_FILE_SIZE)
+            {
+                result.fOversizedFile = true;
+                ++result.nFilesSkipped;
+
+                if(nFile == 0)
+                    break;
+
+                continue;
+            }
+
             ++result.nFilesScanned;
 
             uint64_t nFilePos = 0;
@@ -1529,6 +1548,67 @@ namespace LLD
         }
 
         return !result.fInfrastructureFailure;
+    }
+
+
+    /* Read a block record through a keychain alias using bounded resources. */
+    bool LedgerDB::AuditReadAliasRecord(const std::vector<uint8_t>& vKey, TAO::Ledger::BlockState& state,
+                                        BlockAuditAliasResult& result)
+    {
+        result = BlockAuditAliasResult();
+
+        /* Resolve the alias from the keychain without reading any sector data. */
+        SectorKey cKey;
+        if(!pSectorKeys->Get(vKey, cKey))
+            return false;
+
+        result.fExists = true;
+        result.nSectorSize = cKey.nSectorSize;
+
+        /* Reject a sector size the writer could never produce before allocating for it. */
+        const uint64_t nPrefixSize = GetSizeOfCompactSize(cKey.nSectorSize);
+        if(cKey.nSectorSize <= nPrefixSize || (cKey.nSectorSize - nPrefixSize) > MAX_SIZE)
+        {
+            result.fOversized = true;
+            return false;
+        }
+
+        const std::string strPath = debug::safe_printstr(
+            strBaseLocation, "_block.", std::setfill('0'), std::setw(5), cKey.nSectorFile);
+
+        /* Validate the record is contained by the sector file it claims to live in. */
+        std::error_code error;
+        const uint64_t nFileSize = std::filesystem::file_size(strPath, error);
+        if(error)
+            return false;
+
+        if(cKey.nSectorStart > nFileSize || (nFileSize - cKey.nSectorStart) < cKey.nSectorSize)
+            return false;
+
+        std::ifstream stream(strPath, std::ios::in | std::ios::binary);
+        if(!stream.is_open())
+            return false;
+
+        std::vector<uint8_t> vData(static_cast<size_t>(cKey.nSectorSize - nPrefixSize));
+        stream.seekg(static_cast<std::streamoff>(cKey.nSectorStart + nPrefixSize), std::ios::beg);
+        if(!stream.read(reinterpret_cast<char*>(vData.data()), static_cast<std::streamsize>(vData.size())))
+            return false;
+
+        try
+        {
+            DataStream ssValue(vData, SER_LLD, DATABASE_VERSION);
+
+            std::string strType;
+            ssValue >> strType;
+            ssValue >> state;
+        }
+        catch(const std::exception&)
+        {
+            return false;
+        }
+
+        result.fReadable = true;
+        return true;
     }
 
 

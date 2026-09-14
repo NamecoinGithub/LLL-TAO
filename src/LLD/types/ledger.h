@@ -71,17 +71,28 @@ namespace LLD
     };
 
 
+    struct BlockAuditAliasResult
+    {
+        bool     fExists{false};
+        bool     fReadable{false};
+        bool     fOversized{false};
+        uint64_t nSectorSize{0};
+    };
+
+
     struct BlockAuditScanResult
     {
         bool fRangeInvalid{false};
         bool fMalformedRecord{false};
         bool fTruncatedRecord{false};
+        bool fOversizedFile{false};
         bool fInfrastructureFailure{false};
         bool fFound{false};
 
         uint32_t nScanStartFile{0};
         uint32_t nScanEndFile{0};
         uint32_t nFilesScanned{0};
+        uint32_t nFilesSkipped{0};
         uint64_t nRecordsScanned{0};
 
         std::vector<BlockAuditRecordMatch> vMatches;
@@ -853,6 +864,45 @@ namespace LLD
         bool AuditScanBlockRecords(const uint1024_t& hashBlock,
                                    const BlockAuditScanOptions& options,
                                    BlockAuditScanResult& result);
+
+
+        /** AuditReadAliasRecord
+         *
+         *  Read a block record through a keychain alias using bounded resources.
+         *  A damaged alias is reported through the result rather than allocating
+         *  whatever sector size the keychain claims.
+         *
+         *  @param[in] vKey The serialized keychain alias to resolve.
+         *  @param[out] state The block state read from the sector record.
+         *  @param[out] result The alias evidence collected while reading.
+         *
+         *  @return True if the record was read and deserialized, false otherwise.
+         *
+         **/
+        bool AuditReadAliasRecord(const std::vector<uint8_t>& vKey, TAO::Ledger::BlockState& state,
+                                  BlockAuditAliasResult& result);
+
+
+        /** AuditReadBlockRecord
+         *
+         *  Read a block record for the given key using the bounded alias read path.
+         *
+         *  @param[in] key The key or alias to resolve.
+         *  @param[out] state The block state read from the sector record.
+         *  @param[out] result The alias evidence collected while reading.
+         *
+         *  @return True if the record was read and deserialized, false otherwise.
+         *
+         **/
+        template<typename KeyType>
+        bool AuditReadBlockRecord(const KeyType& key, TAO::Ledger::BlockState& state,
+                                  BlockAuditAliasResult& result)
+        {
+            DataStream ssKey(SER_LLD, DATABASE_VERSION);
+            ssKey << key;
+
+            return AuditReadAliasRecord(ssKey.Bytes(), state, result);
+        }
 
 
         /** HasFirst

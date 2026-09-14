@@ -268,7 +268,8 @@ namespace
 
         const bool fHashKeyExists = pLedger->Exists(hashTarget);
         TAO::Ledger::BlockState stateByHash;
-        const bool fHashKeyReadable = pLedger->Read(hashTarget, stateByHash);
+        LLD::BlockAuditAliasResult hashAlias;
+        const bool fHashKeyReadable = pLedger->AuditReadBlockRecord(hashTarget, stateByHash, hashAlias);
         const bool fHashKeyMatches = fHashKeyReadable && (stateByHash.GetHash() == hashTarget);
 
         LLD::BlockAuditScanResult rawScan;
@@ -289,6 +290,8 @@ namespace
         bool fExpectedHeightReadable = false;
         bool fExpectedHeightMatches = false;
         TAO::Ledger::BlockState stateByExpectedHeight;
+        LLD::BlockAuditAliasResult heightAlias;
+        LLD::BlockAuditAliasResult expectedHeightAlias;
 
         if(fHashKeyReadable)
         {
@@ -316,7 +319,8 @@ namespace
         if(fHeightChecked)
         {
             fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
-            fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
+            fHeightReadable = pLedger->AuditReadBlockRecord(
+                std::make_pair(std::string("height"), nHeightChecked), stateByHeight, heightAlias);
             fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget
                 && stateByHeight.nHeight == nHeightChecked;
 
@@ -324,7 +328,8 @@ namespace
             {
                 fExpectedHeightCheckPerformed = true;
                 fExpectedHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nExpectedHeight));
-                fExpectedHeightReadable = pLedger->ReadBlock(nExpectedHeight, stateByExpectedHeight);
+                fExpectedHeightReadable = pLedger->AuditReadBlockRecord(
+                    std::make_pair(std::string("height"), nExpectedHeight), stateByExpectedHeight, expectedHeightAlias);
                 fExpectedHeightMatches = fExpectedHeightReadable && (stateByExpectedHeight.GetHash() == hashTarget)
                     && stateByExpectedHeight.nHeight == nExpectedHeight;
             }
@@ -354,6 +359,9 @@ namespace
             strClassification = "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_MISSING";
         else if(!fHashKeyExists && fRawFound)
             strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
+
+        if(strClassification == "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN" && rawScan.fOversizedFile)
+            strClassification = "RAW_SECTOR_FILE_OVERSIZED";
 
         if(fMultipleRawMatches && strClassification != "RAW_RECORD_TRUNCATED_OR_MALFORMED")
             strClassification = "MULTIPLE_RAW_MATCHES";
@@ -407,14 +415,16 @@ namespace
         jSummary["hash_key"] = {
             {"exists", fHashKeyExists},
             {"readable", fHashKeyReadable},
-            {"matches", fHashKeyMatches}
+            {"matches", fHashKeyMatches},
+            {"oversized", hashAlias.fOversized}
         };
         jSummary["height_index"] = {
             {"checked", fHeightChecked},
             {"height", fHeightChecked ? encoding::json(nHeightChecked) : encoding::json(nullptr)},
             {"exists", fHeightExists},
             {"readable", fHeightReadable},
-            {"matches", fHeightMatches}
+            {"matches", fHeightMatches},
+            {"oversized", heightAlias.fOversized}
         };
         if(fExpectedHeightCheckPerformed)
         {
@@ -423,19 +433,22 @@ namespace
                 {"height", nExpectedHeight},
                 {"exists", fExpectedHeightExists},
                 {"readable", fExpectedHeightReadable},
-                {"matches", fExpectedHeightMatches}
+                {"matches", fExpectedHeightMatches},
+                {"oversized", expectedHeightAlias.fOversized}
             };
         }
         jSummary["raw_scan"] = {
             {"scan_start_file", rawScan.nScanStartFile},
             {"scan_end_file", rawScan.nScanEndFile},
             {"files_scanned", rawScan.nFilesScanned},
+            {"files_skipped", rawScan.nFilesSkipped},
             {"records_scanned", rawScan.nRecordsScanned},
             {"found", fRawFound},
             {"matches", nRawMatches},
             {"multiple_matches", fMultipleRawMatches},
             {"malformed_record", rawScan.fMalformedRecord},
-            {"truncated_record", rawScan.fTruncatedRecord}
+            {"truncated_record", rawScan.fTruncatedRecord},
+            {"oversized_file", rawScan.fOversizedFile}
         };
 
         jSummary["candidates"] = encoding::json::array();
