@@ -42,6 +42,11 @@ namespace LLD
 {
     namespace
     {
+        static constexpr uint32_t MAX_AUDIT_SECTOR_FILE = 99999;
+    }
+
+    namespace
+    {
         bool ReadCompactSizeFromFile(std::ifstream& stream, const uint64_t nFilePos, const uint64_t nFileSize,
                                      uint64_t& nPayloadSizeOut, uint64_t& nPrefixSizeOut)
         {
@@ -1359,6 +1364,15 @@ namespace LLD
         }
 
         if(nStartFile > nEndFile)
+        {
+            result.fRangeInvalid = true;
+            result.fInfrastructureFailure = true;
+            result.nScanStartFile = nStartFile;
+            result.nScanEndFile = nEndFile;
+            return false;
+        }
+
+        if(nStartFile > MAX_AUDIT_SECTOR_FILE || nEndFile > MAX_AUDIT_SECTOR_FILE)
         {
             result.fRangeInvalid = true;
             result.fInfrastructureFailure = true;

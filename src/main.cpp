@@ -51,6 +51,8 @@ ________________________________________________________________________________
 
 namespace
 {
+    static constexpr uint32_t AUDITBLOCK_MAX_SECTOR_FILE = 99999;
+
     bool ParseAuditHashArg(const std::string& strValue, uint1024_t& hashOut, std::string& strError)
     {
         if(strValue.empty())
@@ -230,6 +232,14 @@ namespace
         if(fStartFileProvided && fEndFileProvided && nStartFile > nEndFile)
         {
             debug::error(FUNCTION, "invalid range: -auditblockstartfile cannot exceed -auditblockendfile");
+            return 2;
+        }
+
+        if((fStartFileProvided && nStartFile > AUDITBLOCK_MAX_SECTOR_FILE)
+        || (fEndFileProvided && nEndFile > AUDITBLOCK_MAX_SECTOR_FILE))
+        {
+            debug::error(FUNCTION, "auditblock file range exceeds supported sector file max ",
+                AUDITBLOCK_MAX_SECTOR_FILE);
             return 2;
         }
 
