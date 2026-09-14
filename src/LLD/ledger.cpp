@@ -1411,7 +1411,7 @@ namespace LLD
 
                 if(nPayloadSize == 0)
                 {
-                    ++nFilePos;
+                    nFilePos += nPrefixSize;
                     continue;
                 }
 

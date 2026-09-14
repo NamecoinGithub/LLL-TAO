@@ -61,7 +61,6 @@ ________________________________________________________________________________
 #include <Util/include/args.h>
 #include <Util/include/debug.h>
 #include <Util/include/filesystem.h>
-#include <Util/include/runtime.h>
 #include <Util/templates/datastream.h>
 
 #include <atomic>
@@ -2325,8 +2324,6 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
         REQUIRE_FALSE(LLD::Ledger->Exists(std::make_pair(std::string("height"), uint32_t(2))));
 
-        runtime::sleep(250);
-
         LLD::BlockAuditScanOptions options;
         LLD::BlockAuditScanResult result;
         REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashTwo, options, result));
@@ -2347,8 +2344,6 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
         TAO::Ledger::BlockState unreadable;
         REQUIRE_FALSE(LLD::Ledger->ReadBlock(fixture.hashTwo, unreadable));
-
-        runtime::sleep(250);
 
         LLD::BlockAuditScanOptions options;
         LLD::BlockAuditScanResult result;
@@ -2428,9 +2423,9 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
 
         const std::pair<std::string, uint32_t> duplicateKey =
             std::make_pair(std::string("audit-duplicate-block"), uint32_t(2));
+        REQUIRE(LLD::TxnBegin(LLD::INSTANCES::LEDGER));
         REQUIRE(LLD::Ledger->Write(duplicateKey, fixture.two, "block"));
-
-        runtime::sleep(250);
+        REQUIRE(LLD::TxnCommit());
 
         LLD::BlockAuditScanOptions options;
         LLD::BlockAuditScanResult result;

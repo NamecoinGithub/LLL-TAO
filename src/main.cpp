@@ -106,6 +106,46 @@ namespace
     }
 
 
+    void BuildAuditScanOptions(const bool fMaxFilesProvided, const uint32_t nMaxFiles,
+                               const bool fStartFileProvided, const uint32_t nStartFile,
+                               const bool fEndFileProvided, const uint32_t nEndFile,
+                               LLD::BlockAuditScanOptions& optionsOut)
+    {
+        optionsOut = LLD::BlockAuditScanOptions();
+        optionsOut.nMaxFiles = std::max<uint32_t>(1, nMaxFiles);
+
+        if(!(fStartFileProvided || fEndFileProvided))
+            return;
+
+        optionsOut.fHasStartFile = true;
+        optionsOut.fHasEndFile = true;
+
+        if(fStartFileProvided && fEndFileProvided)
+        {
+            optionsOut.nStartFile = nStartFile;
+            optionsOut.nEndFile = nEndFile;
+            return;
+        }
+
+        if(fStartFileProvided)
+        {
+            optionsOut.nStartFile = nStartFile;
+            optionsOut.nEndFile = fMaxFilesProvided
+                ? static_cast<uint32_t>(std::min<uint64_t>(
+                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+                    static_cast<uint64_t>(nStartFile) + static_cast<uint64_t>(optionsOut.nMaxFiles - 1)))
+                : nStartFile;
+
+            return;
+        }
+
+        optionsOut.nEndFile = nEndFile;
+        optionsOut.nStartFile = (nEndFile >= (optionsOut.nMaxFiles - 1))
+            ? (nEndFile - (optionsOut.nMaxFiles - 1))
+            : 0;
+    }
+
+
     int RunOfflineAuditBlock()
     {
         const std::string strHashArg = config::GetArg("-auditblock", "");
@@ -205,41 +245,16 @@ namespace
             return 3;
         }
 
-        LLD::Ledger = new LLD::LedgerDB(0);
+        LLD::LedgerDB ledgerReadOnly(0);
+        LLD::LedgerDB* const pLedger = &ledgerReadOnly;
 
         LLD::BlockAuditScanOptions options;
-        if(fStartFileProvided || fEndFileProvided)
-        {
-            options.fHasStartFile = true;
-            options.fHasEndFile = true;
+        BuildAuditScanOptions(fMaxFilesProvided, nMaxFiles, fStartFileProvided, nStartFile,
+                              fEndFileProvided, nEndFile, options);
 
-            if(fStartFileProvided && fEndFileProvided)
-            {
-                options.nStartFile = nStartFile;
-                options.nEndFile = nEndFile;
-            }
-            else if(fStartFileProvided)
-            {
-                options.nStartFile = nStartFile;
-                options.nEndFile = fMaxFilesProvided
-                    ? static_cast<uint32_t>(std::min<uint64_t>(
-                        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
-                        static_cast<uint64_t>(nStartFile) + static_cast<uint64_t>(std::max<uint32_t>(1, nMaxFiles) - 1)))
-                    : nStartFile;
-            }
-            else
-            {
-                options.nEndFile = nEndFile;
-                const uint32_t nBound = std::max<uint32_t>(1, nMaxFiles);
-                options.nStartFile = (nEndFile >= (nBound - 1)) ? (nEndFile - (nBound - 1)) : 0;
-            }
-        }
-        else
-            options.nMaxFiles = nMaxFiles;
-
-        const bool fHashKeyExists = LLD::Ledger->HasBlock(hashTarget);
+        const bool fHashKeyExists = pLedger->HasBlock(hashTarget);
         TAO::Ledger::BlockState stateByHash;
-        const bool fHashKeyReadable = LLD::Ledger->ReadBlock(hashTarget, stateByHash);
+        const bool fHashKeyReadable = pLedger->ReadBlock(hashTarget, stateByHash);
         const bool fHashKeyMatches = fHashKeyReadable && (stateByHash.GetHash() == hashTarget);
 
         bool fHeightChecked = false;
@@ -253,25 +268,23 @@ namespace
         {
             fHeightChecked = true;
             nHeightChecked = stateByHash.nHeight;
-            fHeightExists = LLD::Ledger->Exists(std::make_pair(std::string("height"), nHeightChecked));
-            fHeightReadable = LLD::Ledger->ReadBlock(nHeightChecked, stateByHeight);
+            fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
+            fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
             fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
         }
         else if(fExpectedHeightProvided)
         {
             fHeightChecked = true;
             nHeightChecked = nExpectedHeight;
-            fHeightExists = LLD::Ledger->Exists(std::make_pair(std::string("height"), nHeightChecked));
-            fHeightReadable = LLD::Ledger->ReadBlock(nHeightChecked, stateByHeight);
+            fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
+            fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
             fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
         }
 
         LLD::BlockAuditScanResult rawScan;
-        if(!LLD::Ledger->AuditScanBlockRecords(hashTarget, options, rawScan))
+        if(!pLedger->AuditScanBlockRecords(hashTarget, options, rawScan))
         {
             debug::error(FUNCTION, "raw scan infrastructure failed");
-            delete LLD::Ledger;
-            LLD::Ledger = nullptr;
             return 3;
         }
 
@@ -282,19 +295,21 @@ namespace
         std::string strClassification = "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN";
         if(rawScan.fTruncatedRecord || rawScan.fMalformedRecord)
             strClassification = "RAW_RECORD_TRUNCATED_OR_MALFORMED";
-
-        if(fMultipleRawMatches)
-            strClassification = "MULTIPLE_RAW_MATCHES";
-        else if(fHeightChecked && fHeightReadable && !fHeightMatches)
-            strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
         else if(fHashKeyExists && fHashKeyReadable && fHashKeyMatches)
             strClassification = "HASH_KEY_READABLE";
+        else if(fHashKeyExists && fHashKeyReadable && !fHashKeyMatches)
+            strClassification = "HASH_KEY_READABLE_MISMATCH";
+        else if(fHeightChecked && fHeightReadable && !fHeightMatches)
+            strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
         else if(!fHashKeyExists && fHeightMatches)
             strClassification = "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT";
-        else if(!fHashKeyExists && fRawFound)
-            strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
         else if(fHashKeyExists && !fHashKeyReadable && fRawFound)
             strClassification = "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_PRESENT";
+        else if(!fHashKeyExists && fRawFound)
+            strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
+
+        if(fMultipleRawMatches && strClassification != "HASH_KEY_READABLE")
+            strClassification = "MULTIPLE_RAW_MATCHES";
 
         debug::log(0, "AUDITBLOCK hash=", hashTarget.ToString(), " status=", (fHashKeyReadable ? "FOUND" : "NOT_FOUND"),
             " hash_key_exists=", fHashKeyExists ? "true" : "false",
@@ -350,9 +365,28 @@ namespace
             {"records_scanned", rawScan.nRecordsScanned},
             {"found", fRawFound},
             {"matches", nRawMatches},
+            {"multiple_matches", fMultipleRawMatches},
             {"malformed_record", rawScan.fMalformedRecord},
             {"truncated_record", rawScan.fTruncatedRecord}
         };
+
+        jSummary["candidates"] = encoding::json::array();
+        for(const auto& candidate : rawScan.vMatches)
+        {
+            jSummary["candidates"].push_back({
+                {"height", candidate.nHeight},
+                {"hash", candidate.hashBlock.ToString()},
+                {"hash_prev", candidate.hashPrevBlock.ToString()},
+                {"hash_next", candidate.hashNextBlock.ToString()},
+                {"valid_hash", candidate.hashBlock == hashTarget},
+                {"valid_height", !fExpectedHeightProvided || candidate.nHeight == nExpectedHeight},
+                {"valid_child_link", !fChildProvided || candidate.hashNextBlock == hashChild},
+                {"serialized_complete", candidate.fSerializedComplete},
+                {"sector_file", candidate.nSectorFile},
+                {"sector_offset", candidate.nSectorStart},
+                {"sector_size", candidate.nSectorSize}
+            });
+        }
 
         if(!rawScan.vMatches.empty())
         {
@@ -374,8 +408,6 @@ namespace
         jSummary["classification"] = strClassification;
         debug::log(0, jSummary.dump());
 
-        delete LLD::Ledger;
-        LLD::Ledger = nullptr;
         return 0;
     }
 }
