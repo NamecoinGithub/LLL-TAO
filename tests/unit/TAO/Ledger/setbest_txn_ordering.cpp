@@ -55,6 +55,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/genesis_block.h>
 #include <TAO/Ledger/include/retarget.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
@@ -376,6 +377,24 @@ namespace
     }
 
 
+    struct SyncProfileGuard
+    {
+        const std::map<std::string, std::string> savedArgs = config::mapArgs;
+
+        SyncProfileGuard()
+        {
+            config::mapArgs["-syncprofile"] = "1";
+            TAO::Ledger::SyncProfile::Reset();
+        }
+
+        ~SyncProfileGuard()
+        {
+            TAO::Ledger::SyncProfile::Reset();
+            config::mapArgs = savedArgs;
+        }
+    };
+
+
     } /* anonymous namespace */
 
 
@@ -463,6 +482,105 @@ TEST_CASE("LLD::TxnBegin opens every crash-recovery participant",
     REQUIRE(LLD::Ledger->HasTransaction());
     REQUIRE(LLD::Trust->HasTransaction());
     REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+}
+
+
+TEST_CASE("Sync profile skips empty consensus participants during durable phases",
+          "[lld][txncommit][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    SyncProfileGuard syncProfileGuard;
+
+    const auto keyLedger = std::make_pair(std::string("syncprofile-ledger-only"), 1u);
+    const uint64_t nTrustJournalBefore = JournalSize("_TRUST");
+
+    LLD::Ledger->Erase(keyLedger);
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE(LLD::Trust->HasTransaction());
+    REQUIRE(LLD::Ledger->Write(keyLedger, uint32_t(99)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnOpenedParticipants == 5);
+    REQUIRE(snapshot.nTxnTouchedParticipants == 1);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 1);
+    REQUIRE(snapshot.nTxnApplyParticipants == 1);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 1);
+    REQUIRE(JournalSize("_TRUST") == nTrustJournalBefore);
+
+    LLD::Ledger->Erase(keyLedger);
+}
+
+
+TEST_CASE("Sync profile counts every touched consensus participant",
+          "[lld][txncommit][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    SyncProfileGuard syncProfileGuard;
+
+    const auto keyLedger = std::make_pair(std::string("syncprofile-ledger"), 2u);
+    const auto keyTrust  = std::make_pair(std::string("syncprofile-trust"), 2u);
+
+    LLD::Ledger->Erase(keyLedger);
+    LLD::Trust->Erase(keyTrust);
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST));
+    REQUIRE(LLD::Ledger->Write(keyLedger, uint32_t(100)));
+    REQUIRE(LLD::Trust->Write(keyTrust, uint32_t(101)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST));
+
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnOpenedParticipants == 5);
+    REQUIRE(snapshot.nTxnTouchedParticipants == 2);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 2);
+    REQUIRE(snapshot.nTxnApplyParticipants == 2);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 2);
+    REQUIRE(LLD::Ledger->Exists(keyLedger));
+    REQUIRE(LLD::Trust->Exists(keyTrust));
+
+    LLD::Ledger->Erase(keyLedger);
+    LLD::Trust->Erase(keyTrust);
+}
+
+
+TEST_CASE("Sync profile avoids O(N x all participants) durable barriers for sequential ledger-only commits",
+          "[lld][txncommit][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    SyncProfileGuard syncProfileGuard;
+
+    constexpr uint32_t nIterations = 8;
+    for(uint32_t n = 0; n < nIterations; ++n)
+    {
+        const auto keyLedger = std::make_pair(std::string("syncprofile-batch"), n);
+        LLD::Ledger->Erase(keyLedger);
+
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->Write(keyLedger, n + 1));
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        LLD::Ledger->Erase(keyLedger);
+    }
+
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnOpenedParticipants == 5 * nIterations);
+    REQUIRE(snapshot.nTxnTouchedParticipants == nIterations);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == nIterations);
+    REQUIRE(snapshot.nTxnApplyParticipants == nIterations);
+    REQUIRE(snapshot.nTxnReleaseParticipants == nIterations);
 }
 
 
@@ -3467,6 +3585,32 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
 
     LLD::Contract->Erase(contractKey);
     LLD::Register->Erase(registerKey);
+}
+
+
+TEST_CASE("Recovered touched participant still truncates its durable journal on release",
+          "[lld][txncommit][recovery][syncprofile]")
+{
+    LedgerGuard ledgerGuard;
+    SyncProfileGuard syncProfileGuard;
+
+    const auto keyLedger = std::make_pair(std::string("syncprofile-recovery-ledger"), 1u);
+    LLD::Ledger->Erase(keyLedger);
+
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeWriteJournal(keyLedger, 55)));
+    REQUIRE(JournalSize("_LEDGER") > 0);
+    REQUIRE(LLD::Ledger->TxnRecovery() == LLD::RECOVERY::COMPLETE);
+    REQUIRE(LLD::Ledger->TxnCommit());
+    REQUIRE(LLD::Ledger->Exists(keyLedger));
+    REQUIRE(JournalSize("_LEDGER") > 0);
+    REQUIRE(LLD::Ledger->TxnRelease());
+    REQUIRE(JournalSize("_LEDGER") == 0);
+
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnApplyParticipants == 1);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 1);
+
+    LLD::Ledger->Erase(keyLedger);
 }
 
 

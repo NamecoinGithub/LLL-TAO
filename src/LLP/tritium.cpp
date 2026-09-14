@@ -38,6 +38,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/include/process.h>
 
 #include <TAO/Ledger/types/client.h>
@@ -1492,6 +1493,7 @@ namespace LLP
 
                         /* Do a sequential read to obtain the list at our set limit. */
                         std::vector<TAO::Ledger::BlockState> vStates;
+                        uint32_t nBlocksSent = 0;
 
                         while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop)
                         {
@@ -1660,6 +1662,8 @@ namespace LLP
                                 else
                                     PushBlock(nSpecifier, state);
 
+                                ++nBlocksSent;
+
                                 /* Update start every iteration. */
                                 stateLast = state;
                                 hashStart = hashLastRead;
@@ -1696,6 +1700,7 @@ namespace LLP
                                 debug::log(1, FUNCTION, "batch cut short by buffer pressure (",
                                     Buffered(), " bytes buffered); LASTINDEX set to ", hashStart.SubString());
 
+                            TAO::Ledger::SyncProfile::RecordListBatch(nBlocksSent, fBufferFull.load(), hashStart);
                             PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), hashStart);
                         }
 

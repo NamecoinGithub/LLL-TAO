@@ -13,8 +13,11 @@ ________________________________________________________________________________
 
 #include <LLD/include/global.h>
 
+#include <TAO/Ledger/include/sync_profile.h>
+
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
+#include <Util/include/runtime.h>
 #include <Util/include/signals.h>
 
 #include <mutex>
@@ -45,6 +48,54 @@ namespace LLD
     static thread_local bool fTxnMemoryOnly = false;
     static thread_local uint8_t nTxnOwnerFlags = 0;
     static thread_local uint16_t nTxnOwnerInstances = 0;
+
+    namespace
+    {
+        uint32_t CountParticipants(const uint16_t nInstances)
+        {
+            uint32_t nCount = 0;
+
+            if(Logical && (nInstances & INSTANCES::LOGICAL))
+                ++nCount;
+            if(Contract && (nInstances & INSTANCES::CONTRACT))
+                ++nCount;
+            if(Register && (nInstances & INSTANCES::REGISTER))
+                ++nCount;
+            if(Ledger && (nInstances & INSTANCES::LEDGER))
+                ++nCount;
+            if(Client && (nInstances & INSTANCES::CLIENT))
+                ++nCount;
+            if(Trust && (nInstances & INSTANCES::TRUST))
+                ++nCount;
+            if(Legacy && (nInstances & INSTANCES::LEGACY))
+                ++nCount;
+
+            return nCount;
+        }
+
+
+        uint32_t CountTouchedParticipants(const uint16_t nInstances)
+        {
+            uint32_t nCount = 0;
+
+            if(Logical && (nInstances & INSTANCES::LOGICAL) && Logical->HasPendingTransactionWork())
+                ++nCount;
+            if(Contract && (nInstances & INSTANCES::CONTRACT) && Contract->HasPendingTransactionWork())
+                ++nCount;
+            if(Register && (nInstances & INSTANCES::REGISTER) && Register->HasPendingTransactionWork())
+                ++nCount;
+            if(Ledger && (nInstances & INSTANCES::LEDGER) && Ledger->HasPendingTransactionWork())
+                ++nCount;
+            if(Client && (nInstances & INSTANCES::CLIENT) && Client->HasPendingTransactionWork())
+                ++nCount;
+            if(Trust && (nInstances & INSTANCES::TRUST) && Trust->HasPendingTransactionWork())
+                ++nCount;
+            if(Legacy && (nInstances & INSTANCES::LEGACY) && Legacy->HasPendingTransactionWork())
+                ++nCount;
+
+            return nCount;
+        }
+    }
 
     #ifdef UNIT_TESTS
     static std::function<void()> fnTxnCoordinatorWaitHook;
@@ -459,6 +510,8 @@ namespace LLD
             }
 
             #ifdef UNIT_TESTS
+            runtime::timer timerWait;
+            timerWait.Start();
             if(!TRANSACTION_COORDINATOR.try_lock())
             {
                 if(fnTxnCoordinatorWaitHook)
@@ -466,8 +519,14 @@ namespace LLD
 
                 TRANSACTION_COORDINATOR.lock();
             }
+            timerWait.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnCoordinatorWait(timerWait.ElapsedMicroseconds());
             #else
+            runtime::timer timerWait;
+            timerWait.Start();
             TRANSACTION_COORDINATOR.lock();
+            timerWait.Stop();
+            TAO::Ledger::SyncProfile::RecordTxnCoordinatorWait(timerWait.ElapsedMicroseconds());
             #endif
 
             if(fTxnRecoveryRequired.load())
@@ -628,6 +687,10 @@ namespace LLD
             ReleaseTransactionOwnership();
             return true;
         }
+
+        TAO::Ledger::SyncProfile::RecordTxnParticipants(
+            CountParticipants(nReleaseInstances),
+            CountTouchedParticipants(nReleaseInstances));
 
         if(fTxnRecoveryRequired.load())
         {

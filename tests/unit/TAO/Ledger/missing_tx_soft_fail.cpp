@@ -3684,6 +3684,45 @@ TEST_CASE("Post-sync state: nSyncSession==0 and fSynchronized==true after Sync()
 }
 
 
+TEST_CASE("LIST batches continue from the final sent block under buffer pressure (source guard)",
+    "[llp][list][lastindex]")
+{
+    const char* vCandidates[] = {
+        "src/LLP/tritium.cpp",
+        "./src/LLP/tritium.cpp",
+        "../src/LLP/tritium.cpp",
+        "../../src/LLP/tritium.cpp",
+    };
+
+    std::string strSource;
+    for(const char* psz : vCandidates)
+    {
+        std::ifstream f(psz, std::ios::in | std::ios::binary);
+        if(!f.is_open())
+            continue;
+
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        strSource = ss.str();
+        if(!strSource.empty())
+            break;
+    }
+
+    if(strSource.empty())
+    {
+        WARN("tritium.cpp not reachable from CWD; skipping source guard");
+        SUCCEED();
+        return;
+    }
+
+    REQUIRE(strSource.find("PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), hashStart);")
+        != std::string::npos);
+    REQUIRE(strSource.find("stateLast.hashPrevBlock when fBufferFull was true") != std::string::npos);
+    REQUIRE(strSource.find("PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), stateLast.hashPrevBlock);")
+        == std::string::npos);
+}
+
+
 TEST_CASE("Sync completion height guard prevents stale half-chain finalization", "[ledger][process]")
 {
     const uint32_t nSavedBestHeight    = TAO::Ledger::ChainState::nBestHeight.load();

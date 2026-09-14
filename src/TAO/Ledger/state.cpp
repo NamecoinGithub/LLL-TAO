@@ -48,6 +48,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/prime.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/include/stake_change.h>
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/include/stake.h>
@@ -787,6 +788,9 @@ namespace TAO
             /* Debug output. */
             debug::log(TAO::Ledger::ChainState::Synchronizing() ? 1 : 0, FUNCTION, "ACCEPTED");
 
+            timer.Stop();
+            TAO::Ledger::SyncProfile::RecordIndexTime(timer.ElapsedMicroseconds());
+
             return true;
         }
 
@@ -831,6 +835,22 @@ namespace TAO
 
         bool BlockState::SetBest()
         {
+            struct SetBestProfileGuard
+            {
+                runtime::timer timer;
+
+                SetBestProfileGuard()
+                {
+                    timer.Start();
+                }
+
+                ~SetBestProfileGuard()
+                {
+                    timer.Stop();
+                    TAO::Ledger::SyncProfile::RecordSetBestTime(timer.ElapsedMicroseconds());
+                }
+            } setBestProfileGuard;
+
             /* Reset timers for meters. */
             swContract.reset();
             swScript.reset();
@@ -1061,11 +1081,15 @@ namespace TAO
                         debug::log(0, state->ToString(debug::flags::header | debug::flags::tx));
 
                     /* Connect the block. */
+                    runtime::timer timerConnect;
+                    timerConnect.Start();
                     if(!state->Connect())
                     {
                         LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
                     }
+                    timerConnect.Stop();
+                    TAO::Ledger::SyncProfile::RecordConnectTime(timerConnect.ElapsedMicroseconds());
 
                     /* Stage checkpoint publication until the disk transaction commits. */
                     vCheckpointCandidates.push_back(state->Prev());

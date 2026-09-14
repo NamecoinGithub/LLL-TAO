@@ -19,6 +19,8 @@ ________________________________________________________________________________
 #include <LLD/keychain/filemap.h>
 #include <LLD/keychain/hashmap.h>
 
+#include <TAO/Ledger/include/sync_profile.h>
+
 #include <Util/include/filesystem.h>
 #include <Util/include/hex.h>
 
@@ -72,6 +74,7 @@ namespace LLD
     , strName(strNameIn)
     , runtime()
     , pTransaction(nullptr)
+    , fTxnReleaseRequired(false)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"),
           nFlagsIn | ((nFlagsIn & (FLAGS::FORCE | FLAGS::WRITE | FLAGS::APPEND)) ? 0 : FLAGS::READONLY),
           nBucketsIn))
@@ -687,6 +690,19 @@ namespace LLD
     }
 
 
+    template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::HasPendingTransactionWork()
+    {
+        LOCK(TRANSACTION_MUTEX);
+
+        return (pTransaction
+            && (!pTransaction->mapTransactions.empty()
+             || !pTransaction->setKeychain.empty()
+             || !pTransaction->mapIndex.empty()
+             || !pTransaction->setErasedData.empty()));
+    }
+
+
     /*  Start a database transaction. */
     template<class KeychainType, class CacheType>
     void SectorDatabase<KeychainType, CacheType>::TxnBegin()
@@ -699,6 +715,7 @@ namespace LLD
 
         /* Create the new Database Transaction Object. */
         pTransaction = new SectorTransaction();
+        fTxnReleaseRequired = false;
     }
 
 
@@ -712,8 +729,19 @@ namespace LLD
         if(!pTransaction)
             return false;
 
+        if(pTransaction->mapTransactions.empty()
+        && pTransaction->setKeychain.empty()
+        && pTransaction->mapIndex.empty()
+        && pTransaction->setErasedData.empty())
+            return true;
+
+        runtime::timer timerCheckpoint;
+        runtime::timer timerFsync;
+        timerCheckpoint.Start();
+
         /* A durable journal must never reference newly created keychain storage
          * whose file and directory entries have not reached stable storage. */
+        timerFsync.Start();
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain storage");
 
@@ -753,6 +781,11 @@ namespace LLD
         if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
+        timerFsync.Stop();
+        timerCheckpoint.Stop();
+        fTxnReleaseRequired = true;
+        TAO::Ledger::SyncProfile::RecordTxnCheckpoint(1, timerCheckpoint.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+
         return true;
     }
 
@@ -769,6 +802,14 @@ namespace LLD
 
         /** Set the transaction pointer to null also acting like a flag **/
         pTransaction = nullptr;
+
+        if(!fTxnReleaseRequired)
+            return true;
+
+        runtime::timer timerRelease;
+        runtime::timer timerFsync;
+        timerRelease.Start();
+        timerFsync.Start();
 
         /* Durably truncate the transaction journal. */
         const std::string strJournal =
@@ -789,6 +830,11 @@ namespace LLD
         if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
+        timerFsync.Stop();
+        timerRelease.Stop();
+        fTxnReleaseRequired = false;
+        TAO::Ledger::SyncProfile::RecordTxnRelease(1, timerRelease.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
+
         return true;
     }
 
@@ -802,6 +848,20 @@ namespace LLD
         /* Check that there is a valid transaction to apply to the database. */
         if(!pTransaction)
             return false;
+
+        if(pTransaction->mapTransactions.empty()
+        && pTransaction->setKeychain.empty()
+        && pTransaction->mapIndex.empty()
+        && pTransaction->setErasedData.empty())
+        {
+            delete pTransaction;
+            pTransaction = nullptr;
+            return true;
+        }
+
+        runtime::timer timerApply;
+        runtime::timer timerFsync;
+        timerApply.Start();
 
         pSectorKeys->BeginDurabilityTracking();
 
@@ -861,6 +921,7 @@ namespace LLD
         }
 
         /* Make the applied data and keychain durable before its journal can be released. */
+        timerFsync.Start();
         for(const uint16_t nSectorFile : setSectorFiles)
         {
             const std::string strPath = debug::safe_printstr(
@@ -874,10 +935,14 @@ namespace LLD
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
+        timerFsync.Stop();
 
         /* Cleanup the transaction object. */
         delete pTransaction;
         pTransaction = nullptr;
+
+        timerApply.Stop();
+        TAO::Ledger::SyncProfile::RecordTxnApply(1, timerApply.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());
 
         return true;
     }
@@ -1019,6 +1084,7 @@ namespace LLD
                     LOCK(TRANSACTION_MUTEX);
                     delete pTransaction;
                     pTransaction = pRecovery.release();
+                    fTxnReleaseRequired = true;
 
                     debug::log(0, FUNCTION, strName, " transaction journal ready to be restored");
                     return RECOVERY::COMPLETE;

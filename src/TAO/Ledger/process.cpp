@@ -19,6 +19,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/create.h>
+#include <TAO/Ledger/include/sync_profile.h>
 
 #include <TAO/Ledger/types/locator.h>
 #include <TAO/Ledger/types/mempool.h>
@@ -1387,6 +1388,22 @@ namespace TAO
         void Process(const TAO::Ledger::Block& block, uint8_t &nStatus, LLP::TritiumNode* pnode, bool fSkipCheck)
         {
             LOCK(PROCESSING_MUTEX);
+
+            struct SyncProfileGuard
+            {
+                uint8_t& nStatusRef;
+
+                SyncProfileGuard(uint8_t& nStatusIn)
+                : nStatusRef(nStatusIn)
+                {
+                    TAO::Ledger::SyncProfile::RecordBlockReceived();
+                }
+
+                ~SyncProfileGuard()
+                {
+                    TAO::Ledger::SyncProfile::RecordProcessStatus(nStatusRef);
+                }
+            } syncProfileGuard(nStatus);
 
             /* Get the block's hash. */
             const uint1024_t hashBlock = block.GetHash();
