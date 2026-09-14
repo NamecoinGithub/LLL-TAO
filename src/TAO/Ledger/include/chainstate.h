@@ -111,6 +111,9 @@ namespace TAO
             bool RunHardcodedCheckpointRecoveryForTests(const std::map<uint32_t, uint1024_t>& mapCheckpointsTest,
                                                         bool fAllowRepair);
 
+            /** Run startup best-chain integrity audit/repair with a bounded depth. **/
+            bool RunBestChainIntegrityAuditForTests(bool fAllowRepair, uint32_t nMaxDepth);
+
             /** Override SetBest during checkpoint recovery tests. **/
             void SetCheckpointRepairSetBestHook(const std::function<bool(const BlockState&)>& fnHook);
 #endif
