@@ -2429,6 +2429,47 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         std::remove(strCorruptPath.c_str());
     }
 
+    SECTION("scan continues past malformed record when boundaries are known")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38950, blocksGuard);
+
+        const std::string strCorruptPath = debug::safe_printstr(
+            config::GetDataDir(), "_LEDGER/datachain/_block.99998");
+
+        {
+            std::ofstream out(strCorruptPath, std::ios::binary | std::ios::out | std::ios::trunc);
+            REQUIRE(out.is_open());
+
+            DataStream ssMalformed(SER_LLD, LLD::DATABASE_VERSION);
+            ssMalformed << std::string("block");
+            ssMalformed << uint8_t(33);
+            WriteCompactSize(out, ssMalformed.size());
+            const std::vector<uint8_t>& vMalformed = ssMalformed.Bytes();
+            out.write(reinterpret_cast<const char*>(vMalformed.data()), static_cast<std::streamsize>(vMalformed.size()));
+
+            DataStream ssValid(SER_LLD, LLD::DATABASE_VERSION);
+            ssValid << std::string("block");
+            ssValid << fixture.three;
+            WriteCompactSize(out, ssValid.size());
+            const std::vector<uint8_t>& vValid = ssValid.Bytes();
+            out.write(reinterpret_cast<const char*>(vValid.data()), static_cast<std::streamsize>(vValid.size()));
+        }
+
+        LLD::BlockAuditScanOptions options;
+        options.fHasStartFile = true;
+        options.fHasEndFile = true;
+        options.nStartFile = 99998;
+        options.nEndFile = 99998;
+
+        LLD::BlockAuditScanResult result;
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashThree, options, result));
+        REQUIRE(result.fMalformedRecord);
+        REQUIRE(result.fFound);
+        REQUIRE(result.vMatches.size() >= 1);
+
+        std::remove(strCorruptPath.c_str());
+    }
+
     SECTION("multiple physical block records matching one hash are reported")
     {
         const auto fixture = BuildCheckpointChainFixture(39000, blocksGuard);

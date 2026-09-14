@@ -315,6 +315,8 @@ namespace
             strClassification = "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT";
         else if(fHashKeyExists && !fHashKeyReadable && fRawFound)
             strClassification = "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_PRESENT";
+        else if(fHashKeyExists && !fHashKeyReadable && !fRawFound)
+            strClassification = "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_MISSING";
         else if(!fHashKeyExists && fRawFound)
             strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
 
