@@ -72,7 +72,9 @@ namespace LLD
     , strName(strNameIn)
     , runtime()
     , pTransaction(nullptr)
-    , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"), nFlagsIn, nBucketsIn))
+    , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"),
+          nFlagsIn | ((nFlagsIn & (FLAGS::FORCE | FLAGS::WRITE | FLAGS::APPEND)) ? 0 : FLAGS::READONLY),
+          nBucketsIn))
     , cachePool(new CacheType(nCacheIn))
     , fileCache(new TemplateLRU<uint32_t, std::fstream*>(8))
     , nCurrentFile(0)
@@ -138,7 +140,8 @@ namespace LLD
     void SectorDatabase<KeychainType, CacheType>::Initialize()
     {
         /* Create directories if they don't exist yet. */
-        if(nFlags & FLAGS::CREATE && !filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
+        if(!(nFlags & FLAGS::READONLY) && nFlags & FLAGS::CREATE
+        && !filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
             debug::log(0, FUNCTION, "Generated Path ", strBaseLocation);
 
         /* Find the most recent append file. */
@@ -149,13 +152,24 @@ namespace LLD
                 debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile);
 
             /* Build a stream object now. */
-            const int64_t nSize = filesystem::size(strPath);
+            int64_t nSize = -1;
+            if(nFlags & FLAGS::READONLY)
+            {
+                std::error_code error;
+                const auto nFileSize = std::filesystem::file_size(strPath, error);
+                if(error && error != std::errc::no_such_file_or_directory)
+                    throw debug::exception(FUNCTION, "cannot stat sector ", strPath, ": ", error.message());
+                if(!error)
+                    nSize = static_cast<int64_t>(nFileSize);
+            }
+            else
+                nSize = filesystem::size(strPath);
             if(nSize == -1)
             {
                 /* Assign the Current Size and File. */
                 if(nCurrentFile > 0)
                     --nCurrentFile;
-                else
+                else if(!(nFlags & FLAGS::READONLY))
                 {
                     /* Create a new file if it doesn't exist. */
                     std::ofstream cStream(strPath, std::ios::binary | std::ios::out | std::ios::trunc);
@@ -634,7 +648,7 @@ namespace LLD
         TIMER.Start();
 
         /* Loop until shutdown. */
-        while(!config::fShutdown.load())
+        while(!config::fShutdown.load() && !fDestruct.load())
         {
             runtime::sleep(100);
             if(TIMER.Elapsed() < 30)
