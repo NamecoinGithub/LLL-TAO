@@ -1232,14 +1232,6 @@ namespace TAO
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 
-                /* Track sigchains whose head resurrect transaction has already conflicted in this
-                 * batch. Mempool::Accept() rejects any transaction whose hashPrevTx is itself
-                 * conflicted, so once a genesis conflicts every remaining descendant of that
-                 * sigchain in vResurrect is guaranteed to conflict as well. Skipping them here
-                 * avoids hundreds of pointless mutex-holding disk reads and ERROR log spam during
-                 * a reorg. */
-                std::unordered_set<uint256_t> setConflictedGenesis;
-
                 /* Iterate forward through our transactions to resurrect in ascending order.
                  * Disk is committed at this point; do not return false on ReadTx errors because
                  * the chain transition has already been durably committed.  Log and continue. */
@@ -1261,15 +1253,8 @@ namespace TAO
                         if(tx.IsCoinBase() || tx.IsCoinStake() || tx.IsHybrid())
                             continue;
 
-                        /* Skip descendants of a sigchain that has already conflicted in this
-                         * resurrect batch, since they are guaranteed to conflict too. */
-                        if(setConflictedGenesis.count(tx.hashGenesis))
-                            continue;
-
-                        /* Only actual conflicts suppress the remaining sigchain.
-                         * Has() also includes queued orphans and live transactions. */
-                        if(!mempool.Accept(tx) && mempool.IsConflictNode(tx.GetHash()))
-                            setConflictedGenesis.insert(tx.hashGenesis);
+                        /* Retain conflicted descendants for retry when their root resolves. */
+                        mempool.Accept(tx);
 
                         /* Print transaction on verbose 3. */
                         if(config::nVerbose >= 3)

@@ -4667,7 +4667,10 @@ namespace LLP
                             MessagePacket(nType).GetSerializeSize(SER_NETWORK, MIN_PROTO_VERSION);
                         if(nHeader > MAX_BUNDLE_BYTES - nBundleBytes ||
                            ssData.size() > MAX_BUNDLE_BYTES - nBundleBytes - nHeader)
+                        {
+                            fBufferFull.store(true);
                             return false;
+                        }
 
                         nBundleBytes += nHeader + ssData.size();
                         vMessages.push_back(NewMessage(nType, ssData));

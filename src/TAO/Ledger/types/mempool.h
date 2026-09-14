@@ -326,6 +326,11 @@ namespace TAO
             void ClearGenesisConflictState(const uint256_t& hashGenesis);
 
 
+            /** Restore a retry trigger unless a block confirmed the transaction
+             *  after admission released the coordinator. **/
+            void RestoreConflictRoot(const TAO::Ledger::Transaction& tx, bool& fConfirmed);
+
+
             /** Oprhan transactions in queue. **/
             std::map<uint512_t, TAO::Ledger::Transaction> mapOrphans;
 

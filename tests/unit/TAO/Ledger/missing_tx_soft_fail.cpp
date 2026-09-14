@@ -233,6 +233,8 @@ namespace
     class RecoverySocketNode : public LLP::TritiumNode
     {
     public:
+        using LLP::TritiumNode::fBufferFull;
+
         int peer = -1;
         bool reject = false;
         bool throwOnSend = false;
@@ -3779,6 +3781,7 @@ TEST_CASE("Transaction block responses bound packet collection before queueing",
 
     const auto nPackets = LLP::TritiumNode::PACKETS.load();
     REQUIRE_FALSE(node.PushBlock(LLP::TritiumNode::SPECIFIER::TRANSACTIONS, state));
+    REQUIRE(node.fBufferFull.load());
     REQUIRE(node.Buffered() == 0);
     REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets);
     REQUIRE(node.Receive().empty());
