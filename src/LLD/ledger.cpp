@@ -1569,6 +1569,9 @@ namespace LLD
         result.nSectorStart = cKey.nSectorStart;
         result.nSectorSize = cKey.nSectorSize;
 
+        if(result.fKeychainOnly)
+            return false;
+
         /* Reject a sector size the writer could never produce before allocating for it. */
         const uint64_t nPrefixSize = GetSizeOfCompactSize(cKey.nSectorSize);
         if(cKey.nSectorSize <= nPrefixSize || (cKey.nSectorSize - nPrefixSize) > MAX_SIZE)

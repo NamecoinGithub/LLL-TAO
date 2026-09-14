@@ -340,7 +340,8 @@ namespace
         const size_t nRawMatches = rawScan.vMatches.size();
         const bool fMultipleRawMatches = nRawMatches > 1;
         const bool fRawFound = rawScan.fFound;
-        const bool fHeightComparable = fHeightExists && hashAlias.fExists;
+        const bool fHeightComparable = fHeightExists && heightAlias.fExists && hashAlias.fExists
+            && !heightAlias.fKeychainOnly && !hashAlias.fKeychainOnly;
         const bool fAliasSameSector = fHeightComparable
             && hashAlias.nSectorFile == heightAlias.nSectorFile
             && hashAlias.nSectorStart == heightAlias.nSectorStart
@@ -355,8 +356,9 @@ namespace
         {
             fChildExists = pLedger->Exists(hashChild);
             fChildReadable = pLedger->AuditReadBlockRecord(hashChild, stateByChild, childAlias);
-            fChildPrevMatchesTarget = fChildReadable && (stateByChild.hashPrevBlock == hashTarget);
-            fHashNextMatchesChild = fHashKeyReadable && (stateByHash.hashNextBlock == hashChild);
+            fChildPrevMatchesTarget = fChildReadable && stateByChild.GetHash() == hashChild
+                && (stateByChild.hashPrevBlock == hashTarget);
+            fHashNextMatchesChild = fHashKeyMatches && (stateByHash.hashNextBlock == hashChild);
             fHeightNextMatchesChild = fHeightReadable && fHeightMatches
                 && (stateByHeight.hashNextBlock == hashChild);
         }

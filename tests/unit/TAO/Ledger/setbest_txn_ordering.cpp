@@ -2565,7 +2565,25 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["candidate"]["valid_child_link"] == true);
         REQUIRE(summary["child_link"]["checked"] == true);
         REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == true);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == true);
+
+        summary = Run({target, "-auditblockchild=" + other.GetHash().ToString()}, 0);
+        REQUIRE(summary["candidate"]["valid_child_link"] == false);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
         REQUIRE(summary["child_link"]["hash_next_matches_child"] == false);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == false);
+
+        TAO::Ledger::BlockState child = other;
+        child.hashPrevBlock = hash;
+        REQUIRE(writer.Write(child.GetHash(), child, "block"));
+        summary = Run({target, "-auditblockchild=" + child.GetHash().ToString()}, 0);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == true);
+        REQUIRE(writer.Index(other.GetHash(), child.GetHash()));
+        summary = Run({target, "-auditblockchild=" + other.GetHash().ToString()}, 0);
+        REQUIRE(summary["child_link"]["readable"] == true);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(writer.Write(other.GetHash(), other, "block"));
 
         REQUIRE(writer.Index(heightKey, other.GetHash()));
         summary = Run({target}, 0);
@@ -2613,15 +2631,31 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["raw_scan"]["found"] == false);
 
         REQUIRE(writer.Write(hash, other, "block"));
-        summary = Run({target, "-auditblockstartfile=99999"}, 0);
+        summary = Run({target, "-auditblockstartfile=99999",
+            "-auditblockchild=" + std::string(256, '0')}, 0);
         REQUIRE(summary["status"] == "FOUND");
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
         REQUIRE(summary["hash_key"]["matches"] == false);
         REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == false);
+        REQUIRE(summary["child_link"]["height_next_matches_child"] == true);
         REQUIRE(writer.Erase(heightKey, true));
         summary = Run({target, "-auditblockstartfile=99999"}, 0);
         REQUIRE(summary["status"] == "NOT_FOUND");
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
+
+        REQUIRE(writer.Write(hash));
+        REQUIRE(writer.Write(heightKey));
+        summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99999"}, 0);
+        for(const std::string& key : {"hash_key", "height_index"})
+        {
+            REQUIRE(summary[key]["exists"] == true);
+            REQUIRE(summary[key]["keychain_only"] == true);
+            REQUIRE(summary[key]["readable"] == false);
+            REQUIRE(summary[key]["oversized"] == false);
+        }
+        REQUIRE(summary["alias_relation"]["comparable"] == false);
+        REQUIRE(summary["alias_relation"]["same_sector"].is_null());
     }
 
     {
@@ -2783,13 +2817,23 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     std::filesystem::create_directory(pathSector);
     Run({target, "-auditblockstartfile=99999", "-lldmeters=1"}, 3);
 
+    std::filesystem::remove(pathSector);
+    std::filesystem::create_directories(pathIndex.parent_path());
+    std::ofstream(pathIndex, std::ios::binary).close();
+    std::filesystem::resize_file(pathIndex, uint64_t(nBuckets) * 4);
     {
-        const auto pathDuplicate = pathLedger / "datachain/_block.99998";
+        Database writer(strDatabase, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets, 1024);
+        REQUIRE(writer.Write(hash, state, "block"));
+    }
+
+    {
+        const auto pathDuplicate = pathLedger / "datachain/_block.65535";
         DataStream recordDuplicate(SER_LLD, LLD::DATABASE_VERSION);
         recordDuplicate << std::string("block") << state;
         std::ofstream stream(pathDuplicate, std::ios::binary);
         WriteCompactSize(stream, recordDuplicate.size());
         stream.write(reinterpret_cast<const char*>(recordDuplicate.Bytes().data()), recordDuplicate.size());
+        stream.close();
 
         LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
             LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
@@ -2802,14 +2846,14 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         LLD::SectorKey cHash;
         REQUIRE(keychain.Get(ssHashKey.Bytes(), cHash));
         LLD::SectorKey cHeight(cHash);
-        cHeight.nSectorFile = 99998;
+        cHeight.nSectorFile = 65535;
         cHeight.nSectorStart = 0;
         cHeight.nSectorSize = recordDuplicate.size() + GetSizeOfCompactSize(recordDuplicate.size());
         cHeight.SetKey(ssHeightKey.Bytes());
         REQUIRE(keychain.Put(cHeight));
 
-        auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99998",
-            "-auditblockendfile=99999"}, 0);
+        auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=65535",
+            "-auditblockendfile=65535"}, 0);
         REQUIRE(summary["status"] == "FOUND");
         REQUIRE(summary["classification"] == "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS");
         REQUIRE(summary["hash_key"]["matches"] == true);
