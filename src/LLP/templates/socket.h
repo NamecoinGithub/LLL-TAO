@@ -42,10 +42,12 @@ namespace LLP
      **/
     class Socket : public pollfd
     {
+    protected:
 
         /** Mutex for thread synchronization. **/
         mutable std::recursive_mutex SOCKET_MUTEX;
 
+    private:
 
         /* SSL object */
         SSL* pSSL;

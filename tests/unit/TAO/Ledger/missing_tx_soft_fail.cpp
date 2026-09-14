@@ -274,16 +274,19 @@ namespace
 
         std::vector<uint8_t> Receive()
         {
-            while(Buffered() > 0)
-                REQUIRE(Flush() > 0);
             std::vector<uint8_t> received;
             uint8_t buffer[4096];
             for(;;)
             {
                 const auto n = recv(peer, buffer, sizeof(buffer), MSG_DONTWAIT);
-                if(n <= 0)
+                if(n > 0)
+                {
+                    received.insert(received.end(), buffer, buffer + n);
+                    continue;
+                }
+                if(Buffered() == 0)
                     break;
-                received.insert(received.end(), buffer, buffer + n);
+                REQUIRE(Flush() > 0);
             }
             return received;
         }
@@ -3687,6 +3690,80 @@ TEST_CASE("Post-sync state: nSyncSession==0 and fSynchronized==true after Sync()
 
 
 #ifndef WIN32
+TEST_CASE("Oversized transaction bundles drain before another bundle is admitted",
+    "[llp][list][lastindex]")
+{
+    class BundleSocketNode : public RecoverySocketNode
+    {
+    public:
+        uint64_t GetMaxSendBuffer() const override { return 2048; }
+
+        void BufferPrefix()
+        {
+            RECURSIVE(SOCKET_MUTEX);
+            vBuffer.push_back(0xAB);
+            nBufferSize.store(1);
+        }
+    } node;
+
+    const int nSendBuffer = 1024;
+    REQUIRE(setsockopt(node.fd, SOL_SOCKET, SO_SNDBUF, &nSendBuffer, sizeof(nSendBuffer)) == 0);
+
+    std::vector<LLP::MessagePacket> packets;
+    TAO::Ledger::TritiumBlock block;
+    for(uint32_t i = 0; i < 3; ++i)
+    {
+        TAO::Ledger::Transaction tx;
+        tx.hashGenesis = uint256_t(0xCA9800 + i);
+        tx.vchSig.resize(4096, uint8_t(i));
+        block.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, tx.GetHash()});
+        DataStream data(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        data << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << tx;
+        packets.push_back(LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::TRANSACTION, data));
+    }
+    DataStream blockData(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    blockData << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << block;
+    packets.push_back(LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, blockData));
+
+    std::vector<uint8_t> expected;
+    for(const auto& packet : packets)
+    {
+        const auto bytes = packet.GetBytes();
+        expected.insert(expected.end(), bytes.begin(), bytes.end());
+    }
+    REQUIRE(expected.size() > node.GetMaxSendBuffer());
+
+    node.BufferPrefix();
+    REQUIRE_FALSE(node.WritePackets(packets));
+    REQUIRE(node.Receive() == std::vector<uint8_t>{0xAB});
+
+    REQUIRE(node.WritePackets(packets));
+    REQUIRE(node.Buffered() > node.GetMaxSendBuffer());
+    REQUIRE(node.Buffered() <= node.GetSendBufferLimit());
+    const auto nBuffered = node.Buffered();
+    const auto nPackets = LLP::TritiumNode::PACKETS.load();
+    REQUIRE_FALSE(node.WritePackets(packets));
+    REQUIRE(node.Buffered() == nBuffered);
+    REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets);
+
+    DataStream lastIndex(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    lastIndex << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << block.GetHash();
+    const auto notification = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, lastIndex);
+    REQUIRE(node.WritePacket(notification));
+    const auto bytes = notification.GetBytes();
+    auto expectedWithNotification = expected;
+    expectedWithNotification.insert(expectedWithNotification.end(), bytes.begin(), bytes.end());
+    REQUIRE(node.Receive() == expectedWithNotification);
+
+    REQUIRE(node.WritePackets(packets));
+    REQUIRE(node.Receive() == expected);
+    REQUIRE(node.WritePacket(notification));
+    REQUIRE(node.GetSendBufferLimit() == node.GetMaxSendBuffer());
+    REQUIRE(node.Receive() == bytes);
+}
+
+
 TEST_CASE("LIST batches continue from the final queued block under buffer pressure",
     "[llp][list][lastindex]")
 {
@@ -3697,14 +3774,14 @@ TEST_CASE("LIST batches continue from the final queued block under buffer pressu
         const std::map<std::string, std::string> savedArgs = config::mapArgs;
         const bool fClient = config::fClient.exchange(false);
         std::vector<uint1024_t> hashes;
-        uint512_t hashProducer = 0;
+        std::vector<uint512_t> transactions;
 
         ~FixtureGuard()
         {
             for(const auto& hash : hashes)
                 LLD::Ledger->EraseBlock(hash);
-            if(hashProducer != 0)
-                LLD::Ledger->EraseTx(hashProducer);
+            for(const auto& hash : transactions)
+                LLD::Ledger->EraseTx(hash);
             config::mapArgs = savedArgs;
             config::fClient.store(fClient);
         }
@@ -3733,7 +3810,13 @@ TEST_CASE("LIST batches continue from the final queued block under buffer pressu
         LLP::TritiumNode::SPECIFIER::CLIENT,
         LLP::TritiumNode::SPECIFIER::TRANSACTIONS);
     const bool fSequential = GENERATE(false, true);
-    const uint32_t nRejectSend = GENERATE(0u, 1u, 2u);
+    const uint32_t nRejectBundle = GENERATE(0u, 1u, 2u);
+    const uint32_t nRejectMember = GENERATE(1u, 2u, 3u, 4u);
+    const uint32_t nPacketsPerBundle =
+        nSpecifier == LLP::TritiumNode::SPECIFIER::TRANSACTIONS ? 4 : 1;
+    const uint32_t nRejectSend = nRejectBundle == 0 ? 0
+        : (nRejectBundle - 1) * nPacketsPerBundle + std::min(nRejectMember, nPacketsPerBundle);
+    CAPTURE(nSpecifier, fSequential, nRejectBundle, nRejectMember);
     config::mapArgs["-sequentialsync"] = fSequential ? "1" : "0";
     config::mapArgs["-batchlimit"] = "10";
     DataStream subscription(SER_NETWORK, LLP::MIN_PROTO_VERSION);
@@ -3744,18 +3827,26 @@ TEST_CASE("LIST batches continue from the final queued block under buffer pressu
     node.nSends = 0;
     node.nRejectSend = nRejectSend;
 
-    TAO::Ledger::Transaction producer;
-    producer.hashGenesis = uint256_t(0xCA9001);
-    fixture.hashProducer = producer.GetHash();
-    REQUIRE(LLD::Ledger->WriteTx(fixture.hashProducer, producer));
     std::vector<TAO::Ledger::BlockState> states(3);
+    std::vector<std::vector<TAO::Ledger::Transaction>> transactions(3);
     for(size_t i = 0; i < states.size(); ++i)
     {
         states[i].nVersion = 7;
         states[i].nChannel = 2;
         states[i].nHeight = 45000 + i;
         states[i].nNonce = 0xCA9000 + i;
-        states[i].vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fixture.hashProducer});
+        /* The final transaction is embedded in TritiumBlock as its producer. */
+        for(uint32_t j = 0; j < 4; ++j)
+        {
+            TAO::Ledger::Transaction tx;
+            tx.hashGenesis = uint256_t(0xCA9001 + 4 * i + j);
+            const auto hash = tx.GetHash();
+            fixture.transactions.push_back(hash);
+            REQUIRE(LLD::Ledger->WriteTx(hash, tx));
+            if(j < 3)
+                transactions[i].push_back(tx);
+            states[i].vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, hash});
+        }
         if(i > 0)
             states[i].hashPrevBlock = states[i - 1].GetHash();
         fixture.hashes.push_back(states[i].GetHash());
@@ -3768,33 +3859,63 @@ TEST_CASE("LIST batches continue from the final queued block under buffer pressu
     }
     TAO::Ledger::ChainState::hashBestChain.store(fixture.hashes.back());
 
+    const uint1024_t hashStop(0xCAFFFF);
     DataStream request(SER_NETWORK, LLP::MIN_PROTO_VERSION);
     request << uint8_t(nSpecifier) << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
-        << uint8_t(LLP::TritiumNode::TYPES::UINT1024_T) << fixture.hashes[1] << fixture.hashes[2];
+        << uint8_t(LLP::TritiumNode::TYPES::UINT1024_T) << fixture.hashes[1] << hashStop;
     node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, request);
     REQUIRE(node.ProcessPacket());
     REQUIRE(node.fRejected == (nRejectSend != 0));
 
-    const uint32_t nQueued = nRejectSend == 0 ? 2 : nRejectSend - 1;
-    std::vector<uint8_t> expected;
-    for(uint32_t i = 1; i <= nQueued; ++i)
+    const uint32_t nQueued = nRejectSend == 0 ? 2 : (nRejectSend - 1) / nPacketsPerBundle;
+    const auto expectedResponse = [&](uint32_t nFirst, uint32_t nLast)
     {
-        DataStream block(SER_NETWORK, LLP::MIN_PROTO_VERSION);
-        if(nSpecifier == LLP::TritiumNode::SPECIFIER::SYNC)
-            block << uint8_t(nSpecifier) << TAO::Ledger::SyncBlock(states[i], true);
-        else if(nSpecifier == LLP::TritiumNode::SPECIFIER::CLIENT)
-            block << uint8_t(nSpecifier) << TAO::Ledger::ClientBlock(states[i]);
-        else
-            block << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << TAO::Ledger::TritiumBlock(states[i]);
-        const auto bytes = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, block).GetBytes();
-        expected.insert(expected.end(), bytes.begin(), bytes.end());
+        std::vector<uint8_t> expected;
+        for(uint32_t i = nFirst; i <= nLast; ++i)
+        {
+            if(nSpecifier == LLP::TritiumNode::SPECIFIER::TRANSACTIONS)
+            {
+                for(const auto& tx : transactions[i])
+                {
+                    DataStream txData(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+                    txData << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << tx;
+                    const auto txBytes = LLP::TritiumNode::NewMessage(
+                        LLP::TritiumNode::TYPES::TRANSACTION, txData).GetBytes();
+                    expected.insert(expected.end(), txBytes.begin(), txBytes.end());
+                }
+            }
+            DataStream block(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+            if(nSpecifier == LLP::TritiumNode::SPECIFIER::SYNC)
+                block << uint8_t(nSpecifier) << TAO::Ledger::SyncBlock(states[i], true);
+            else if(nSpecifier == LLP::TritiumNode::SPECIFIER::CLIENT)
+                block << uint8_t(nSpecifier) << TAO::Ledger::ClientBlock(states[i]);
+            else
+                block << uint8_t(LLP::TritiumNode::SPECIFIER::TRITIUM) << TAO::Ledger::TritiumBlock(states[i]);
+            const auto bytes = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, block).GetBytes();
+            expected.insert(expected.end(), bytes.begin(), bytes.end());
+        }
+        DataStream lastIndex(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        lastIndex << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+            << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << fixture.hashes[nLast];
+        const auto notification = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, lastIndex).GetBytes();
+        expected.insert(expected.end(), notification.begin(), notification.end());
+        return expected;
+    };
+    REQUIRE(node.Receive() == expectedResponse(1, nQueued));
+
+    if(nRejectSend != 0)
+    {
+        /* Rejected transaction prefixes must not escape before LASTINDEX, and
+         * retry must send the entire rejected bundle exactly once. */
+        node.nRejectSend = 0;
+        DataStream retry(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        retry << uint8_t(nSpecifier) << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+            << uint8_t(LLP::TritiumNode::TYPES::UINT1024_T)
+            << fixture.hashes[nQueued + 1] << hashStop;
+        node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, retry);
+        REQUIRE(node.ProcessPacket());
+        REQUIRE(node.Receive() == expectedResponse(nQueued + 1, 2));
     }
-    DataStream lastIndex(SER_NETWORK, LLP::MIN_PROTO_VERSION);
-    lastIndex << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
-        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << fixture.hashes[nQueued];
-    const auto notification = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, lastIndex).GetBytes();
-    expected.insert(expected.end(), notification.begin(), notification.end());
-    REQUIRE(node.Receive() == expected);
 }
 #endif
 

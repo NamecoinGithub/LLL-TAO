@@ -2931,7 +2931,8 @@ namespace LLP
                         CloseTxResponseWindowForBlock(block.GetHash());
 
                         /* Process the block. */
-                        TAO::Ledger::Process(block, nStatus, this);
+                        TAO::Ledger::Process(block, nStatus, this, false,
+                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         break;
                     }
@@ -2964,7 +2965,8 @@ namespace LLP
                         }
 
                         /* Process the block. */
-                        TAO::Ledger::Process(block, nStatus, this);
+                        TAO::Ledger::Process(block, nStatus, this, false,
+                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         /* Check for missing transactions. */
                         if(nStatus & TAO::Ledger::PROCESS::INCOMPLETE)
@@ -3242,7 +3244,7 @@ namespace LLP
                                 debug::log(3, FUNCTION, "received sync block ", tritium.GetHash().SubString(), " height = ", block.nHeight);
 
                             /* Process the block. */
-                            TAO::Ledger::Process(tritium, nStatus);
+                            TAO::Ledger::Process(tritium, nStatus, nullptr, false, true);
                         }
                         else
                         {
@@ -3254,7 +3256,7 @@ namespace LLP
                                 debug::log(3, FUNCTION, "received sync block ", legacy.GetHash().SubString(), " height = ", block.nHeight);
 
                             /* Process the block. */
-                            TAO::Ledger::Process(legacy, nStatus);
+                            TAO::Ledger::Process(legacy, nStatus, nullptr, false, true);
                         }
 
                         break;
@@ -3283,7 +3285,8 @@ namespace LLP
                         }
 
                         /* Process the block. */
-                        TAO::Ledger::Process(block, nStatus);
+                        TAO::Ledger::Process(block, nStatus, nullptr, false,
+                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         /* Check for duplicate and ask for previous block. */
                         if(!(nStatus & TAO::Ledger::PROCESS::DUPLICATE)
@@ -4610,7 +4613,17 @@ namespace LLP
     }
 
 
-    /* Push a block to tritium connection based on specifier. */
+    /* Push a block to tritium connection based on specifier.
+     *
+     * For SPECIFIER::TRANSACTIONS, implements atomic bundling: either ALL
+     * transaction messages and the block message are queued, or NONE are queued.
+     * This prevents orphaned transaction messages in the send queue if buffer
+     * becomes full partway through a multi-message sequence.
+     *
+     * @return true if block (and all transaction messages for TRANSACTIONS mode)
+     *         were successfully queued. false if unable to queue due to buffer
+     *         pressure. In false case, NOTHING is queued (all-or-nothing semantics).
+     */
     bool TritiumNode::PushBlock(const uint8_t nSpecifier, const TAO::Ledger::BlockState& state)
     {
         /* Handle for a client block header. */
@@ -4641,6 +4654,8 @@ namespace LLP
                 /* Check for transactions. */
                 if(nSpecifier == SPECIFIER::TRANSACTIONS)
                 {
+                    std::vector<MessagePacket> vMessages;
+
                     /* Loop through transactions. */
                     for(const auto& proof : block.vtx)
                     {
@@ -4652,9 +4667,10 @@ namespace LLP
                             if(!LLD::Legacy->ReadTx(proof.second, tx, TAO::Ledger::FLAGS::MEMPOOL))
                                 continue;
 
-                            /* Push message of transaction. */
-                            if(!PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::LEGACY), tx))
-                                return false;
+                            /* Pre-collect transaction message. */
+                            DataStream ssData(SER_NETWORK, MIN_PROTO_VERSION);
+                            ssData << uint8_t(SPECIFIER::LEGACY) << tx;
+                            vMessages.push_back(NewMessage(TYPES::TRANSACTION, ssData));
                         }
 
                         /* Basic checks for tritium transactions. */
@@ -4665,12 +4681,19 @@ namespace LLP
                             if(!LLD::Ledger->ReadTx(proof.second, tx, TAO::Ledger::FLAGS::MEMPOOL))
                                 continue;
 
-
-                            /* Push message of transaction. */
-                            if(!PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::TRITIUM), tx))
-                                return false;
+                            /* Pre-collect transaction message. */
+                            DataStream ssData(SER_NETWORK, MIN_PROTO_VERSION);
+                            ssData << uint8_t(SPECIFIER::TRITIUM) << tx;
+                            vMessages.push_back(NewMessage(TYPES::TRANSACTION, ssData));
                         }
                     }
+
+                    /* Pre-collect block message. */
+                    DataStream ssBlock(SER_NETWORK, MIN_PROTO_VERSION);
+                    ssBlock << uint8_t(SPECIFIER::TRITIUM) << block;
+                    vMessages.push_back(NewMessage(TYPES::BLOCK, ssBlock));
+
+                    return WritePackets(vMessages);
                 }
 
                 /* Push message in response. */

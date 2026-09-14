@@ -273,9 +273,11 @@ namespace TAO
          *             already been validated by ValidateMinedBlock() prior to
          *             calling this function. Avoids redundant PoW verification
          *             for locally-mined blocks. Default is false (full validation).
+         *  @param[in] fSyncOrigin Whether this delivery originated from historical
+         *             network sync, including LIST batches without a node pointer.
          *
          **/
-        void Process(const TAO::Ledger::Block& block, uint8_t &nStatus, LLP::TritiumNode* pnode = nullptr, bool fSkipCheck = false);
+        void Process(const TAO::Ledger::Block& block, uint8_t &nStatus, LLP::TritiumNode* pnode = nullptr, bool fSkipCheck = false, bool fSyncOrigin = false);
 
 
         /** TrackLocalMinedAcceptedBlock

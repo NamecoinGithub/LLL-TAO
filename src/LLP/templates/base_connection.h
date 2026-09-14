@@ -165,6 +165,12 @@ namespace LLP
             return config::GetArg("-maxsendbuffer", MAX_SEND_BUFFER);
         }
 
+        /** Runtime limit includes at most one admitted oversized bundle. */
+        uint64_t GetSendBufferLimit() const
+        {
+            return std::max(GetMaxSendBuffer(), nBundleBufferLimit.load());
+        }
+
 
         /** Incoming Packet Being Built. **/
         PacketType     INCOMING;
@@ -372,6 +378,9 @@ namespace LLP
          *  acquisitions per predicate evaluation). **/
         std::atomic<bool> fHasOutgoing{false};
 
+        /** Fixed allowance for one oversized bundle and its control reserve. */
+        std::atomic<uint64_t> nBundleBufferLimit{0};
+
 
     public:
 
@@ -521,6 +530,17 @@ namespace LLP
          **/
         bool WritePacket(const PacketType& PACKET);
         bool WritePacket(const PacketType& PACKET, bool fPriority);
+
+        /** WritePackets
+         *
+         *  Admit an ordered bundle under the socket lock, then write it once.
+         *  Rejection leaves every packet in the bundle unsent.
+         *
+         *  @param[in] vPackets The packets to send as one bundle.
+         *  @return true if the complete bundle was queued.
+         *
+         **/
+        bool WritePackets(const std::vector<PacketType>& vPackets);
 
 
         /** ReadPacket

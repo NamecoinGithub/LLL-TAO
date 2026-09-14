@@ -47,6 +47,8 @@ namespace TAO
     {
 
         Mempool mempool;
+        thread_local uint32_t Mempool::nConflictDepDrainDepth = 0;
+        thread_local uint32_t Mempool::nOrphanDrainDepth = 0;
 
         /** Default Constructor. **/
         Mempool::Mempool()
@@ -58,7 +60,6 @@ namespace TAO
         , mapConflictRootByGenesis    ( )
         , mapConflictDependents       ( )
         , mapConflictDependentsByIndex( )
-        , nConflictDepDrainDepth      (0)
         , mapOrphans                  ( )
         , mapRequestCount             ( )
         , mapClaimed                  ( )
@@ -285,8 +286,12 @@ namespace TAO
             } scope(nConflictDepDrainDepth);
 
             uint512_t hashTx = hashParent;
-            while(mapConflictDependents.count(hashTx))
+            while(true)
             {
+                std::unique_lock<std::recursive_mutex> lock(MUTEX);
+                if(!mapConflictDependents.count(hashTx))
+                    break;
+
                 const TAO::Ledger::Transaction tx = mapConflictDependents[hashTx];
                 const uint512_t hashThis = tx.GetHash();
 
@@ -305,8 +310,11 @@ namespace TAO
                 }
 
                 tx.hashCache = hashThis;
+                lock.unlock();
 
-                if(!Accept(tx))
+                Accept(tx);
+                lock.lock();
+                if(!mapLedger.count(hashThis))
                 {
                     debug::log(0, FUNCTION, "CONFLICT-DEPENDENT tx ",
                         hashThis.SubString(), " not re-admitted: ",
@@ -355,9 +363,52 @@ namespace TAO
         /* Accepts a transaction with validation rules. */
         bool Mempool::Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode)
         {
-            /* Keep coordinator -> mempool order across commits and recursive acceptance. */
-            LLD::TransactionCoordinatorGuard coordinator;
-            RECURSIVE(MUTEX);
+            try
+            {
+                std::vector<uint512_t> vResolved;
+                bool fCommitted = false;
+                const bool fAccepted = AcceptTransaction(tx, pnode, vResolved, fCommitted);
+
+                /* Recursive admission must not inherit either lock from its parent. */
+                for(const auto& hash : vResolved)
+                    ProcessConflictDependents(hash);
+
+                if(!fCommitted)
+                    return fAccepted;
+
+                const uint512_t hashTx = tx.GetHash();
+                if(nOrphanDrainDepth == 0)
+                    ProcessOrphans(hashTx);
+                if(nConflictDepDrainDepth == 0)
+                    ProcessConflictDependents(hashTx);
+
+                if(!pnode && LLP::TRITIUM_SERVER)
+                {
+                    LLP::TRITIUM_SERVER->Relay
+                    (
+                        LLP::TritiumNode::ACTION::NOTIFY,
+                        uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
+                        hashTx
+                    );
+                }
+
+                if(config::fHybrid.load())
+                    PRIVATE_CONDITION.notify_all();
+
+                return true;
+            }
+            catch(const std::exception& e)
+            {
+                return debug::error(FUNCTION, "REJECTED: exception encountered ", e.what());
+            }
+        }
+
+
+        bool Mempool::AcceptTransaction(const TAO::Ledger::Transaction& tx,
+                                       LLP::TritiumNode* pnode, std::vector<uint512_t>& vResolved,
+                                       bool& fCommitted)
+        {
+            std::unique_lock<std::recursive_mutex> lock(MUTEX);
 
             /* Get the transaction hash. */
             uint512_t hashTx = tx.GetHash();
@@ -378,7 +429,11 @@ namespace TAO
                 ~ConflictDepTailGuard()
                 {
                     if(fActive && pPool)
-                        pPool->DropConflictDependents(hash);
+                    {
+                        RECURSIVE(pPool->MUTEX);
+                        if(!pPool->mapLedger.count(hash))
+                            pPool->DropConflictDependents(hash);
+                    }
                 }
 
                 void Arm()   { fActive = true;  }
@@ -437,17 +492,29 @@ namespace TAO
                 }
 
                 /* Check that the transaction is in a valid state. */
-                if(!tx.Check())
+                lock.unlock();
+                /* HasFirst is state-dependent and is rechecked at commit below. */
+                const bool fChecked = tx.Check(FLAGS::LOOKUP);
+                lock.lock();
+                if(!fChecked)
                 {
                     mapRejected.insert(hashTx);
                     return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
                 }
 
+                if(mapLedger.count(hashTx) || mapRejected.count(tx.hashPrevTx))
+                    return false;
+                if(mapOrphans.count(tx.hashPrevTx))
+                    return true;
+
                 /* Check for orphans and conflicts when not first transaction. */
                 if(!tx.IsFirst())
                 {
                     /* Check memory and disk for previous transaction. */
-                    if(!LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL))
+                    if(!LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
+                       (mapOrphansByIndex.count(tx.hashPrevTx) &&
+                        !mapLedger.count(tx.hashPrevTx) &&
+                        !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK)))
                     {
                         /* Debug output. */
                         debug::log(0, FUNCTION, "tx ", hashTx.SubString(), " ",
@@ -463,6 +530,8 @@ namespace TAO
                         if(pnode)
                             ++pnode->nConsecutiveOrphans;
 
+                        lock.unlock();
+
                         /* Ask for our previous transaction now. */
                         if(LLP::TRITIUM_SERVER)
                         {
@@ -471,7 +540,8 @@ namespace TAO
                                 LLP::TRITIUM_SERVER->RandomConnection();
 
                             /* Ask the random node for our orphan data. */
-                            pCheck->PushMessage(LLP::TritiumNode::ACTION::GET, uint8_t(LLP::TritiumNode::TYPES::TRANSACTION), tx.hashPrevTx);
+                            if(pCheck)
+                                pCheck->PushMessage(LLP::TritiumNode::ACTION::GET, uint8_t(LLP::TritiumNode::TYPES::TRANSACTION), tx.hashPrevTx);
                         }
 
                         return false;
@@ -491,6 +561,7 @@ namespace TAO
                         {
                             debug::error(FUNCTION, "CONFLICT: prev tx CLAIMED ", tx.hashPrevTx.SubString());
                             AddConflictRoot(tx);
+                            lock.unlock();
 
                             /* Relay the conflict if we are running over tritium protocol. */
                             if(pnode && LLP::TRITIUM_SERVER)
@@ -563,7 +634,7 @@ namespace TAO
                             if(mapConflicts.count(tx.hashPrevTx))
                             {
                                 EraseConflictRoot(tx.hashPrevTx);
-                                ProcessConflictDependents(tx.hashPrevTx);
+                                vResolved.push_back(tx.hashPrevTx);
                             }
                             else if(mapConflictDependentsByIndex.count(tx.hashPrevTx))
                             {
@@ -571,7 +642,7 @@ namespace TAO
                                     mapConflictDependentsByIndex[tx.hashPrevTx];
                                 mapConflictDependents.erase(txPrevDep.hashPrevTx);
                                 mapConflictDependentsByIndex.erase(tx.hashPrevTx);
-                                ProcessConflictDependents(tx.hashPrevTx);
+                                vResolved.push_back(tx.hashPrevTx);
                             }
 
                             /* Stale-marker clear may have removed the last root
@@ -604,6 +675,7 @@ namespace TAO
                         {
                             /* Option C: root-only insert (no descendant cascade). */
                             AddConflictRoot(tx);
+                            lock.unlock();
 
                             /* Relay the conflict if we are running over tritium protocol, so the
                              * genesis's canonical last-hash and the conflicted tx are both
@@ -644,88 +716,95 @@ namespace TAO
                     return false;
                 }
 
-                /* Begin an ACID transction for internal memory commits. */
-                if(!tx.Verify(FLAGS::MEMPOOL))
+                /* Never wait for the coordinator while holding the mempool.
+                 * Block commits take these locks in the opposite direction. */
+                lock.unlock();
                 {
-                    mapRejected.insert(hashTx);
-                    return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
-                }
+                    LLD::TransactionCoordinatorGuard coordinator;
+                    RECURSIVE(MUTEX);
 
-                /* Connect transaction in memory. */
-                LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
-                if(!transaction)
-                    return debug::error(FUNCTION, "failed to begin mempool transaction");
-                if(!tx.Connect(FLAGS::MEMPOOL))
-                {
-                    /* Abort memory commits on failures. */
-                    LLD::TxnAbort(FLAGS::MEMPOOL);
-
-                    /* Check if Transaction::Connect() classified this as a
-                     * local-state-dependent failure (e.g. coinbase appears
-                     * immature at our stale local height but would pass at
-                     * the peer-advertised best height).  In that case do NOT
-                     * add the tx to mapRejected — the blacklist would prevent
-                     * re-admission once the node catches up, turning a
-                     * transient staleness into a permanent wedge.  Simply
-                     * return false; the peer will re-offer the tx, and once
-                     * our height advances the next Accept() call will succeed. */
-                    const AdmissibilityClass nClass = TakeLastConnectClass();
-                    if(nClass == AdmissibilityClass::DEFERRED_LOCAL_STATE)
-                    {
-                        debug::warning(FUNCTION,
-                            "=== STRANDED_STATE_DETECTED === tx ", hashTx.SubString(),
-                            " deferred (local state stale): ", debug::GetLastError(),
-                            " — will retry when height advances");
+                    /* Classification above is advisory until both locks are held:
+                     * another admission or block may have changed the live tip. */
+                    if(mapLedger.count(hashTx) || mapRejected.count(tx.hashPrevTx))
                         return false;
+
+                    if(tx.IsFirst())
+                    {
+                        if(Has(tx.hashGenesis) || LLD::Ledger->HasFirst(tx.hashGenesis))
+                        {
+                            AddConflictRoot(tx);
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        uint512_t hashLast = 0;
+                        if(mapClaimed.count(tx.hashPrevTx) ||
+                           IsConflictNode(tx.hashPrevTx) ||
+                           !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
+                           !LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL) ||
+                           hashLast != tx.hashPrevTx)
+                        {
+                            /* A moving tip is retryable, not an absolute rejection. */
+                            AddConflictRoot(tx);
+                            return false;
+                        }
                     }
 
-                    mapRejected.insert(hashTx);
-                    return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                    /* Verify prestates against the same state that Connect commits. */
+                    if(!tx.Verify(FLAGS::MEMPOOL))
+                    {
+                        mapRejected.insert(hashTx);
+                        return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                    }
+
+                    /* Connect transaction in memory. */
+                    LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
+                    if(!transaction)
+                        return debug::error(FUNCTION, "failed to begin mempool transaction");
+                    if(!tx.Connect(FLAGS::MEMPOOL))
+                    {
+                        /* Abort memory commits on failures. */
+                        LLD::TxnAbort(FLAGS::MEMPOOL);
+
+                        /* Check if Transaction::Connect() classified this as a
+                         * local-state-dependent failure (e.g. coinbase appears
+                         * immature at our stale local height but would pass at
+                         * the peer-advertised best height). In that case do NOT
+                         * blacklist the tx: peers must be able to re-offer it
+                         * once our height advances. */
+                        const AdmissibilityClass nClass = TakeLastConnectClass();
+                        if(nClass == AdmissibilityClass::DEFERRED_LOCAL_STATE)
+                        {
+                            debug::warning(FUNCTION,
+                                "=== STRANDED_STATE_DETECTED === tx ", hashTx.SubString(),
+                                " deferred (local state stale): ", debug::GetLastError(),
+                                " — will retry when height advances");
+                            return false;
+                        }
+
+                        mapRejected.insert(hashTx);
+                        return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                    }
+
+                    /* Commit new memory into database states. */
+                    if(!LLD::TxnCommit(FLAGS::MEMPOOL))
+                        return debug::error(FUNCTION, "failed to commit mempool transaction");
+
+                    /* Set the internal memory. */
+                    mapLedger[hashTx] = tx;
+
+                    /* Update map claimed if not first tx. */
+                    if(!tx.IsFirst())
+                        mapClaimed[tx.hashPrevTx] = hashTx;
+
+                    /* Success path owns the tail drain; do not drop on scope exit. */
+                    depTailGuard.Disarm();
+                    fCommitted = true;
                 }
-
-                /* Commit new memory into database states. */
-                LLD::TxnCommit(FLAGS::MEMPOOL);
-
-                /* Set the internal memory. */
-                mapLedger[hashTx] = tx;
-
-                /* Update map claimed if not first tx. */
-                if(!tx.IsFirst())
-                    mapClaimed[tx.hashPrevTx] = hashTx;
-
-                /* Success path owns the tail drain; do not drop on scope exit. */
-                depTailGuard.Disarm();
 
                 /* Debug output. */
                 debug::log(0, FUNCTION, "tx ", hashTx.SubString(), " ACCEPTED in ", std::dec, timer.ElapsedMilliseconds(), " ms");
-
-                /* Process orphan queue. */
-                ProcessOrphans(hashTx);
-
-                /* Drain any parked conflict-dependent tail now that this tx is
-                 * live (covers intermediate dependents that Accept themselves
-                 * after a stale DAG marker was cleared, and peer re-offers of a
-                 * resolved root that still has a parked tail). No-op when empty.
-                 * Skipped while ProcessConflictDependents is already active so
-                 * the outer iterative walk owns the chain (O(1) stack). */
-                if(nConflictDepDrainDepth == 0)
-                    ProcessConflictDependents(hashTx);
-
-                /* Relay tx if creating ourselves. */
-                if(!pnode && LLP::TRITIUM_SERVER)
-                {
-                    /* Relay the transaction notification. */
-                    LLP::TRITIUM_SERVER->Relay
-                    (
-                        LLP::TritiumNode::ACTION::NOTIFY,
-                        uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
-                        hashTx
-                    );
-                }
-
-                /* Notify private to produce block if valid. */
-                if(config::fHybrid.load())
-                    PRIVATE_CONDITION.notify_all();
 
                 return true;
             }
@@ -741,15 +820,22 @@ namespace TAO
         /* Process orphan transactions if triggered in queue. */
         void Mempool::ProcessOrphans(const uint512_t& hash)
         {
-            LLD::TransactionCoordinatorGuard coordinator;
-            RECURSIVE(MUTEX);
+            struct DrainScope
+            {
+                DrainScope() { ++nOrphanDrainDepth; }
+                ~DrainScope() { --nOrphanDrainDepth; }
+            } scope;
 
             /* Check orphan queue. */
             uint512_t hashTx = hash;
-            while(mapOrphans.count(hashTx))
+            while(true)
             {
+                std::unique_lock<std::recursive_mutex> lock(MUTEX);
+                if(!mapOrphans.count(hashTx))
+                    break;
+
                 /* Get the transaction from map. */
-                const TAO::Ledger::Transaction& tx = mapOrphans[hashTx];
+                const TAO::Ledger::Transaction tx = mapOrphans[hashTx];
 
                 /* Get the previous hash. */
                 const uint512_t hashThis = tx.GetHash();
@@ -774,19 +860,23 @@ namespace TAO
                 /* Set our internal cached hash. */
                 tx.hashCache = hashThis;
 
+                /* Detach before releasing the lock: Accept must validate this
+                 * transaction, not short-circuit on its own orphan entry. */
+                mapOrphans.erase(hashTx);
+                setOrphansByIndex.erase(hashThis);
+                mapOrphansByIndex.erase(hashThis);
+                lock.unlock();
+
                 /* Accept the transaction into memory pool. */
-                if(!Accept(tx))
+                Accept(tx);
+                lock.lock();
+                if(!mapLedger.count(hashThis))
                 {
                     //mapRejected.insert(hashTx);
                     debug::log(0, FUNCTION, "ORPHAN tx ", hashTx.SubString(), " REJECTED");
 
                     return;
                 }
-
-                /* Erase the transaction. */
-                mapOrphans.erase(hashTx);
-                setOrphansByIndex.erase(hashThis);
-                mapOrphansByIndex.erase(hashThis);
 
                 /* Set the hashTx. */
                 hashTx = hashThis;
@@ -1070,6 +1160,38 @@ namespace TAO
 
         /* Check the memory pool for consistency. */
         void Mempool::Check()
+        {
+            std::vector<TAO::Ledger::Transaction> vResolved;
+            CheckTransactions(vResolved);
+
+            for(const auto& tx : vResolved)
+            {
+                const uint512_t hashTx = tx.GetHash();
+                {
+                    RECURSIVE(MUTEX);
+                    /* A concurrent removal must not be undone by this snapshot. */
+                    if(!mapConflicts.count(hashTx))
+                        continue;
+
+                    EraseConflictRoot(hashTx);
+                }
+
+                const bool fAccepted = Accept(tx);
+                bool fLive = false;
+                {
+                    RECURSIVE(MUTEX);
+                    fLive = mapLedger.count(hashTx);
+                    if(!fAccepted && !fLive)
+                        DropConflictDependents(hashTx);
+                }
+
+                if(fAccepted || fLive)
+                    ProcessConflictDependents(hashTx);
+            }
+        }
+
+
+        void Mempool::CheckTransactions(std::vector<TAO::Ledger::Transaction>& vResolved)
         {
             LLD::TransactionCoordinatorGuard coordinator;
             RECURSIVE(MUTEX);
@@ -1486,34 +1608,7 @@ namespace TAO
 
                     /* Loop through our ROOT transactions in sequence order. */
                     for(const auto& tx : vtx)
-                    {
-                        /* Cache the hash so we can erase before re-accepting. */
-                        const uint512_t hashTx = tx.GetHash();
-
-                        /* Remove from conflict roots first so Accept() doesn't
-                         * see this transaction's own prior conflicted state. */
-                        EraseConflictRoot(hashTx);
-
-                        /* Re-validate and re-admit into the live mempool. Drain
-                         * dependents when the root is live after Accept — either
-                         * because Accept succeeded, or because it short-circuited
-                         * false on an already-live mapLedger entry (Accept returns
-                         * false there to prevent relay loops). Only drop the tail
-                         * on a true admission failure so it cannot sit detached
-                         * after EraseConflictRoot. Accept() also drains on success
-                         * when not already inside a dependent walk; the explicit
-                         * call here covers the already-live short-circuit. */
-                        if(Accept(tx) || mapLedger.count(hashTx))
-                        {
-                            ProcessConflictDependents(hashTx);
-                        }
-                        else
-                        {
-                            debug::log(0, FUNCTION, "failed to re-admit resolved conflicted tx ", hashTx.SubString(),
-                                " for genesis ", tx.hashGenesis.SubString(), ": ", debug::GetLastError());
-                            DropConflictDependents(hashTx);
-                        }
-                    }
+                        vResolved.push_back(tx);
                 }
             }
         }

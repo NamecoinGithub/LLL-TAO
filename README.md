@@ -24,6 +24,23 @@ For deterministic local/Codespaces/Copilot dependency bootstrap on Ubuntu, run:
 sudo bash contrib/devtools/install-build-deps.sh
 ```
 
+## Sync profiling
+
+Use `-syncprofile` to enable aggregate profiling with a 10-second reporting
+interval, or `-syncprofile=<seconds>` to choose a positive interval.
+`-syncprofile=0` (or omitting the option) disables profiling. Reports are emitted
+when activity updates the counters, not by a background timer. Block counters
+and blocks/sec include only historical network-sync deliveries, not local mining
+or API validation. LIST and transaction-phase counters aggregate node-wide work.
+
+The durability optimization skips only the **apply phase** for untouched physical
+transaction participants. Every opened participant still writes and syncs a
+checkpoint marker and durably releases its journal, including empty participants,
+as required by the existing all-participant recovery protocol. For a ledger-only
+CONSENSUS transaction this means five checkpoint participants, one apply
+participant, and five release participants—not touched-only checkpoint/release
+barriers.
+
 ## Mining
 
 Nexus supports both private solo mining and decentralized public mining pools using the enhanced Falcon Handshake protocol.

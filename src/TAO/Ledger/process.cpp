@@ -1385,25 +1385,29 @@ namespace TAO
 
         /* Processes a block incoming over the network. */
         static uint64_t nProcessedBlocks = 0;
-        void Process(const TAO::Ledger::Block& block, uint8_t &nStatus, LLP::TritiumNode* pnode, bool fSkipCheck)
+        void Process(const TAO::Ledger::Block& block, uint8_t &nStatus, LLP::TritiumNode* pnode, bool fSkipCheck, bool fSyncOrigin)
         {
             LOCK(PROCESSING_MUTEX);
 
             struct SyncProfileGuard
             {
                 uint8_t& nStatusRef;
+                const bool fSync;
 
-                SyncProfileGuard(uint8_t& nStatusIn)
+                SyncProfileGuard(uint8_t& nStatusIn, const bool fSyncIn)
                 : nStatusRef(nStatusIn)
+                , fSync(fSyncIn)
                 {
-                    TAO::Ledger::SyncProfile::RecordBlockReceived();
+                    if(fSync)
+                        TAO::Ledger::SyncProfile::RecordBlockReceived();
                 }
 
                 ~SyncProfileGuard()
                 {
-                    TAO::Ledger::SyncProfile::RecordProcessStatus(nStatusRef);
+                    if(fSync)
+                        TAO::Ledger::SyncProfile::RecordProcessStatus(nStatusRef);
                 }
-            } syncProfileGuard(nStatus);
+            } syncProfileGuard(nStatus, fSyncOrigin);
 
             /* Get the block's hash. */
             const uint1024_t hashBlock = block.GetHash();

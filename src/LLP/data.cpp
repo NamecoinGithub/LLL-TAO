@@ -1104,12 +1104,12 @@ namespace LLP
         }
 
         /* Check that write buffers aren't overflowed. */
-        if(CONNECTION->Buffered() > CONNECTION->GetMaxSendBuffer())
+        if(CONNECTION->Buffered() > CONNECTION->GetSendBufferLimit())
         {
             debug::log(0, FUNCTION, "DataThread[", ID, "]: BUFFER overflow for ",
                 ProtocolType::Name(), " from ", CONNECTION->GetAddress().ToStringIP(),
                 " Buffered()=", CONNECTION->Buffered(),
-                " MaxSendBuffer=", CONNECTION->GetMaxSendBuffer(),
+                " MaxSendBuffer=", CONNECTION->GetSendBufferLimit(),
                 " IsTimeoutExempt=", CONNECTION->IsTimeoutExempt());
 
             remove_connection_with_event(nIndex, DISCONNECT::BUFFER);
