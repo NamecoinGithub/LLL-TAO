@@ -1475,6 +1475,9 @@ namespace LLD
                         TAO::Ledger::BlockState state;
                         ssRecord >> state;
 
+                        if(!ssRecord.End())
+                            result.fMalformedRecord = true;
+
                         const uint1024_t hashCandidate = state.GetHash();
                         if(hashCandidate == hashBlock)
                         {
@@ -1489,7 +1492,8 @@ namespace LLD
                             match.fSerializedComplete = ssRecord.End();
 
                             result.vMatches.push_back(match);
-                            result.fFound = true;
+                            if(match.fSerializedComplete)
+                                result.fFound = true;
                         }
                     }
                 }

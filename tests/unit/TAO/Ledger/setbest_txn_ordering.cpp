@@ -67,14 +67,24 @@ ________________________________________________________________________________
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
+#endif
 
 #include <unit/catch2/catch.hpp>
 
@@ -2363,7 +2373,214 @@ TEST_CASE("Read-only sector database preserves missing keychains and reads non-w
         REQUIRE_FALSE(reader.Exists(uint32_t(1)));
         REQUIRE_FALSE(std::filesystem::exists(pathBase));
     }
+
+    SECTION("meter stops on database destruction without global shutdown")
+    {
+        ArgsMapGuard argsGuard;
+        config::mapArgs["-lldmeters"] = "1";
+        REQUIRE_FALSE(config::fShutdown.load());
+        {
+            Database reader(strName, 0, 1, 1024);
+            uint32_t value = 0;
+            REQUIRE(reader.Read(uint32_t(1), value));
+        }
+        REQUIRE_FALSE(config::fShutdown.load());
+    }
 }
+
+
+#ifndef WIN32
+/* Run explicitly with NEXUS_AUDIT_BINARY pointing to the production nexus executable. */
+TEST_CASE("Offline audit CLI validates arguments and reports exact source evidence",
+          "[.][auditblock-cli]")
+{
+    const char* pszBinary = std::getenv("NEXUS_AUDIT_BINARY");
+    REQUIRE(pszBinary != nullptr);
+    const std::string strBinary = std::filesystem::absolute(pszBinary).string();
+    REQUIRE(std::filesystem::is_regular_file(strBinary));
+
+    const bool fClient = GENERATE(false, true);
+    const std::string strName = "_AUDIT_CLI_TEST";
+    const std::filesystem::path pathBase = config::GetDataDir() + strName;
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard() { std::filesystem::remove_all(path); }
+    } directoryGuard{pathBase};
+    const std::string strDatabase = strName + (fClient ? "/client" : "") + "/_LEDGER";
+    const std::filesystem::path pathLedger = config::GetDataDir() + strDatabase;
+
+    TAO::Ledger::BlockState state;
+    state.nHeight = 42;
+    state.nNonce = 705;
+    const uint1024_t hash = state.GetHash();
+    TAO::Ledger::BlockState other = state;
+    ++other.nNonce;
+
+    const auto Run = [&](const std::vector<std::string>& options, const int nExpectedExit)
+    {
+        std::vector<std::string> args{strBinary, "-datadir=" + pathBase.string() + "/",
+            "-client=" + std::string(fClient ? "1" : "0"), "-verbose=0"};
+        args.insert(args.end(), options.begin(), options.end());
+        std::vector<char*> argv;
+        for(auto& arg : args)
+            argv.push_back(arg.data());
+        argv.push_back(nullptr);
+
+        std::unique_ptr<FILE, decltype(&std::fclose)> output(std::tmpfile(), &std::fclose);
+        REQUIRE(output != nullptr);
+        posix_spawn_file_actions_t actions;
+        REQUIRE(posix_spawn_file_actions_init(&actions) == 0);
+        REQUIRE(posix_spawn_file_actions_adddup2(&actions, fileno(output.get()), STDOUT_FILENO) == 0);
+        REQUIRE(posix_spawn_file_actions_adddup2(&actions, fileno(output.get()), STDERR_FILENO) == 0);
+        REQUIRE(posix_spawn_file_actions_addclose(&actions, fileno(output.get())) == 0);
+        pid_t pid = 0;
+        const int nSpawn = posix_spawn(&pid, strBinary.c_str(), &actions, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        REQUIRE(nSpawn == 0);
+
+        int nStatus = 0;
+        pid_t nWait = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while((nWait = waitpid(pid, &nStatus, WNOHANG)) == 0
+           && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if(nWait == 0)
+        {
+            kill(pid, SIGKILL);
+            waitpid(pid, &nStatus, 0);
+        }
+
+        std::rewind(output.get());
+        std::string text;
+        char buffer[4096];
+        while(const size_t nRead = std::fread(buffer, 1, sizeof(buffer), output.get()))
+            text.append(buffer, nRead);
+        INFO(text);
+        REQUIRE(nWait == pid);
+        REQUIRE(WIFEXITED(nStatus));
+        REQUIRE(WEXITSTATUS(nStatus) == nExpectedExit);
+
+        encoding::json summary;
+        const size_t nBegin = text.find('{');
+        if(nExpectedExit == 0)
+        {
+            REQUIRE(nBegin != std::string::npos);
+            const size_t nEnd = text.find_last_of('}');
+            summary = encoding::json::parse(text.substr(nBegin, nEnd - nBegin + 1));
+        }
+        else
+            REQUIRE(nBegin == std::string::npos);
+        return summary;
+    };
+    const std::string target = "-auditblock=" + hash.ToString();
+    for(const std::string& invalid : std::vector<std::string>{"", "00", std::string(256, '0'), std::string(256, 'g')})
+        Run({"-auditblock=" + invalid}, 2);
+    for(const std::string& invalid : {"-auditblockheight=-1", "-auditblockheight=4294967296",
+            "-auditblockheight=1x", "-auditblockfiles=0", "-auditblockfiles=",
+            "-auditblockstartfile=100000", "-auditblockendfile=100000", "-auditblockchild=0"})
+        Run({target, invalid}, 2);
+    Run({target, "-auditblockstartfile=2", "-auditblockendfile=1"}, 2);
+    Run({target}, 3);
+
+    const uint32_t nBuckets = fClient ? 77773 : (256 * 256 * 64);
+    const auto pathIndex = pathLedger / "keychain/_hashmap.index";
+    std::filesystem::create_directories(pathIndex.parent_path());
+    /* Pre-size the empty index independently of other test databases' bucket counts. */
+    std::ofstream(pathIndex, std::ios::binary).close();
+    std::filesystem::resize_file(pathIndex, uint64_t(nBuckets) * 4);
+    using Database = LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU>;
+    {
+        Database writer(strDatabase, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets, 1024);
+        REQUIRE(writer.Write(hash, state, "block"));
+        REQUIRE(writer.Write(other.GetHash(), other, "block"));
+        const auto heightKey = std::make_pair(std::string("height"), state.nHeight);
+        REQUIRE(writer.Index(heightKey, hash));
+
+        auto summary = Run({target, "-auditblockchild=" + std::string(256, '0'), "-lldmeters=1"}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HASH_KEY_READABLE");
+        REQUIRE(summary["hash_key"]["matches"] == true);
+        REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["candidate"]["valid_child_link"] == true);
+
+        REQUIRE(writer.Index(heightKey, other.GetHash()));
+        summary = Run({target}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
+        REQUIRE(summary["hash_key"]["matches"] == true);
+        REQUIRE(summary["height_index"]["matches"] == false);
+        REQUIRE(writer.Index(heightKey, hash));
+        REQUIRE(writer.Index(std::make_pair(std::string("height"), uint32_t(43)), other.GetHash()));
+        summary = Run({target, "-auditblockheight=43"}, 0);
+        REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
+        REQUIRE(summary["height_index"]["expected_height_check"]["matches"] == false);
+
+        REQUIRE(writer.Erase(hash, true));
+        summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99999"}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT");
+        REQUIRE(summary["raw_scan"]["found"] == false);
+
+        REQUIRE(writer.Write(hash, other, "block"));
+        summary = Run({target, "-auditblockstartfile=99999"}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
+        REQUIRE(summary["hash_key"]["matches"] == false);
+        REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(writer.Erase(heightKey, true));
+        summary = Run({target, "-auditblockstartfile=99999"}, 0);
+        REQUIRE(summary["status"] == "NOT_FOUND");
+        REQUIRE(summary["classification"] == "HASH_KEY_READABLE_MISMATCH");
+    }
+
+    std::filesystem::remove_all(pathLedger / "keychain");
+    std::filesystem::remove(pathLedger / "datachain/_block.00000");
+    const auto pathSector = pathLedger / "datachain/_block.99999";
+    DataStream record(SER_LLD, LLD::DATABASE_VERSION);
+    record << std::string("block") << state;
+    {
+        std::ofstream stream(pathSector, std::ios::binary);
+        WriteCompactSize(stream, record.size());
+        stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+    }
+    const auto ReadSector = [&]()
+    {
+        std::ifstream stream(pathSector, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    };
+    const std::string sectorBefore = ReadSector();
+    auto summary = Run({target, "-auditblockstartfile=99999", "-auditblockfiles=2", "-lldmeters=1"}, 0);
+    REQUIRE(summary["status"] == "FOUND");
+    REQUIRE(summary["classification"] == "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT");
+    REQUIRE(summary["raw_scan"]["scan_start_file"] == 99999);
+    REQUIRE(summary["raw_scan"]["scan_end_file"] == 99999);
+    REQUIRE(summary["raw_scan"]["files_scanned"] == 1);
+    REQUIRE(summary["hash_key"]["exists"] == false);
+    REQUIRE(ReadSector() == sectorBefore);
+    REQUIRE_FALSE(std::filesystem::exists(pathLedger / "keychain"));
+    REQUIRE_FALSE(std::filesystem::exists(pathLedger / "datachain/_block.00000"));
+
+    summary = Run({target, "-auditblockstartfile=99998"}, 0);
+    REQUIRE(summary["status"] == "NOT_FOUND");
+    REQUIRE(summary["classification"] == "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN");
+    {
+        std::ofstream stream(pathSector, std::ios::binary | std::ios::trunc);
+        WriteCompactSize(stream, record.size() + 1);
+        stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+        stream.put('\0');
+    }
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["status"] == "NOT_FOUND");
+    REQUIRE(summary["classification"] == "RAW_RECORD_TRUNCATED_OR_MALFORMED");
+    REQUIRE(summary["raw_scan"]["found"] == false);
+    REQUIRE(summary["candidate"]["serialized_complete"] == false);
+
+    std::filesystem::remove(pathSector);
+    std::filesystem::create_directory(pathSector);
+    Run({target, "-auditblockstartfile=99999", "-lldmeters=1"}, 3);
+}
+#endif
 
 
 TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability without mutation",
@@ -2636,6 +2853,55 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         REQUIRE(result.vMatches.size() >= 1);
 
         std::remove(strCorruptPath.c_str());
+    }
+
+    SECTION("trailing bytes are malformed evidence, not a complete raw match")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38975, blocksGuard);
+        const std::filesystem::path path = config::GetDataDir() + "_LEDGER/datachain/_block.99998";
+        struct SectorGuard
+        {
+            std::filesystem::path path;
+            ~SectorGuard() { std::filesystem::remove(path); }
+        } sectorGuard{path};
+
+        DataStream record(SER_LLD, LLD::DATABASE_VERSION);
+        record << std::string("block") << fixture.three;
+        const auto WriteRecord = [&](const bool fTrailing, const bool fAppend)
+        {
+            std::ofstream stream(path, std::ios::binary | (fAppend ? std::ios::app : std::ios::trunc));
+            REQUIRE(stream.is_open());
+            WriteCompactSize(stream, record.size() + (fTrailing ? 1 : 0));
+            stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+            if(fTrailing)
+                stream.put('\0');
+        };
+
+        LLD::BlockAuditScanOptions options;
+        options.fHasStartFile = options.fHasEndFile = true;
+        options.nStartFile = options.nEndFile = 99998;
+        LLD::BlockAuditScanResult result;
+        WriteRecord(true, false);
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashThree, options, result));
+        REQUIRE(result.fMalformedRecord);
+        REQUIRE_FALSE(result.fFound);
+        REQUIRE(result.vMatches.size() == 1);
+        REQUIRE_FALSE(result.vMatches.front().fSerializedComplete);
+
+        WriteRecord(false, true);
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashThree, options, result));
+        REQUIRE(result.fMalformedRecord);
+        REQUIRE(result.fFound);
+        REQUIRE(result.vMatches.size() == 2);
+        REQUIRE(result.vMatches.back().fSerializedComplete);
+
+        WriteRecord(false, false);
+        WriteRecord(true, true);
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashThree, options, result));
+        REQUIRE(result.fMalformedRecord);
+        REQUIRE(result.fFound);
+        REQUIRE(result.vMatches.front().fSerializedComplete);
+        REQUIRE_FALSE(result.vMatches.back().fSerializedComplete);
     }
 
     SECTION("multiple physical block records matching one hash are reported")

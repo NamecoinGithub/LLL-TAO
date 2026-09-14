@@ -47,13 +47,15 @@ ________________________________________________________________________________
 #endif
 
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 
 namespace
 {
     static constexpr uint32_t AUDITBLOCK_MAX_SECTOR_FILE = 99999;
 
-    bool ParseAuditHashArg(const std::string& strValue, uint1024_t& hashOut, std::string& strError)
+    bool ParseAuditHashArg(const std::string& strValue, uint1024_t& hashOut, std::string& strError,
+                          const bool fAllowZero = false)
     {
         if(strValue.empty())
         {
@@ -68,7 +70,7 @@ namespace
         }
 
         hashOut.SetHex(strValue);
-        if(hashOut == 0)
+        if(!fAllowZero && hashOut == 0)
         {
             strError = "hash cannot be zero";
             return false;
@@ -134,7 +136,7 @@ namespace
             optionsOut.nStartFile = nStartFile;
             optionsOut.nEndFile = fMaxFilesProvided
                 ? static_cast<uint32_t>(std::min<uint64_t>(
-                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+                    static_cast<uint64_t>(AUDITBLOCK_MAX_SECTOR_FILE),
                     static_cast<uint64_t>(nStartFile) + static_cast<uint64_t>(optionsOut.nMaxFiles - 1)))
                 : nStartFile;
 
@@ -177,7 +179,7 @@ namespace
         if(config::HasArg("-auditblockchild"))
         {
             fChildProvided = true;
-            if(!ParseAuditHashArg(config::GetArg("-auditblockchild", ""), hashChild, strError))
+            if(!ParseAuditHashArg(config::GetArg("-auditblockchild", ""), hashChild, strError, true))
             {
                 debug::error(FUNCTION, "-auditblockchild ", strError);
                 return 2;
@@ -244,18 +246,14 @@ namespace
         }
 
         const std::string strLedgerBase = debug::safe_printstr(config::GetDataDir(), "_LEDGER/");
-        const std::string strLedgerKeychain = debug::safe_printstr(strLedgerBase, "keychain/");
         const std::string strLedgerDatachain = debug::safe_printstr(strLedgerBase, "datachain/");
-        const std::string strLedgerFirstSector = debug::safe_printstr(strLedgerDatachain, "_block.00000");
-        if(!filesystem::exists(strLedgerKeychain)
-        || !filesystem::exists(strLedgerDatachain)
-        || !filesystem::exists(strLedgerFirstSector))
+        if(!std::filesystem::is_directory(strLedgerDatachain))
         {
             debug::error(FUNCTION, "ledger datachain not present for read-only audit at ", strLedgerBase);
             return 3;
         }
 
-        LLD::LedgerDB ledgerReadOnly(0);
+        LLD::LedgerDB ledgerReadOnly(0, config::fClient.load() ? 77773 : (256 * 256 * 64));
         LLD::LedgerDB* const pLedger = &ledgerReadOnly;
 
         LLD::BlockAuditScanOptions options;
@@ -318,14 +316,15 @@ namespace
         std::string strClassification = "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN";
         if(rawScan.fTruncatedRecord || rawScan.fMalformedRecord)
             strClassification = "RAW_RECORD_TRUNCATED_OR_MALFORMED";
+        else if((fHeightChecked && fHeightReadable && !fHeightMatches)
+             || (fExpectedHeightCheckPerformed && fExpectedHeightReadable && !fExpectedHeightMatches))
+            strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
         else if(fHashKeyExists && fHashKeyReadable && fHashKeyMatches)
             strClassification = "HASH_KEY_READABLE";
         else if(fHashKeyExists && fHashKeyReadable && !fHashKeyMatches)
             strClassification = "HASH_KEY_READABLE_MISMATCH";
         else if(fHeightChecked && fHeightMatches && fHashKeyExists && !fHashKeyReadable)
             strClassification = "HASH_KEY_PRESENT_UNREADABLE_HEIGHT_INDEX_PRESENT";
-        else if(fHeightChecked && fHeightReadable && !fHeightMatches)
-            strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
         else if(!fHashKeyExists && fHeightMatches)
             strClassification = "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT";
         else if(fHashKeyExists && !fHashKeyReadable && fRawFound)

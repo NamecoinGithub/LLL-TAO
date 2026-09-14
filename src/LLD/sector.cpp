@@ -648,7 +648,7 @@ namespace LLD
         TIMER.Start();
 
         /* Loop until shutdown. */
-        while(!config::fShutdown.load())
+        while(!config::fShutdown.load() && !fDestruct.load())
         {
             runtime::sleep(100);
             if(TIMER.Elapsed() < 30)
