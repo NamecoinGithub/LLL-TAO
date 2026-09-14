@@ -262,9 +262,9 @@ namespace
         BuildAuditScanOptions(fMaxFilesProvided, nMaxFiles, fStartFileProvided, nStartFile,
                               fEndFileProvided, nEndFile, options);
 
-        const bool fHashKeyExists = pLedger->HasBlock(hashTarget);
+        const bool fHashKeyExists = pLedger->Exists(hashTarget);
         TAO::Ledger::BlockState stateByHash;
-        const bool fHashKeyReadable = pLedger->ReadBlock(hashTarget, stateByHash);
+        const bool fHashKeyReadable = pLedger->Read(hashTarget, stateByHash);
         const bool fHashKeyMatches = fHashKeyReadable && (stateByHash.GetHash() == hashTarget);
 
         bool fHeightChecked = false;
@@ -338,7 +338,9 @@ namespace
         if(fMultipleRawMatches && strClassification != "RAW_RECORD_TRUNCATED_OR_MALFORMED")
             strClassification = "MULTIPLE_RAW_MATCHES";
 
-        debug::log(0, "AUDITBLOCK hash=", hashTarget.ToString(), " status=", (fHashKeyReadable ? "FOUND" : "NOT_FOUND"),
+        const char* const strStatus =
+            (fHashKeyMatches || fHeightMatches || fExpectedHeightMatches || fRawFound) ? "FOUND" : "NOT_FOUND";
+        debug::log(0, "AUDITBLOCK hash=", hashTarget.ToString(), " status=", strStatus,
             " hash_key_exists=", fHashKeyExists ? "true" : "false",
             " raw_found=", fRawFound ? "true" : "false");
 
@@ -379,6 +381,7 @@ namespace
         }
 
         encoding::json jSummary;
+        jSummary["status"] = strStatus;
         jSummary["hash"] = hashTarget.ToString();
         jSummary["expected_height"] = fExpectedHeightProvided ? encoding::json(nExpectedHeight) : encoding::json(nullptr);
         jSummary["hash_key"] = {
@@ -712,7 +715,15 @@ int main(int argc, char** argv)
 
     if(config::HasArg("-auditblock"))
     {
-        const int nAuditResult = RunOfflineAuditBlock();
+        int nAuditResult = 3;
+        try
+        {
+            nAuditResult = RunOfflineAuditBlock();
+        }
+        catch(const std::exception& e)
+        {
+            debug::error(FUNCTION, "auditblock infrastructure failed: ", e.what());
+        }
         debug::Shutdown();
         return nAuditResult;
     }

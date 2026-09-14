@@ -34,6 +34,7 @@ ________________________________________________________________________________
 
 #include <tuple>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -1392,9 +1393,16 @@ namespace LLD
             const std::string strPath = debug::safe_printstr(
                 strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nFile);
 
-            const int64_t nRawFileSize = filesystem::size(strPath);
-            if(nRawFileSize < 0)
+            std::error_code error;
+            const uint64_t nFileSize = std::filesystem::file_size(strPath, error);
+            if(error)
             {
+                if(error != std::errc::no_such_file_or_directory)
+                {
+                    result.fInfrastructureFailure = true;
+                    return false;
+                }
+
                 if(nFile == 0)
                     break;
 
@@ -1403,7 +1411,6 @@ namespace LLD
 
             ++result.nFilesScanned;
 
-            const uint64_t nFileSize = static_cast<uint64_t>(nRawFileSize);
             uint64_t nFilePos = 0;
 
             std::ifstream stream(strPath, std::ios::in | std::ios::binary);

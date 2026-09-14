@@ -67,6 +67,7 @@ ________________________________________________________________________________
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <fstream>
 #include <map>
@@ -2262,6 +2263,109 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
 }
 
 
+TEST_CASE("Read-only sector database preserves missing keychains and reads non-writable files",
+          "[lld][auditblock][readonly]")
+{
+    const std::string strName = "_AUDIT_READONLY_TEST";
+    const std::filesystem::path pathBase = config::GetDataDir() + strName;
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            if(!std::filesystem::exists(path))
+                return;
+
+            std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+            for(const auto& entry : std::filesystem::recursive_directory_iterator(path))
+                std::filesystem::permissions(entry.path(), std::filesystem::perms::owner_all);
+            std::filesystem::remove_all(path);
+        }
+    } directoryGuard{pathBase};
+
+    using Database = LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU>;
+    {
+        Database writer(strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+        REQUIRE(writer.Write(uint32_t(1), uint32_t(11)));
+        REQUIRE(writer.Write(uint32_t(2), uint32_t(22)));
+    }
+
+    SECTION("read-only streams support cached and lazily opened collision files")
+    {
+        std::map<std::string, std::string> contents;
+        for(const auto& entry : std::filesystem::recursive_directory_iterator(pathBase))
+        {
+            if(entry.is_regular_file())
+            {
+                std::ifstream stream(entry.path(), std::ios::binary);
+                contents[entry.path().string()] =
+                    std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+                std::filesystem::permissions(entry.path(), std::filesystem::perms::owner_read);
+            }
+            else
+                std::filesystem::permissions(entry.path(),
+                    std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+        }
+        std::filesystem::permissions(pathBase,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+
+        {
+            Database reader(strName, 0, 1, 1024);
+            uint32_t value = 0;
+            REQUIRE(reader.Read(uint32_t(1), value));
+            REQUIRE(value == 11);
+            REQUIRE(reader.Read(uint32_t(2), value));
+            REQUIRE(value == 22);
+            REQUIRE_FALSE(reader.Write(uint32_t(3), uint32_t(33)));
+            REQUIRE_FALSE(reader.Index(uint32_t(3), uint32_t(1)));
+            REQUIRE_FALSE(reader.Erase(uint32_t(1)));
+        }
+
+        size_t nFiles = 0;
+        for(const auto& entry : std::filesystem::recursive_directory_iterator(pathBase))
+        {
+            if(!entry.is_regular_file())
+                continue;
+            ++nFiles;
+            std::ifstream stream(entry.path(), std::ios::binary);
+            const std::string actual(
+                (std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+            REQUIRE(contents.at(entry.path().string()) == actual);
+        }
+        REQUIRE(nFiles == contents.size());
+    }
+
+    SECTION("missing index is not recreated")
+    {
+        const auto path = pathBase / "keychain/_hashmap.index";
+        REQUIRE(std::filesystem::remove(path));
+        Database reader(strName, 0, 1, 1024);
+        REQUIRE_FALSE(reader.Exists(uint32_t(1)));
+        REQUIRE_FALSE(std::filesystem::exists(path));
+    }
+
+    SECTION("missing hashmap is not recreated and other collision files remain readable")
+    {
+        const auto path = pathBase / "keychain/_hashmap.00000";
+        REQUIRE(std::filesystem::remove(path));
+        Database reader(strName, 0, 1, 1024);
+        REQUIRE_FALSE(reader.Exists(uint32_t(1)));
+        uint32_t value = 0;
+        REQUIRE(reader.Read(uint32_t(2), value));
+        REQUIRE(value == 22);
+        REQUIRE_FALSE(std::filesystem::exists(path));
+    }
+
+    SECTION("missing database is not created even with an explicit create flag")
+    {
+        std::filesystem::remove_all(pathBase);
+        Database reader(strName, LLD::FLAGS::CREATE | LLD::FLAGS::READONLY, 1, 1024);
+        REQUIRE_FALSE(reader.Exists(uint32_t(1)));
+        REQUIRE_FALSE(std::filesystem::exists(pathBase));
+    }
+}
+
+
 TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability without mutation",
           "[ledger][auditblock][real]")
 {
@@ -2391,6 +2495,69 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         REQUIRE_FALSE(result.fFound);
         REQUIRE(result.nScanStartFile == 77777);
         REQUIRE(result.nScanEndFile == 77778);
+    }
+
+    SECTION("read-only ledger aliases remain readable in client mode")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38810, blocksGuard);
+        config::fClient.store(true);
+        LLD::LedgerDB reader(0);
+        REQUIRE(reader.Exists(fixture.hashTwo));
+        TAO::Ledger::BlockState state;
+        REQUIRE(reader.Read(fixture.hashTwo, state));
+        REQUIRE(state.GetHash() == fixture.hashTwo);
+        REQUIRE(reader.ReadBlock(uint32_t(2), state));
+        REQUIRE(state.GetHash() == fixture.hashTwo);
+        config::fClient.store(false);
+    }
+
+    SECTION("raw scan reads non-writable sectors and rejects inaccessible sectors")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38820, blocksGuard);
+        const std::filesystem::path path = config::GetDataDir() + "_LEDGER/datachain/_block.99997";
+        struct SectorGuard
+        {
+            std::filesystem::path path;
+            ~SectorGuard()
+            {
+                std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+                std::filesystem::remove_all(path);
+            }
+        } sectorGuard{path};
+
+        {
+            std::ofstream stream(path, std::ios::binary);
+            REQUIRE(stream.is_open());
+            DataStream record(SER_LLD, LLD::DATABASE_VERSION);
+            record << std::string("block") << fixture.two;
+            WriteCompactSize(stream, record.size());
+            stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+        }
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read);
+
+        LLD::BlockAuditScanOptions options;
+        options.fHasStartFile = options.fHasEndFile = true;
+        options.nStartFile = options.nEndFile = 99997;
+        LLD::BlockAuditScanResult result;
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashTwo, options, result));
+        REQUIRE(result.fFound);
+        REQUIRE(result.nFilesScanned == 1);
+        REQUIRE_FALSE(result.fInfrastructureFailure);
+
+        std::filesystem::permissions(path, std::filesystem::perms::none);
+        std::ifstream probe(path, std::ios::binary);
+        if(!probe.is_open())
+        {
+            REQUIRE_FALSE(LLD::Ledger->AuditScanBlockRecords(fixture.hashTwo, options, result));
+            REQUIRE(result.fInfrastructureFailure);
+        }
+        probe.close();
+
+        std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+        REQUIRE(std::filesystem::remove(path));
+        REQUIRE(std::filesystem::create_directory(path));
+        REQUIRE_FALSE(LLD::Ledger->AuditScanBlockRecords(fixture.hashTwo, options, result));
+        REQUIRE(result.fInfrastructureFailure);
     }
 
     SECTION("malformed and truncated records are reported without scan infrastructure failure")
