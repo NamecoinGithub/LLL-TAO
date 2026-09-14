@@ -38,6 +38,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/include/process.h>
 
 #include <TAO/Ledger/types/client.h>
@@ -1492,6 +1493,7 @@ namespace LLP
 
                         /* Do a sequential read to obtain the list at our set limit. */
                         std::vector<TAO::Ledger::BlockState> vStates;
+                        uint32_t nBlocksSent = 0;
 
                         while(!fBufferFull.load() && nBlockBudget > 0 && hashStart != hashStop)
                         {
@@ -1521,6 +1523,8 @@ namespace LLP
                                     /* Update hashLastRead. */
                                     hashLastRead = state.GetHash();
                                 }
+
+                                bool fBlockQueued = false;
 
                                 /* Handle for special sync block type specifier. */
                                 if(nSpecifier == SPECIFIER::SYNC)
@@ -1647,18 +1651,26 @@ namespace LLP
                                         }
 
                                         /* Push message in response. */
-                                        PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::SYNC), block);
+                                        fBlockQueued = PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::SYNC), block);
                                     }
                                     else
                                     {
                                         /* Push message in response. */
-                                        PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::SYNC), TAO::Ledger::SyncBlock(state, true));
+                                        fBlockQueued = PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::SYNC), TAO::Ledger::SyncBlock(state, true));
                                     }
                                 }
 
                                 /* Push the block to our connection buffer. */
                                 else
-                                    PushBlock(nSpecifier, state);
+                                    fBlockQueued = PushBlock(nSpecifier, state);
+
+                                if(!fBlockQueued)
+                                {
+                                    hashStart = stateLast.GetHash();
+                                    break;
+                                }
+
+                                ++nBlocksSent;
 
                                 /* Update start every iteration. */
                                 stateLast = state;
@@ -1685,17 +1697,12 @@ namespace LLP
                         /* Check for last subscription. */
                         if(nNotifications & SUBSCRIPTION::LASTINDEX)
                         {
-                            /* hashStart is the hash of the last block successfully read/sent in this batch.
-                             * When fBufferFull fires the buffer was already written but back-pressure means
-                             * we can't send more right now; hashStart is still the correct last-sent hash.
-                             * Previously the code used stateLast.hashPrevBlock when fBufferFull was true,
-                             * which sent the hash one block *behind* the last sent block, causing the peer
-                             * to re-request that block every cycle (degrading batch sync to ~1 block/cycle).
-                             * Always use hashStart so the peer correctly requests only new blocks next time. */
+                            /* Advance LASTINDEX only for blocks successfully queued to the peer. */
                             if(fBufferFull.load())
                                 debug::log(1, FUNCTION, "batch cut short by buffer pressure (",
                                     Buffered(), " bytes buffered); LASTINDEX set to ", hashStart.SubString());
 
+                            TAO::Ledger::SyncProfile::RecordListBatch(nBlocksSent, fBufferFull.load(), hashStart);
                             PushMessage(ACTION::NOTIFY, uint8_t(TYPES::LASTINDEX), uint8_t(TYPES::BLOCK), hashStart);
                         }
 
@@ -4604,7 +4611,7 @@ namespace LLP
 
 
     /* Push a block to tritium connection based on specifier. */
-    void TritiumNode::PushBlock(const uint8_t nSpecifier, const TAO::Ledger::BlockState& state)
+    bool TritiumNode::PushBlock(const uint8_t nSpecifier, const TAO::Ledger::BlockState& state)
     {
         /* Handle for a client block header. */
         if(nSpecifier == SPECIFIER::CLIENT)
@@ -4613,7 +4620,7 @@ namespace LLP
             TAO::Ledger::ClientBlock block(state);
 
             /* Push message in response. */
-            PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::CLIENT), block);
+            return PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::CLIENT), block);
         }
         else
         {
@@ -4624,7 +4631,7 @@ namespace LLP
                 Legacy::LegacyBlock block(state);
 
                 /* Push message in response. */
-                PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::LEGACY), block);
+                return PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::LEGACY), block);
             }
             else
             {
@@ -4646,7 +4653,8 @@ namespace LLP
                                 continue;
 
                             /* Push message of transaction. */
-                            PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::LEGACY), tx);
+                            if(!PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::LEGACY), tx))
+                                return false;
                         }
 
                         /* Basic checks for tritium transactions. */
@@ -4659,13 +4667,14 @@ namespace LLP
 
 
                             /* Push message of transaction. */
-                            PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::TRITIUM), tx);
+                            if(!PushMessage(TYPES::TRANSACTION, uint8_t(SPECIFIER::TRITIUM), tx))
+                                return false;
                         }
                     }
                 }
 
                 /* Push message in response. */
-                PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::TRITIUM), block);
+                return PushMessage(TYPES::BLOCK, uint8_t(SPECIFIER::TRITIUM), block);
             }
         }
     }

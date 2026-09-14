@@ -355,6 +355,8 @@ namespace TAO
         /* Accepts a transaction with validation rules. */
         bool Mempool::Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode)
         {
+            /* Keep coordinator -> mempool order across commits and recursive acceptance. */
+            LLD::TransactionCoordinatorGuard coordinator;
             RECURSIVE(MUTEX);
 
             /* Get the transaction hash. */
@@ -739,6 +741,7 @@ namespace TAO
         /* Process orphan transactions if triggered in queue. */
         void Mempool::ProcessOrphans(const uint512_t& hash)
         {
+            LLD::TransactionCoordinatorGuard coordinator;
             RECURSIVE(MUTEX);
 
             /* Check orphan queue. */
@@ -1068,6 +1071,7 @@ namespace TAO
         /* Check the memory pool for consistency. */
         void Mempool::Check()
         {
+            LLD::TransactionCoordinatorGuard coordinator;
             RECURSIVE(MUTEX);
 
             /* Create map of transactions by genesis. */

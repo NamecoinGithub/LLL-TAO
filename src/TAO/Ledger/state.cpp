@@ -48,6 +48,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/prime.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/include/stake_change.h>
 #include <TAO/Ledger/include/supply.h>
 #include <TAO/Ledger/include/stake.h>
@@ -501,7 +502,9 @@ namespace TAO
         {
             /* Runtime calculations. */
             runtime::timer timer;
-            timer.Start();
+            const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
+            if(fProfile)
+                timer.Start();
 
             /* Read leger DB for previous block. */
             BlockState statePrev = Prev();
@@ -787,6 +790,12 @@ namespace TAO
             /* Debug output. */
             debug::log(TAO::Ledger::ChainState::Synchronizing() ? 1 : 0, FUNCTION, "ACCEPTED");
 
+            if(fProfile)
+            {
+                timer.Stop();
+                TAO::Ledger::SyncProfile::RecordIndexTime(timer.ElapsedMicroseconds());
+            }
+
             return true;
         }
 
@@ -831,6 +840,27 @@ namespace TAO
 
         bool BlockState::SetBest()
         {
+            struct SetBestProfileGuard
+            {
+                const bool fEnabled = TAO::Ledger::SyncProfile::Enabled();
+                runtime::timer timer;
+
+                SetBestProfileGuard()
+                {
+                    if(fEnabled)
+                        timer.Start();
+                }
+
+                ~SetBestProfileGuard()
+                {
+                    if(fEnabled)
+                    {
+                        timer.Stop();
+                        TAO::Ledger::SyncProfile::RecordSetBestTime(timer.ElapsedMicroseconds());
+                    }
+                }
+            } setBestProfileGuard;
+
             /* Reset timers for meters. */
             swContract.reset();
             swScript.reset();
@@ -1061,10 +1091,18 @@ namespace TAO
                         debug::log(0, state->ToString(debug::flags::header | debug::flags::tx));
 
                     /* Connect the block. */
+                    runtime::timer timerConnect;
+                    if(setBestProfileGuard.fEnabled)
+                        timerConnect.Start();
                     if(!state->Connect())
                     {
                         LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
+                    }
+                    if(setBestProfileGuard.fEnabled)
+                    {
+                        timerConnect.Stop();
+                        TAO::Ledger::SyncProfile::RecordConnectTime(timerConnect.ElapsedMicroseconds());
                     }
 
                     /* Stage checkpoint publication until the disk transaction commits. */

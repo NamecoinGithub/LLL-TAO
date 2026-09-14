@@ -108,6 +108,7 @@ namespace LLD
 
         /* Class to handle Transaction Data. */
         SectorTransaction* pTransaction;
+        bool fTxnReleaseRequired;
 
 
         /* Sector Keys Database. */
@@ -807,6 +808,9 @@ namespace LLD
          *
          **/
         bool HasTransaction();
+
+        /** Determine whether the currently open transaction has any staged physical work. */
+        bool HasPendingTransactionWork();
 
 
         /** TxnBegin
