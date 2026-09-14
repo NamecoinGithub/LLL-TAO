@@ -2299,6 +2299,21 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
         REQUIRE(result.vMatches.front().hashBlock == fixture.hashTwo);
     }
 
+    SECTION("default bounded scan window derived from current file finds a recent block")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38350, blocksGuard);
+        REQUIRE(LLD::TxnBegin(LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashThree, fixture.three));
+        REQUIRE(LLD::TxnCommit());
+
+        LLD::BlockAuditScanOptions options;
+        LLD::BlockAuditScanResult result;
+        REQUIRE(LLD::Ledger->AuditScanBlockRecords(fixture.hashThree, options, result));
+        REQUIRE(result.nScanEndFile >= result.nScanStartFile);
+        REQUIRE(result.nFilesScanned >= 1);
+        REQUIRE(result.fFound);
+    }
+
     SECTION("hash missing but height alias locates exact block")
     {
         const auto fixture = BuildCheckpointChainFixture(38400, blocksGuard);

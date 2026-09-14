@@ -308,7 +308,7 @@ namespace
         else if(!fHashKeyExists && fRawFound)
             strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
 
-        if(fMultipleRawMatches && strClassification != "HASH_KEY_READABLE")
+        if(fMultipleRawMatches && strClassification != "RAW_RECORD_TRUNCATED_OR_MALFORMED")
             strClassification = "MULTIPLE_RAW_MATCHES";
 
         debug::log(0, "AUDITBLOCK hash=", hashTarget.ToString(), " status=", (fHashKeyReadable ? "FOUND" : "NOT_FOUND"),

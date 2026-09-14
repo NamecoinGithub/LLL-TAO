@@ -1469,6 +1469,7 @@ namespace LLD
                 catch(const std::exception&)
                 {
                     result.fMalformedRecord = true;
+                    break;
                 }
 
                 nFilePos += nPayloadSize + nPrefixSize;
