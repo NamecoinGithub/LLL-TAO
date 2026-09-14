@@ -317,7 +317,7 @@ namespace TAO
                 bool fConfirmed = false;
                 Accept(tx, nullptr, &fCommitted, &fConfirmed);
                 lock.lock();
-                if(!mapLedger.count(hashThis))
+                if(!fConfirmed && !mapLedger.count(hashThis))
                 {
                     /* Transient admission failures (e.g. deferred local state,
                      * a memory transaction failing to begin) must not lose the
@@ -403,11 +403,21 @@ namespace TAO
                 std::vector<uint512_t> vResolved;
                 bool fCommitted = false;
                 bool fConfirmed = false;
-                AcceptTransaction(tx, pnode, vResolved, fCommitted, fConfirmed);
+                bool fRestoreConflict = false;
+                AcceptTransaction(tx, pnode, vResolved, fCommitted, fConfirmed, fRestoreConflict);
                 if(pfCommitted)
                     *pfCommitted = fCommitted;
                 if(pfConfirmed)
                     *pfConfirmed = fConfirmed;
+
+                if(fRestoreConflict)
+                {
+                    RECURSIVE(MUTEX);
+                    const uint512_t hashTx = tx.GetHash();
+                    if(!mapLedger.count(hashTx) && !mapRejected.count(hashTx) &&
+                       !IsConflictNode(hashTx) && !mapOrphansByIndex.count(hashTx))
+                        AddConflictRoot(tx);
+                }
 
                 /* Recursive admission must not inherit either lock from its parent. */
                 for(const auto& hash : vResolved)
@@ -417,7 +427,7 @@ namespace TAO
                  * must not report successful admission: callers such as the
                  * Tritium transaction handler treat true as a committed accept
                  * and relay / reset orphan state on it. */
-                if(!fCommitted)
+                if(!fCommitted && !fConfirmed)
                     return false;
 
                 const uint512_t hashTx = tx.GetHash();
@@ -425,6 +435,10 @@ namespace TAO
                     ProcessOrphans(hashTx);
                 if(nConflictDepDrainDepth == 0)
                     ProcessConflictDependents(hashTx);
+
+                /* Confirmation resolves descendants but is not a new admission. */
+                if(!fCommitted)
+                    return false;
 
                 if(!pnode && LLP::TRITIUM_SERVER)
                 {
@@ -450,7 +464,7 @@ namespace TAO
 
         bool Mempool::AcceptTransaction(const TAO::Ledger::Transaction& tx,
                                        LLP::TritiumNode* pnode, std::vector<uint512_t>& vResolved,
-                                       bool& fCommitted, bool& fConfirmed)
+                                       bool& fCommitted, bool& fConfirmed, bool& fRestoreConflict)
         {
             std::unique_lock<std::recursive_mutex> lock(MUTEX);
 
@@ -463,15 +477,15 @@ namespace TAO
             {
                 Mempool*    pPool;
                 uint512_t   hash;
-                const TAO::Ledger::Transaction& tx;
                 const bool& fCommitted;
                 const bool& fConfirmed;
+                bool&       fRestoreConflict;
                 bool        fActive;
 
-                ConflictDepTailGuard(Mempool* p, const TAO::Ledger::Transaction& t,
-                                     const bool& committed, const bool& confirmed)
-                : pPool(p), hash(t.GetHash()), tx(t), fCommitted(committed),
-                  fConfirmed(confirmed), fActive(false) { }
+                ConflictDepTailGuard(Mempool* p, const uint512_t& h,
+                                     const bool& committed, const bool& confirmed, bool& restore)
+                : pPool(p), hash(h), fCommitted(committed),
+                  fConfirmed(confirmed), fRestoreConflict(restore), fActive(false) { }
 
                 ~ConflictDepTailGuard()
                 {
@@ -480,17 +494,18 @@ namespace TAO
                         RECURSIVE(pPool->MUTEX);
                         if(!pPool->mapLedger.count(hash))
                         {
-                            if(fCommitted || fConfirmed || pPool->mapRejected.count(hash))
+                            if(fCommitted || pPool->mapRejected.count(hash))
                                 pPool->DropConflictDependents(hash);
-                            else if(!pPool->IsConflictNode(hash) && !pPool->mapOrphansByIndex.count(hash))
-                                pPool->AddConflictRoot(tx);
+                            else if(!fConfirmed && !pPool->IsConflictNode(hash) &&
+                                    !pPool->mapOrphansByIndex.count(hash))
+                                fRestoreConflict = true;
                         }
                     }
                 }
 
                 void Arm()   { fActive = true;  }
                 void Disarm(){ fActive = false; }
-            } depTailGuard(this, tx, fCommitted, fConfirmed);
+            } depTailGuard(this, hashTx, fCommitted, fConfirmed, fRestoreConflict);
 
             try
             {
@@ -588,7 +603,22 @@ namespace TAO
                     if(LLD::Ledger->HasTx(hashTx, FLAGS::BLOCK) && LLD::Ledger->HasIndex(hashTx))
                     {
                         fConfirmed = true;
-                        Remove(hashTx);
+                        /* Clear only this transaction's stale markers. Its
+                         * descendants can now validate against committed disk state. */
+                        EraseConflictRoot(hashTx);
+                        const auto itDependent = mapConflictDependents.find(tx.hashPrevTx);
+                        if(itDependent != mapConflictDependents.end() &&
+                           itDependent->second.GetHash() == hashTx)
+                            mapConflictDependents.erase(itDependent);
+                        mapConflictDependentsByIndex.erase(hashTx);
+                        const auto itOrphan = mapOrphans.find(tx.hashPrevTx);
+                        if(itOrphan != mapOrphans.end() && itOrphan->second.GetHash() == hashTx)
+                            mapOrphans.erase(itOrphan);
+                        mapOrphansByIndex.erase(hashTx);
+                        setOrphansByIndex.erase(hashTx);
+                        mapRejected.erase(hashTx);
+                        if(mapLedger.erase(hashTx))
+                            mapClaimed.erase(tx.hashPrevTx);
                         return false;
                     }
 
@@ -952,7 +982,7 @@ namespace TAO
                 bool fConfirmed = false;
                 Accept(tx, nullptr, &fCommitted, &fConfirmed);
                 lock.lock();
-                if(!mapLedger.count(hashThis))
+                if(!fConfirmed && !mapLedger.count(hashThis))
                 {
                     /* Transient admission failures (e.g. deferred local state,
                      * a memory transaction failing to begin) must not lose the
@@ -1284,7 +1314,7 @@ namespace TAO
                 {
                     RECURSIVE(MUTEX);
                     fLive = mapLedger.count(hashTx);
-                    if(!fAccepted && !fLive)
+                    if(!fAccepted && !fLive && !fConfirmed)
                     {
                         /* Transient admission failures (e.g. the mempool
                          * transaction failing to begin or commit) must not lose
@@ -1308,7 +1338,7 @@ namespace TAO
                     }
                 }
 
-                if(fAccepted || fLive)
+                if(fAccepted || fLive || fConfirmed)
                     ProcessConflictDependents(hashTx);
             }
         }

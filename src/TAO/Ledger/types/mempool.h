@@ -184,7 +184,8 @@ namespace TAO
 
             /** Validate and commit one transaction without recursively draining queues. */
             bool AcceptTransaction(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode,
-                                   std::vector<uint512_t>& vResolved, bool& fCommitted, bool& fConfirmed);
+                                   std::vector<uint512_t>& vResolved, bool& fCommitted,
+                                   bool& fConfirmed, bool& fRestoreConflict);
 
         #ifdef UNIT_TESTS
             friend struct MempoolTestAccess;
