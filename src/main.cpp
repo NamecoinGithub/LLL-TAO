@@ -152,6 +152,12 @@ namespace
 
     int RunOfflineAuditBlock()
     {
+        if(config::fClient.load())
+        {
+            debug::error(FUNCTION, "-auditblock is NODE-only and does not support -client mode");
+            return 2;
+        }
+
         const std::string strHashArg = config::GetArg("-auditblock", "");
         uint1024_t hashTarget = 0;
         std::string strError;
@@ -253,7 +259,7 @@ namespace
             return 3;
         }
 
-        LLD::LedgerDB ledgerReadOnly(0, config::fClient.load() ? 77773 : (256 * 256 * 64));
+        LLD::LedgerDB ledgerReadOnly(0, 256 * 256 * 64);
         LLD::LedgerDB* const pLedger = &ledgerReadOnly;
 
         LLD::BlockAuditScanOptions options;
@@ -264,6 +270,13 @@ namespace
         TAO::Ledger::BlockState stateByHash;
         const bool fHashKeyReadable = pLedger->Read(hashTarget, stateByHash);
         const bool fHashKeyMatches = fHashKeyReadable && (stateByHash.GetHash() == hashTarget);
+
+        LLD::BlockAuditScanResult rawScan;
+        if(!pLedger->AuditScanBlockRecords(hashTarget, options, rawScan))
+        {
+            debug::error(FUNCTION, "raw scan infrastructure failed");
+            return 3;
+        }
 
         bool fHeightChecked = false;
         bool fHeightExists = false;
@@ -281,32 +294,40 @@ namespace
         {
             fHeightChecked = true;
             nHeightChecked = stateByHash.nHeight;
+        }
+        else if(fExpectedHeightProvided)
+        {
+            fHeightChecked = true;
+            nHeightChecked = nExpectedHeight;
+        }
+        else
+        {
+            for(const auto& candidate : rawScan.vMatches)
+            {
+                if(candidate.fSerializedComplete)
+                {
+                    fHeightChecked = true;
+                    nHeightChecked = candidate.nHeight;
+                    break;
+                }
+            }
+        }
+
+        if(fHeightChecked)
+        {
             fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
             fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
-            fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
+            fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget
+                && stateByHeight.nHeight == nHeightChecked;
 
             if(fExpectedHeightProvided && nExpectedHeight != nHeightChecked)
             {
                 fExpectedHeightCheckPerformed = true;
                 fExpectedHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nExpectedHeight));
                 fExpectedHeightReadable = pLedger->ReadBlock(nExpectedHeight, stateByExpectedHeight);
-                fExpectedHeightMatches = fExpectedHeightReadable && (stateByExpectedHeight.GetHash() == hashTarget);
+                fExpectedHeightMatches = fExpectedHeightReadable && (stateByExpectedHeight.GetHash() == hashTarget)
+                    && stateByExpectedHeight.nHeight == nExpectedHeight;
             }
-        }
-        else if(fExpectedHeightProvided)
-        {
-            fHeightChecked = true;
-            nHeightChecked = nExpectedHeight;
-            fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
-            fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
-            fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
-        }
-
-        LLD::BlockAuditScanResult rawScan;
-        if(!pLedger->AuditScanBlockRecords(hashTarget, options, rawScan))
-        {
-            debug::error(FUNCTION, "raw scan infrastructure failed");
-            return 3;
         }
 
         const size_t nRawMatches = rawScan.vMatches.size();

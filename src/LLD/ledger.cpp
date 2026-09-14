@@ -1433,7 +1433,32 @@ namespace LLD
                 if(nPayloadSize == 0)
                 {
                     nFilePos += nPrefixSize;
+                    char buffer[64 * 1024];
+                    while(nFilePos < nFileSize)
+                    {
+                        const auto nRead = static_cast<std::streamsize>(
+                            std::min<uint64_t>(sizeof(buffer), nFileSize - nFilePos));
+                        if(!stream.read(buffer, nRead))
+                        {
+                            result.fTruncatedRecord = true;
+                            break;
+                        }
+
+                        const auto pNonzero = std::find_if(buffer, buffer + nRead,
+                            [](const char byte) { return byte != 0; });
+                        nFilePos += pNonzero - buffer;
+                        if(pNonzero != buffer + nRead)
+                            break;
+                    }
+                    if(!stream)
+                        break;
                     continue;
+                }
+
+                if(nPayloadSize > MAX_SIZE)
+                {
+                    result.fMalformedRecord = true;
+                    break;
                 }
 
                 if(nPayloadSize > (nFileSize - nFilePos - nPrefixSize))
@@ -1443,12 +1468,6 @@ namespace LLD
                 }
 
                 if(nPayloadSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
-                {
-                    result.fMalformedRecord = true;
-                    break;
-                }
-
-                if(nPayloadSize > MAX_SECTOR_FILE_SIZE)
                 {
                     result.fMalformedRecord = true;
                     break;

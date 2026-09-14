@@ -2407,7 +2407,7 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         std::filesystem::path path;
         ~DirectoryGuard() { std::filesystem::remove_all(path); }
     } directoryGuard{pathBase};
-    const std::string strDatabase = strName + (fClient ? "/client" : "") + "/_LEDGER";
+    const std::string strDatabase = strName + "/_LEDGER";
     const std::filesystem::path pathLedger = config::GetDataDir() + strDatabase;
 
     TAO::Ledger::BlockState state;
@@ -2470,10 +2470,21 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
             summary = encoding::json::parse(text.substr(nBegin, nEnd - nBegin + 1));
         }
         else
+        {
             REQUIRE(nBegin == std::string::npos);
+            if(fClient)
+                REQUIRE(text.find("-auditblock is NODE-only and does not support -client mode") != std::string::npos);
+        }
         return summary;
     };
     const std::string target = "-auditblock=" + hash.ToString();
+    if(fClient)
+    {
+        Run({target}, 2);
+        REQUIRE_FALSE(std::filesystem::exists(pathLedger));
+        return;
+    }
+
     for(const std::string& invalid : std::vector<std::string>{"", "00", std::string(256, '0'), std::string(256, 'g')})
         Run({"-auditblock=" + invalid}, 2);
     for(const std::string& invalid : {"-auditblockheight=-1", "-auditblockheight=4294967296",
@@ -2483,7 +2494,7 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     Run({target, "-auditblockstartfile=2", "-auditblockendfile=1"}, 2);
     Run({target}, 3);
 
-    const uint32_t nBuckets = fClient ? 77773 : (256 * 256 * 64);
+    const uint32_t nBuckets = 256 * 256 * 64;
     const auto pathIndex = pathLedger / "keychain/_hashmap.index";
     std::filesystem::create_directories(pathIndex.parent_path());
     /* Pre-size the empty index independently of other test databases' bucket counts. */
@@ -2516,7 +2527,33 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
         REQUIRE(summary["height_index"]["expected_height_check"]["matches"] == false);
 
+        REQUIRE(writer.Index(std::make_pair(std::string("height"), uint32_t(43)), hash));
+        summary = Run({target, "-auditblockheight=43"}, 0);
+        REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
+        REQUIRE(summary["height_index"]["expected_height_check"]["readable"] == true);
+        REQUIRE(summary["height_index"]["expected_height_check"]["matches"] == false);
+
         REQUIRE(writer.Erase(hash, true));
+        summary = Run({target, "-auditblockheight=43", "-auditblockstartfile=99999"}, 0);
+        REQUIRE(summary["status"] == "NOT_FOUND");
+        REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
+        REQUIRE(summary["height_index"]["readable"] == true);
+        REQUIRE(summary["height_index"]["matches"] == false);
+
+        summary = Run({target}, 0);
+        REQUIRE(summary["classification"] == "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT");
+        REQUIRE(summary["height_index"]["checked"] == true);
+        REQUIRE(summary["height_index"]["height"] == 42);
+        REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["raw_scan"]["found"] == true);
+
+        REQUIRE(writer.Index(heightKey, other.GetHash()));
+        summary = Run({target}, 0);
+        REQUIRE(summary["classification"] == "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK");
+        REQUIRE(summary["height_index"]["checked"] == true);
+        REQUIRE(summary["height_index"]["matches"] == false);
+        REQUIRE(writer.Index(heightKey, std::make_pair(std::string("height"), uint32_t(43))));
+
         summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99999"}, 0);
         REQUIRE(summary["status"] == "FOUND");
         REQUIRE(summary["classification"] == "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT");
@@ -2557,6 +2594,9 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     REQUIRE(summary["raw_scan"]["scan_end_file"] == 99999);
     REQUIRE(summary["raw_scan"]["files_scanned"] == 1);
     REQUIRE(summary["hash_key"]["exists"] == false);
+    REQUIRE(summary["height_index"]["checked"] == true);
+    REQUIRE(summary["height_index"]["height"] == 42);
+    REQUIRE(summary["height_index"]["exists"] == false);
     REQUIRE(ReadSector() == sectorBefore);
     REQUIRE_FALSE(std::filesystem::exists(pathLedger / "keychain"));
     REQUIRE_FALSE(std::filesystem::exists(pathLedger / "datachain/_block.00000"));
@@ -2575,6 +2615,65 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     REQUIRE(summary["classification"] == "RAW_RECORD_TRUNCATED_OR_MALFORMED");
     REQUIRE(summary["raw_scan"]["found"] == false);
     REQUIRE(summary["candidate"]["serialized_complete"] == false);
+    REQUIRE(summary["height_index"]["checked"] == false);
+
+    {
+        std::ofstream stream(pathSector, std::ios::binary | std::ios::trunc);
+        WriteCompactSize(stream, MAX_SIZE);
+        const std::string type = "other";
+        WriteCompactSize(stream, type.size());
+        stream.write(type.data(), type.size());
+    }
+    std::filesystem::resize_file(pathSector, uint64_t(MAX_SIZE) + GetSizeOfCompactSize(MAX_SIZE));
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["status"] == "NOT_FOUND");
+    REQUIRE(summary["raw_scan"]["malformed_record"] == false);
+    REQUIRE(summary["raw_scan"]["truncated_record"] == false);
+    REQUIRE(summary["raw_scan"]["records_scanned"] == 1);
+
+    for(const uint64_t nPayloadSize : {uint64_t(MAX_SIZE) + 1, uint64_t(LLD::MAX_SECTOR_FILE_SIZE)})
+    {
+        {
+            std::ofstream stream(pathSector, std::ios::binary | std::ios::trunc);
+            WriteCompactSize(stream, nPayloadSize);
+        }
+        std::filesystem::resize_file(pathSector, std::filesystem::file_size(pathSector) + nPayloadSize);
+        summary = Run({target, "-auditblockstartfile=99999"}, 0);
+        REQUIRE(summary["status"] == "NOT_FOUND");
+        REQUIRE(summary["raw_scan"]["malformed_record"] == true);
+        REQUIRE(summary["raw_scan"]["truncated_record"] == false);
+        REQUIRE(summary["raw_scan"]["records_scanned"] == 0);
+    }
+
+    std::ofstream(pathSector, std::ios::binary | std::ios::trunc).close();
+    std::filesystem::resize_file(pathSector, LLD::MAX_SECTOR_FILE_SIZE);
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["status"] == "NOT_FOUND");
+    REQUIRE(summary["raw_scan"]["records_scanned"] == 0);
+    REQUIRE(summary["raw_scan"]["malformed_record"] == false);
+    REQUIRE(summary["raw_scan"]["truncated_record"] == false);
+
+    const std::vector<uint64_t> offsets{1, 65537, 131074,
+        uint64_t(LLD::MAX_SECTOR_FILE_SIZE) - record.size() - GetSizeOfCompactSize(record.size())};
+    {
+        std::fstream stream(pathSector, std::ios::binary | std::ios::in | std::ios::out);
+        for(const auto nOffset : offsets)
+        {
+            stream.seekp(nOffset);
+            WriteCompactSize(stream, record.size());
+            stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+        }
+    }
+    summary = Run({target, "-auditblockstartfile=99999"}, 0);
+    REQUIRE(summary["status"] == "FOUND");
+    REQUIRE(summary["classification"] == "MULTIPLE_RAW_MATCHES");
+    REQUIRE(summary["raw_scan"]["records_scanned"] == offsets.size());
+    REQUIRE(summary["raw_scan"]["matches"] == offsets.size());
+    REQUIRE(summary["raw_scan"]["malformed_record"] == false);
+    REQUIRE(summary["raw_scan"]["truncated_record"] == false);
+    REQUIRE(summary["height_index"]["matches"] == false);
+    for(size_t i = 0; i < offsets.size(); ++i)
+        REQUIRE(summary["candidates"][i]["sector_offset"] == offsets[i]);
 
     std::filesystem::remove(pathSector);
     std::filesystem::create_directory(pathSector);
