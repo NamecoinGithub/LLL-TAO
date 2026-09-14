@@ -2500,6 +2500,7 @@ TEST_CASE("Ledger raw block audit scan reports hash/height/raw availability with
     SECTION("read-only ledger aliases remain readable in client mode")
     {
         const auto fixture = BuildCheckpointChainFixture(38810, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
         config::fClient.store(true);
         LLD::LedgerDB reader(0);
         REQUIRE(reader.Exists(fixture.hashTwo));
