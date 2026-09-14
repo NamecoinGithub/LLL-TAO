@@ -233,6 +233,8 @@ namespace
     class RecoverySocketNode : public LLP::TritiumNode
     {
     public:
+        using LLP::TritiumNode::fBufferFull;
+
         int peer = -1;
         bool reject = false;
         bool throwOnSend = false;
@@ -3690,6 +3692,107 @@ TEST_CASE("Post-sync state: nSyncSession==0 and fSynchronized==true after Sync()
 
 
 #ifndef WIN32
+TEST_CASE("Atomic transaction bundles enforce a hard wire-byte cap",
+    "[llp][list][lastindex]")
+{
+    class CappedBundleNode : public RecoverySocketNode
+    {
+    public:
+        bool largeQueue = false;
+
+        uint64_t GetMaxSendBuffer() const override
+        {
+            return largeQueue ? 2 * MAX_BUNDLE_BYTES : 2048;
+        }
+    } node;
+    node.largeQueue = GENERATE(false, true);
+
+    const uint64_t nPacketBytes = 1024 * 1024;
+    const uint64_t nHeader = LLP::MessagePacket().GetSerializeSize(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    std::vector<LLP::MessagePacket> packets;
+    for(uint64_t n = 0; n < LLP::TritiumNode::MAX_BUNDLE_BYTES; n += nPacketBytes)
+    {
+        LLP::MessagePacket packet(LLP::TritiumNode::TYPES::TRANSACTION);
+        packet.DATA.resize(nPacketBytes - nHeader, uint8_t(packets.size()));
+        packet.LENGTH = packet.DATA.size();
+        packets.push_back(std::move(packet));
+    }
+
+    /* Even an empty queue with a larger configured limit must reject cap + 1. */
+    packets.back().DATA.push_back(0xAB);
+    ++packets.back().LENGTH;
+    const auto nPackets = LLP::TritiumNode::PACKETS.load();
+    REQUIRE_FALSE(node.WritePackets(packets));
+    REQUIRE(node.Buffered() == 0);
+    REQUIRE(node.GetSendBufferLimit() == node.GetMaxSendBuffer());
+    REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets);
+    REQUIRE(node.Receive().empty());
+
+    packets.back().DATA.pop_back();
+    --packets.back().LENGTH;
+    REQUIRE(node.WritePackets(packets));
+    REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets + packets.size());
+    const auto received = node.Receive();
+    REQUIRE(received.size() == LLP::TritiumNode::MAX_BUNDLE_BYTES);
+    size_t nOffset = 0;
+    for(const auto& packet : packets)
+    {
+        const auto bytes = packet.GetBytes();
+        REQUIRE(std::equal(bytes.begin(), bytes.end(), received.begin() + nOffset));
+        nOffset += bytes.size();
+    }
+}
+
+
+TEST_CASE("Transaction block responses bound packet collection before queueing",
+    "[llp][list][lastindex]")
+{
+    LedgerGuard ledgerGuard;
+    struct FixtureGuard
+    {
+        const bool fClient = config::fClient.exchange(false);
+        std::vector<uint512_t> hashes;
+
+        ~FixtureGuard()
+        {
+            for(const auto& hash : hashes)
+                LLD::Ledger->EraseTx(hash);
+            config::fClient.store(fClient);
+        }
+    } fixture;
+    RecoverySocketNode node;
+    TAO::Ledger::BlockState state;
+    state.nVersion = 7;
+    state.nChannel = 2;
+
+    TAO::Ledger::Transaction tx;
+    tx.hashGenesis = uint256_t(0xCA9901);
+    tx.vchSig.resize(1024 * 1024, 0xAB);
+    fixture.hashes.push_back(tx.GetHash());
+    REQUIRE(LLD::Ledger->WriteTx(tx.GetHash(), tx));
+    for(uint64_t n = 0; n < LLP::TritiumNode::MAX_BUNDLE_BYTES; n += tx.vchSig.size())
+        state.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, tx.GetHash()});
+
+    TAO::Ledger::Transaction producer;
+    producer.hashGenesis = uint256_t(0xCA9902);
+    fixture.hashes.push_back(producer.GetHash());
+    REQUIRE(LLD::Ledger->WriteTx(producer.GetHash(), producer));
+    state.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, producer.GetHash()});
+
+    const auto nPackets = LLP::TritiumNode::PACKETS.load();
+    REQUIRE_FALSE(node.PushBlock(LLP::TritiumNode::SPECIFIER::TRANSACTIONS, state));
+    REQUIRE(node.fBufferFull.load());
+    REQUIRE(node.Buffered() == 0);
+    REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets);
+    REQUIRE(node.Receive().empty());
+
+    state.vtx.erase(state.vtx.begin() + 1, state.vtx.end() - 1);
+    REQUIRE(node.PushBlock(LLP::TritiumNode::SPECIFIER::TRANSACTIONS, state));
+    REQUIRE(LLP::TritiumNode::PACKETS.load() == nPackets + 2);
+    REQUIRE_FALSE(node.Receive().empty());
+}
+
+
 TEST_CASE("Oversized transaction bundles drain before another bundle is admitted",
     "[llp][list][lastindex]")
 {

@@ -184,7 +184,12 @@ namespace TAO
 
             /** Validate and commit one transaction without recursively draining queues. */
             bool AcceptTransaction(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode,
-                                   std::vector<uint512_t>& vResolved, bool& fCommitted);
+                                   std::vector<uint512_t>& vResolved, bool& fCommitted,
+                                   bool& fConfirmed, bool& fRestoreConflict);
+
+        #ifdef UNIT_TESTS
+            friend struct MempoolTestAccess;
+        #endif
 
             /** Reconcile under the coordinator, deferring recursive admission until unlocked. */
             void CheckTransactions(std::vector<TAO::Ledger::Transaction>& vResolved);
@@ -308,10 +313,6 @@ namespace TAO
             bool ParkConflictDependent(const TAO::Ledger::Transaction& tx);
 
 
-            /** True when hashTx is a conflict root OR a parked dependent. **/
-            bool IsConflictNode(const uint512_t& hashTx) const;
-
-
             /** After a root resolves (disk tip matches) or is cleared as stale
              *  because the prev confirmed on disk, walk parked dependents and
              *  re-run Accept() in chain order — same shape as ProcessOrphans.
@@ -323,6 +324,11 @@ namespace TAO
             /** Clear DEFERRED/UNKNOWN retry + once-per-genesis diagnostic state
              *  for hashGenesis (used on resolve and eviction). **/
             void ClearGenesisConflictState(const uint256_t& hashGenesis);
+
+
+            /** Restore a retry trigger unless a block confirmed the transaction
+             *  after admission released the coordinator. **/
+            void RestoreConflictRoot(const TAO::Ledger::Transaction& tx, bool& fConfirmed);
 
 
             /** Oprhan transactions in queue. **/
@@ -395,11 +401,17 @@ namespace TAO
              *  @param[in] pnode The node that transaction is accepted from.
              *  @param[out] pfCommitted Optional: set true only when this call
              *              committed the transaction into the live mempool.
+             *  @param[out] pfConfirmed Optional: set true when already confirmed
+             *              on disk; detached queue entries must not be restored.
              *
              *  @return true if committed into the mempool.
              *
              **/
-            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr, bool* pfCommitted = nullptr);
+            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr,
+                        bool* pfCommitted = nullptr, bool* pfConfirmed = nullptr);
+
+            /** Thread-safe conflict-root/dependent lookup, excluding orphans and live transactions. */
+            bool IsConflictNode(const uint512_t& hashTx) const;
 
 
             /** Accept
