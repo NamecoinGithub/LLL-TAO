@@ -1441,6 +1441,12 @@ namespace LLD
                     break;
                 }
 
+                if(nPayloadSize > MAX_SECTOR_FILE_SIZE)
+                {
+                    result.fMalformedRecord = true;
+                    break;
+                }
+
                 std::vector<uint8_t> vRecord(static_cast<size_t>(nPayloadSize));
                 stream.seekg(static_cast<std::streamoff>(nFilePos + nPrefixSize), std::ios::beg);
                 if(!stream.read(reinterpret_cast<char*>(vRecord.data()), static_cast<std::streamsize>(vRecord.size())))

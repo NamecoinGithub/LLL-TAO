@@ -322,6 +322,8 @@ namespace
             strClassification = "HASH_KEY_READABLE";
         else if(fHashKeyExists && fHashKeyReadable && !fHashKeyMatches)
             strClassification = "HASH_KEY_READABLE_MISMATCH";
+        else if(fHeightChecked && fHeightMatches && fHashKeyExists && !fHashKeyReadable)
+            strClassification = "HASH_KEY_PRESENT_UNREADABLE_HEIGHT_INDEX_PRESENT";
         else if(fHeightChecked && fHeightReadable && !fHeightMatches)
             strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
         else if(!fHashKeyExists && fHeightMatches)
@@ -436,6 +438,7 @@ namespace
             const auto& candidate = rawScan.vMatches.front();
             jSummary["candidate"] = {
                 {"height", candidate.nHeight},
+                {"hash", candidate.hashBlock.ToString()},
                 {"hash_prev", candidate.hashPrevBlock.ToString()},
                 {"hash_next", candidate.hashNextBlock.ToString()},
                 {"valid_hash", candidate.hashBlock == hashTarget},
