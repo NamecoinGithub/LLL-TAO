@@ -30,6 +30,7 @@ ________________________________________________________________________________
 #include <Util/include/memory.h>
 
 #include <tuple>
+#include <vector>
 
 
 /** Forward declarations **/
@@ -47,6 +48,45 @@ namespace TAO
 
 namespace LLD
 {
+    struct BlockAuditScanOptions
+    {
+        bool     fHasStartFile{false};
+        bool     fHasEndFile{false};
+        uint32_t nStartFile{0};
+        uint32_t nEndFile{0};
+        uint32_t nMaxFiles{8};
+    };
+
+
+    struct BlockAuditRecordMatch
+    {
+        uint32_t    nSectorFile{0};
+        uint64_t    nSectorStart{0};
+        uint64_t    nSectorSize{0};
+        uint32_t    nHeight{0};
+        uint1024_t  hashBlock{0};
+        uint1024_t  hashPrevBlock{0};
+        uint1024_t  hashNextBlock{0};
+        bool        fSerializedComplete{false};
+    };
+
+
+    struct BlockAuditScanResult
+    {
+        bool fRangeInvalid{false};
+        bool fMalformedRecord{false};
+        bool fTruncatedRecord{false};
+        bool fInfrastructureFailure{false};
+        bool fFound{false};
+
+        uint32_t nScanStartFile{0};
+        uint32_t nScanEndFile{0};
+        uint32_t nFilesScanned{0};
+        uint64_t nRecordsScanned{0};
+
+        std::vector<BlockAuditRecordMatch> vMatches;
+    };
+
 
     /** LedgerTransaction
      *
@@ -796,6 +836,23 @@ namespace LLD
          *
          **/
         bool EraseBlock(const uint1024_t& hashBlock);
+
+
+        /** AuditScanBlockRecords
+         *
+         *  Scan raw ledger datachain sector records for block payloads matching hash.
+         *  This is a read-only diagnostic API and does not mutate keychain aliases.
+         *
+         *  @param[in] hashBlock The block hash to match against decoded records.
+         *  @param[in] options The scan bounds/options to apply.
+         *  @param[out] result Scan output and match metadata.
+         *
+         *  @return True if scan infrastructure executed, false on infrastructure failure.
+         *
+         **/
+        bool AuditScanBlockRecords(const uint1024_t& hashBlock,
+                                   const BlockAuditScanOptions& options,
+                                   BlockAuditScanResult& result);
 
 
         /** HasFirst

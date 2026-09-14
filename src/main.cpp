@@ -21,6 +21,7 @@ ________________________________________________________________________________
 #include <LLP/include/channel_state_manager.h>
 
 #include <LLD/include/global.h>
+#include <LLD/types/ledger.h>
 
 #include <TAO/API/include/global.h>
 #include <TAO/API/include/cmd.h>
@@ -33,6 +34,7 @@ ________________________________________________________________________________
 
 #include <Util/include/convert.h>
 #include <Util/include/filesystem.h>
+#include <Util/include/hex.h>
 #include <Util/include/signals.h>
 #include <Util/include/daemon.h>
 
@@ -43,6 +45,340 @@ ________________________________________________________________________________
 #ifndef WIN32
 #include <sys/resource.h>
 #endif
+
+#include <algorithm>
+#include <limits>
+
+namespace
+{
+    bool ParseAuditHashArg(const std::string& strValue, uint1024_t& hashOut, std::string& strError)
+    {
+        if(strValue.empty())
+        {
+            strError = "missing required value";
+            return false;
+        }
+
+        if(strValue.size() != 256 || !IsHex(strValue))
+        {
+            strError = "must be full 256-hex-character uint1024 hash";
+            return false;
+        }
+
+        hashOut.SetHex(strValue);
+        if(hashOut == 0)
+        {
+            strError = "hash cannot be zero";
+            return false;
+        }
+
+        return true;
+    }
+
+
+    bool ParseAuditUint32Arg(const std::string& strValue, const char* pszName, uint32_t& nOut, std::string& strError)
+    {
+        if(strValue.empty())
+        {
+            strError = debug::safe_printstr(pszName, " is empty");
+            return false;
+        }
+
+        uint64_t nValue = 0;
+        for(const char ch : strValue)
+        {
+            if(ch < '0' || ch > '9')
+            {
+                strError = debug::safe_printstr(pszName, " must be an unsigned integer");
+                return false;
+            }
+
+            nValue = (nValue * 10) + static_cast<uint64_t>(ch - '0');
+            if(nValue > std::numeric_limits<uint32_t>::max())
+            {
+                strError = debug::safe_printstr(pszName, " exceeds uint32 range");
+                return false;
+            }
+        }
+
+        nOut = static_cast<uint32_t>(nValue);
+        return true;
+    }
+
+
+    int RunOfflineAuditBlock()
+    {
+        const std::string strHashArg = config::GetArg("-auditblock", "");
+        uint1024_t hashTarget = 0;
+        std::string strError;
+        if(!ParseAuditHashArg(strHashArg, hashTarget, strError))
+        {
+            debug::error(FUNCTION, "-auditblock ", strError);
+            return 2;
+        }
+
+        bool fExpectedHeightProvided = false;
+        uint32_t nExpectedHeight = 0;
+        if(config::HasArg("-auditblockheight"))
+        {
+            fExpectedHeightProvided = true;
+            if(!ParseAuditUint32Arg(config::GetArg("-auditblockheight", ""), "-auditblockheight",
+                                    nExpectedHeight, strError))
+            {
+                debug::error(FUNCTION, strError);
+                return 2;
+            }
+        }
+
+        bool fChildProvided = false;
+        uint1024_t hashChild = 0;
+        if(config::HasArg("-auditblockchild"))
+        {
+            fChildProvided = true;
+            if(!ParseAuditHashArg(config::GetArg("-auditblockchild", ""), hashChild, strError))
+            {
+                debug::error(FUNCTION, "-auditblockchild ", strError);
+                return 2;
+            }
+        }
+
+        bool fMaxFilesProvided = false;
+        uint32_t nMaxFiles = 8;
+        if(config::HasArg("-auditblockfiles"))
+        {
+            fMaxFilesProvided = true;
+            if(!ParseAuditUint32Arg(config::GetArg("-auditblockfiles", ""), "-auditblockfiles",
+                                    nMaxFiles, strError))
+            {
+                debug::error(FUNCTION, strError);
+                return 2;
+            }
+
+            if(nMaxFiles == 0)
+            {
+                debug::error(FUNCTION, "-auditblockfiles must be greater than zero");
+                return 2;
+            }
+        }
+
+        bool fStartFileProvided = false;
+        uint32_t nStartFile = 0;
+        if(config::HasArg("-auditblockstartfile"))
+        {
+            fStartFileProvided = true;
+            if(!ParseAuditUint32Arg(config::GetArg("-auditblockstartfile", ""), "-auditblockstartfile",
+                                    nStartFile, strError))
+            {
+                debug::error(FUNCTION, strError);
+                return 2;
+            }
+        }
+
+        bool fEndFileProvided = false;
+        uint32_t nEndFile = 0;
+        if(config::HasArg("-auditblockendfile"))
+        {
+            fEndFileProvided = true;
+            if(!ParseAuditUint32Arg(config::GetArg("-auditblockendfile", ""), "-auditblockendfile",
+                                    nEndFile, strError))
+            {
+                debug::error(FUNCTION, strError);
+                return 2;
+            }
+        }
+
+        if(fStartFileProvided && fEndFileProvided && nStartFile > nEndFile)
+        {
+            debug::error(FUNCTION, "invalid range: -auditblockstartfile cannot exceed -auditblockendfile");
+            return 2;
+        }
+
+        const std::string strLedgerBase = debug::safe_printstr(config::GetDataDir(), "_LEDGER/");
+        const std::string strLedgerKeychain = debug::safe_printstr(strLedgerBase, "keychain/");
+        const std::string strLedgerDatachain = debug::safe_printstr(strLedgerBase, "datachain/");
+        const std::string strLedgerFirstSector = debug::safe_printstr(strLedgerDatachain, "_block.00000");
+        if(!filesystem::exists(strLedgerKeychain)
+        || !filesystem::exists(strLedgerDatachain)
+        || !filesystem::exists(strLedgerFirstSector))
+        {
+            debug::error(FUNCTION, "ledger datachain not present for read-only audit at ", strLedgerBase);
+            return 3;
+        }
+
+        LLD::Ledger = new LLD::LedgerDB(0);
+
+        LLD::BlockAuditScanOptions options;
+        if(fStartFileProvided || fEndFileProvided)
+        {
+            options.fHasStartFile = true;
+            options.fHasEndFile = true;
+
+            if(fStartFileProvided && fEndFileProvided)
+            {
+                options.nStartFile = nStartFile;
+                options.nEndFile = nEndFile;
+            }
+            else if(fStartFileProvided)
+            {
+                options.nStartFile = nStartFile;
+                options.nEndFile = fMaxFilesProvided
+                    ? static_cast<uint32_t>(std::min<uint64_t>(
+                        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+                        static_cast<uint64_t>(nStartFile) + static_cast<uint64_t>(std::max<uint32_t>(1, nMaxFiles) - 1)))
+                    : nStartFile;
+            }
+            else
+            {
+                options.nEndFile = nEndFile;
+                const uint32_t nBound = std::max<uint32_t>(1, nMaxFiles);
+                options.nStartFile = (nEndFile >= (nBound - 1)) ? (nEndFile - (nBound - 1)) : 0;
+            }
+        }
+        else
+            options.nMaxFiles = nMaxFiles;
+
+        const bool fHashKeyExists = LLD::Ledger->HasBlock(hashTarget);
+        TAO::Ledger::BlockState stateByHash;
+        const bool fHashKeyReadable = LLD::Ledger->ReadBlock(hashTarget, stateByHash);
+        const bool fHashKeyMatches = fHashKeyReadable && (stateByHash.GetHash() == hashTarget);
+
+        bool fHeightChecked = false;
+        bool fHeightExists = false;
+        bool fHeightReadable = false;
+        bool fHeightMatches = false;
+        uint32_t nHeightChecked = 0;
+        TAO::Ledger::BlockState stateByHeight;
+
+        if(fHashKeyReadable)
+        {
+            fHeightChecked = true;
+            nHeightChecked = stateByHash.nHeight;
+            fHeightExists = LLD::Ledger->Exists(std::make_pair(std::string("height"), nHeightChecked));
+            fHeightReadable = LLD::Ledger->ReadBlock(nHeightChecked, stateByHeight);
+            fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
+        }
+        else if(fExpectedHeightProvided)
+        {
+            fHeightChecked = true;
+            nHeightChecked = nExpectedHeight;
+            fHeightExists = LLD::Ledger->Exists(std::make_pair(std::string("height"), nHeightChecked));
+            fHeightReadable = LLD::Ledger->ReadBlock(nHeightChecked, stateByHeight);
+            fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
+        }
+
+        LLD::BlockAuditScanResult rawScan;
+        if(!LLD::Ledger->AuditScanBlockRecords(hashTarget, options, rawScan))
+        {
+            debug::error(FUNCTION, "raw scan infrastructure failed");
+            delete LLD::Ledger;
+            LLD::Ledger = nullptr;
+            return 3;
+        }
+
+        const size_t nRawMatches = rawScan.vMatches.size();
+        const bool fMultipleRawMatches = nRawMatches > 1;
+        const bool fRawFound = rawScan.fFound;
+
+        std::string strClassification = "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN";
+        if(rawScan.fTruncatedRecord || rawScan.fMalformedRecord)
+            strClassification = "RAW_RECORD_TRUNCATED_OR_MALFORMED";
+
+        if(fMultipleRawMatches)
+            strClassification = "MULTIPLE_RAW_MATCHES";
+        else if(fHeightChecked && fHeightReadable && !fHeightMatches)
+            strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
+        else if(fHashKeyExists && fHashKeyReadable && fHashKeyMatches)
+            strClassification = "HASH_KEY_READABLE";
+        else if(!fHashKeyExists && fHeightMatches)
+            strClassification = "HASH_ALIAS_MISSING_HEIGHT_INDEX_PRESENT";
+        else if(!fHashKeyExists && fRawFound)
+            strClassification = "HASH_ALIAS_MISSING_RAW_RECORD_PRESENT";
+        else if(fHashKeyExists && !fHashKeyReadable && fRawFound)
+            strClassification = "HASH_KEY_PRESENT_UNREADABLE_RAW_RECORD_PRESENT";
+
+        debug::log(0, "AUDITBLOCK hash=", hashTarget.ToString(), " status=", (fHashKeyReadable ? "FOUND" : "NOT_FOUND"),
+            " hash_key_exists=", fHashKeyExists ? "true" : "false",
+            " raw_found=", fRawFound ? "true" : "false");
+
+        if(fHeightChecked)
+        {
+            debug::log(0, "AUDITBLOCK height_index checked=true height=", nHeightChecked,
+                " exists=", fHeightExists ? "true" : "false",
+                " readable=", fHeightReadable ? "true" : "false",
+                " matches=", fHeightMatches ? "true" : "false");
+        }
+        else
+            debug::log(0, "AUDITBLOCK height_index checked=false");
+
+        for(size_t i = 0; i < nRawMatches; ++i)
+        {
+            const auto& match = rawScan.vMatches[i];
+            const bool fHeightValid = !fExpectedHeightProvided || (match.nHeight == nExpectedHeight);
+            const bool fChildValid = !fChildProvided || (match.hashNextBlock == hashChild);
+
+            debug::log(0, "AUDITBLOCK candidate[", i, "] hash=", match.hashBlock.ToString(),
+                " height=", match.nHeight,
+                " prev=", match.hashPrevBlock.ToString(),
+                " next=", match.hashNextBlock.ToString(),
+                " sector_file=", match.nSectorFile,
+                " sector_offset=", match.nSectorStart,
+                " sector_size=", match.nSectorSize,
+                " valid_height=", fHeightValid ? "true" : "false",
+                " valid_child_link=", fChildValid ? "true" : "false",
+                " serialized_complete=", match.fSerializedComplete ? "true" : "false");
+        }
+
+        encoding::json jSummary;
+        jSummary["hash"] = hashTarget.ToString();
+        jSummary["expected_height"] = fExpectedHeightProvided ? encoding::json(nExpectedHeight) : encoding::json(nullptr);
+        jSummary["hash_key"] = {
+            {"exists", fHashKeyExists},
+            {"readable", fHashKeyReadable},
+            {"matches", fHashKeyMatches}
+        };
+        jSummary["height_index"] = {
+            {"checked", fHeightChecked},
+            {"height", fHeightChecked ? encoding::json(nHeightChecked) : encoding::json(nullptr)},
+            {"exists", fHeightExists},
+            {"readable", fHeightReadable},
+            {"matches", fHeightMatches}
+        };
+        jSummary["raw_scan"] = {
+            {"scan_start_file", rawScan.nScanStartFile},
+            {"scan_end_file", rawScan.nScanEndFile},
+            {"files_scanned", rawScan.nFilesScanned},
+            {"records_scanned", rawScan.nRecordsScanned},
+            {"found", fRawFound},
+            {"matches", nRawMatches},
+            {"malformed_record", rawScan.fMalformedRecord},
+            {"truncated_record", rawScan.fTruncatedRecord}
+        };
+
+        if(!rawScan.vMatches.empty())
+        {
+            const auto& candidate = rawScan.vMatches.front();
+            jSummary["candidate"] = {
+                {"height", candidate.nHeight},
+                {"hash_prev", candidate.hashPrevBlock.ToString()},
+                {"hash_next", candidate.hashNextBlock.ToString()},
+                {"valid_hash", candidate.hashBlock == hashTarget},
+                {"valid_height", !fExpectedHeightProvided || candidate.nHeight == nExpectedHeight},
+                {"valid_child_link", !fChildProvided || candidate.hashNextBlock == hashChild},
+                {"serialized_complete", candidate.fSerializedComplete},
+                {"sector_file", candidate.nSectorFile},
+                {"sector_offset", candidate.nSectorStart},
+                {"sector_size", candidate.nSectorSize}
+            };
+        }
+
+        jSummary["classification"] = strClassification;
+        debug::log(0, jSummary.dump());
+
+        delete LLD::Ledger;
+        LLD::Ledger = nullptr;
+        return 0;
+    }
+}
 
 
 /** RunAutoLogin
@@ -293,6 +629,14 @@ int main(int argc, char** argv)
 
             return TAO::API::CommandLineRPC(argc, argv, i);
         }
+    }
+
+
+    if(config::HasArg("-auditblock"))
+    {
+        const int nAuditResult = RunOfflineAuditBlock();
+        debug::Shutdown();
+        return nAuditResult;
     }
 
 

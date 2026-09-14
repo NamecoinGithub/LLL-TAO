@@ -30,10 +30,90 @@ ________________________________________________________________________________
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/client.h>
 
+#include <Util/include/filesystem.h>
+
 #include <tuple>
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 
 namespace LLD
 {
+    namespace
+    {
+        bool ReadCompactSizeFromFile(std::ifstream& stream, const uint64_t nFilePos, const uint64_t nFileSize,
+                                     uint64_t& nPayloadSizeOut, uint64_t& nPrefixSizeOut)
+        {
+            nPayloadSizeOut = 0;
+            nPrefixSizeOut = 0;
+
+            if(nFilePos >= nFileSize)
+                return false;
+
+            stream.seekg(static_cast<std::streamoff>(nFilePos), std::ios::beg);
+            uint8_t nPrefix = 0;
+            if(!stream.read(reinterpret_cast<char*>(&nPrefix), 1))
+                return false;
+
+            nPrefixSizeOut = 1;
+            if(nPrefix < 253)
+            {
+                nPayloadSizeOut = nPrefix;
+                return true;
+            }
+
+            if(nPrefix == 253)
+            {
+                if(nFilePos + 3 > nFileSize)
+                    return false;
+
+                uint8_t p[2] = {0, 0};
+                if(!stream.read(reinterpret_cast<char*>(p), 2))
+                    return false;
+
+                nPayloadSizeOut = static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 8);
+                nPrefixSizeOut = 3;
+                return true;
+            }
+
+            if(nPrefix == 254)
+            {
+                if(nFilePos + 5 > nFileSize)
+                    return false;
+
+                uint8_t p[4] = {0, 0, 0, 0};
+                if(!stream.read(reinterpret_cast<char*>(p), 4))
+                    return false;
+
+                nPayloadSizeOut = static_cast<uint64_t>(p[0])
+                    | (static_cast<uint64_t>(p[1]) << 8)
+                    | (static_cast<uint64_t>(p[2]) << 16)
+                    | (static_cast<uint64_t>(p[3]) << 24);
+                nPrefixSizeOut = 5;
+                return true;
+            }
+
+            if(nFilePos + 9 > nFileSize)
+                return false;
+
+            uint8_t p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            if(!stream.read(reinterpret_cast<char*>(p), 8))
+                return false;
+
+            nPayloadSizeOut = static_cast<uint64_t>(p[0])
+                | (static_cast<uint64_t>(p[1]) << 8)
+                | (static_cast<uint64_t>(p[2]) << 16)
+                | (static_cast<uint64_t>(p[3]) << 24)
+                | (static_cast<uint64_t>(p[4]) << 32)
+                | (static_cast<uint64_t>(p[5]) << 40)
+                | (static_cast<uint64_t>(p[6]) << 48)
+                | (static_cast<uint64_t>(p[7]) << 56);
+            nPrefixSizeOut = 9;
+            return true;
+        }
+    }
+
 
     /** The Database Constructor. To determine file location and the Bytes per Record. **/
     LedgerDB::LedgerDB(const uint8_t nFlagsIn, const uint32_t nBucketsIn, const uint32_t nCacheIn)
@@ -1254,6 +1334,151 @@ namespace LLD
             return Client->Erase(hashBlock);
 
         return Erase(hashBlock);
+    }
+
+
+    bool LedgerDB::AuditScanBlockRecords(const uint1024_t& hashBlock,
+                                         const BlockAuditScanOptions& options,
+                                         BlockAuditScanResult& result)
+    {
+        result = BlockAuditScanResult();
+
+        uint32_t nStartFile = 0;
+        uint32_t nEndFile = 0;
+
+        if(options.fHasStartFile || options.fHasEndFile)
+        {
+            nStartFile = options.fHasStartFile ? options.nStartFile : options.nEndFile;
+            nEndFile = options.fHasEndFile ? options.nEndFile : options.nStartFile;
+        }
+        else
+        {
+            const uint32_t nBoundFiles = std::max<uint32_t>(1, options.nMaxFiles);
+            nEndFile = nCurrentFile;
+            nStartFile = (nEndFile >= (nBoundFiles - 1)) ? (nEndFile - (nBoundFiles - 1)) : 0;
+        }
+
+        if(nStartFile > nEndFile)
+        {
+            result.fRangeInvalid = true;
+            result.fInfrastructureFailure = true;
+            result.nScanStartFile = nStartFile;
+            result.nScanEndFile = nEndFile;
+            return false;
+        }
+
+        result.nScanStartFile = nStartFile;
+        result.nScanEndFile = nEndFile;
+
+        for(uint64_t nFile = nEndFile; ; --nFile)
+        {
+            if(nFile < nStartFile)
+                break;
+
+            const std::string strPath = debug::safe_printstr(
+                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nFile);
+
+            const int64_t nRawFileSize = filesystem::size(strPath);
+            if(nRawFileSize < 0)
+            {
+                if(nFile == 0)
+                    break;
+
+                continue;
+            }
+
+            ++result.nFilesScanned;
+
+            const uint64_t nFileSize = static_cast<uint64_t>(nRawFileSize);
+            uint64_t nFilePos = 0;
+
+            std::ifstream stream(strPath, std::ios::in | std::ios::binary);
+            if(!stream.is_open())
+            {
+                result.fInfrastructureFailure = true;
+                return false;
+            }
+
+            while(nFilePos < nFileSize)
+            {
+                uint64_t nPayloadSize = 0;
+                uint64_t nPrefixSize = 0;
+                if(!ReadCompactSizeFromFile(stream, nFilePos, nFileSize, nPayloadSize, nPrefixSize))
+                {
+                    result.fTruncatedRecord = true;
+                    break;
+                }
+
+                if(nPayloadSize == 0)
+                {
+                    ++nFilePos;
+                    continue;
+                }
+
+                if(nPayloadSize > (nFileSize - nFilePos - nPrefixSize))
+                {
+                    result.fTruncatedRecord = true;
+                    break;
+                }
+
+                if(nPayloadSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+                {
+                    result.fMalformedRecord = true;
+                    break;
+                }
+
+                std::vector<uint8_t> vRecord(static_cast<size_t>(nPayloadSize));
+                stream.seekg(static_cast<std::streamoff>(nFilePos + nPrefixSize), std::ios::beg);
+                if(!stream.read(reinterpret_cast<char*>(vRecord.data()), static_cast<std::streamsize>(vRecord.size())))
+                {
+                    result.fTruncatedRecord = true;
+                    break;
+                }
+
+                ++result.nRecordsScanned;
+
+                try
+                {
+                    DataStream ssRecord(vRecord, SER_LLD, DATABASE_VERSION);
+
+                    std::string strType;
+                    ssRecord >> strType;
+                    if(strType == "block")
+                    {
+                        TAO::Ledger::BlockState state;
+                        ssRecord >> state;
+
+                        const uint1024_t hashCandidate = state.GetHash();
+                        if(hashCandidate == hashBlock)
+                        {
+                            BlockAuditRecordMatch match;
+                            match.nSectorFile = static_cast<uint32_t>(nFile);
+                            match.nSectorStart = nFilePos;
+                            match.nSectorSize = nPayloadSize + nPrefixSize;
+                            match.nHeight = state.nHeight;
+                            match.hashBlock = hashCandidate;
+                            match.hashPrevBlock = state.hashPrevBlock;
+                            match.hashNextBlock = state.hashNextBlock;
+                            match.fSerializedComplete = ssRecord.End();
+
+                            result.vMatches.push_back(match);
+                            result.fFound = true;
+                        }
+                    }
+                }
+                catch(const std::exception&)
+                {
+                    result.fMalformedRecord = true;
+                }
+
+                nFilePos += nPayloadSize + nPrefixSize;
+            }
+
+            if(nFile == 0)
+                break;
+        }
+
+        return !result.fInfrastructureFailure;
     }
 
 
