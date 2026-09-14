@@ -273,6 +273,11 @@ namespace
         bool fHeightMatches = false;
         uint32_t nHeightChecked = 0;
         TAO::Ledger::BlockState stateByHeight;
+        bool fExpectedHeightCheckPerformed = false;
+        bool fExpectedHeightExists = false;
+        bool fExpectedHeightReadable = false;
+        bool fExpectedHeightMatches = false;
+        TAO::Ledger::BlockState stateByExpectedHeight;
 
         if(fHashKeyReadable)
         {
@@ -281,6 +286,14 @@ namespace
             fHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nHeightChecked));
             fHeightReadable = pLedger->ReadBlock(nHeightChecked, stateByHeight);
             fHeightMatches = fHeightReadable && stateByHeight.GetHash() == hashTarget;
+
+            if(fExpectedHeightProvided && nExpectedHeight != nHeightChecked)
+            {
+                fExpectedHeightCheckPerformed = true;
+                fExpectedHeightExists = pLedger->Exists(std::make_pair(std::string("height"), nExpectedHeight));
+                fExpectedHeightReadable = pLedger->ReadBlock(nExpectedHeight, stateByExpectedHeight);
+                fExpectedHeightMatches = fExpectedHeightReadable && (stateByExpectedHeight.GetHash() == hashTarget);
+            }
         }
         else if(fExpectedHeightProvided)
         {
@@ -333,6 +346,14 @@ namespace
                 " exists=", fHeightExists ? "true" : "false",
                 " readable=", fHeightReadable ? "true" : "false",
                 " matches=", fHeightMatches ? "true" : "false");
+
+            if(fExpectedHeightCheckPerformed)
+            {
+                debug::log(0, "AUDITBLOCK expected_height_index checked=true height=", nExpectedHeight,
+                    " exists=", fExpectedHeightExists ? "true" : "false",
+                    " readable=", fExpectedHeightReadable ? "true" : "false",
+                    " matches=", fExpectedHeightMatches ? "true" : "false");
+            }
         }
         else
             debug::log(0, "AUDITBLOCK height_index checked=false");
@@ -370,6 +391,16 @@ namespace
             {"readable", fHeightReadable},
             {"matches", fHeightMatches}
         };
+        if(fExpectedHeightCheckPerformed)
+        {
+            jSummary["height_index"]["expected_height_check"] = {
+                {"checked", true},
+                {"height", nExpectedHeight},
+                {"exists", fExpectedHeightExists},
+                {"readable", fExpectedHeightReadable},
+                {"matches", fExpectedHeightMatches}
+            };
+        }
         jSummary["raw_scan"] = {
             {"scan_start_file", rawScan.nScanStartFile},
             {"scan_end_file", rawScan.nScanEndFile},
