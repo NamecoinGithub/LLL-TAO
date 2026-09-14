@@ -1600,7 +1600,14 @@ namespace LLD
 
             std::string strType;
             ssValue >> strType;
+            if(strType != "block")
+                return false;
+
             ssValue >> state;
+
+            /* Require the record to be fully consumed like the raw scanner does. */
+            if(!ssValue.End())
+                return false;
         }
         catch(const std::exception&)
         {
