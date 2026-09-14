@@ -54,6 +54,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/checkpoints.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/genesis_block.h>
+#include <TAO/Ledger/include/retarget.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/state.h>
@@ -75,6 +76,7 @@ ________________________________________________________________________________
 #include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2107,7 +2109,7 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
 }
 
 
-TEST_CASE("Tritium acceptance checks predecessor identity before height",
+TEST_CASE("Tritium acceptance checks predecessor identity before height and difficulty",
           "[ledger][tritium][accept][real]")
 {
     RealCodeLedgerGuard ledgerGuard;
@@ -2126,6 +2128,8 @@ TEST_CASE("Tritium acceptance checks predecessor identity before height",
     block.hashPrevBlock = hashPrev;
     block.nHeight = 12;
     std::string strExpectedError = "previous block identity mismatch";
+    uint32_t nExpectedBits = 0;
+    bool fDifficultyMismatch = false;
 
     SECTION("wrong identity at the expected height")
     {
@@ -2140,11 +2144,33 @@ TEST_CASE("Tritium acceptance checks predecessor identity before height",
     {
         strExpectedError = "incorrect block height.";
     }
+    SECTION("correct predecessor with mismatched difficulty")
+    {
+        block.nVersion = 7;
+        block.nHeight = statePrev.nHeight + 1;
+        block.nChannel = TAO::Ledger::CHANNEL::HASH;
+        nExpectedBits = TAO::Ledger::GetNextTargetRequired(statePrev, block.GetChannel());
+        block.nBits = nExpectedBits ^ 1;
+        strExpectedError = "incorrect proof-of-work/proof-of-stake";
+        fDifficultyMismatch = true;
+    }
 
     REQUIRE(LLD::Ledger->WriteBlock(hashPrev, statePrev));
     debug::GetLastError();
     REQUIRE_FALSE(block.Accept());
-    REQUIRE(debug::GetLastError().find(strExpectedError) != std::string::npos);
+    const std::string strError = debug::GetLastError();
+    REQUIRE(strError.find(strExpectedError) != std::string::npos);
+    if(fDifficultyMismatch)
+    {
+        REQUIRE(strError.find("block=" + block.GetHash().SubString()) != std::string::npos);
+        REQUIRE(strError.find(" prev=" + hashPrev.SubString()) != std::string::npos);
+        REQUIRE(strError.find(" prev_height=" + std::to_string(statePrev.nHeight)) != std::string::npos);
+        REQUIRE(strError.find(" block_height=" + std::to_string(block.nHeight)) != std::string::npos);
+        REQUIRE(strError.find(" channel=" + std::to_string(block.GetChannel())) != std::string::npos);
+        std::ostringstream bits;
+        bits << " nBits=0x" << std::hex << block.nBits << " expected=0x" << nExpectedBits;
+        REQUIRE(strError.find(bits.str()) != std::string::npos);
+    }
     REQUIRE_FALSE(LLD::HasOpenTransaction());
 }
 
@@ -2310,6 +2336,73 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
             REQUIRE(LLD::Ledger->ReadBlock(hash, restored));
             REQUIRE(restored.GetHash() == hash);
         }
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain uses only a verified genesis as a terminal height-index anchor")
+    {
+        HeightIndexDiskGuard heightZeroGuard(0);
+        bool fValidRoot = true;
+        bool fRecoverSuffix = false;
+        bool fWrongSuccessor = false;
+
+        SECTION("missing genesis alias") {}
+        SECTION("missing suffix through genesis")
+        {
+            fRecoverSuffix = true;
+        }
+        SECTION("non-genesis zero-prev root")
+        {
+            ++TAO::Ledger::ChainState::tStateGenesis.nNonce;
+            fValidRoot = false;
+        }
+        SECTION("genesis with the wrong successor")
+        {
+            fWrongSuccessor = true;
+            fValidRoot = false;
+        }
+
+        auto fixture = BuildCheckpointChainFixture(38107, blocksGuard);
+        if(fixture.hashGenesis != TAO::Ledger::ChainState::Genesis())
+            blocksGuard.hashes.push_back(fixture.hashGenesis);
+        if(fWrongSuccessor)
+        {
+            fixture.genesis.hashNextBlock = fixture.hashTwo;
+            REQUIRE(LLD::Ledger->WriteBlock(fixture.hashGenesis, fixture.genesis));
+        }
+
+        std::vector<uint1024_t> vMissing = {fixture.hashGenesis};
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(0), fixture.hashGenesis));
+        if(fRecoverSuffix)
+        {
+            REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+            REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+            vMissing.insert(vMissing.end(), {fixture.hashOne, fixture.hashTwo});
+        }
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->Erase(hash, true));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 3));
+        for(const auto& hash : vMissing)
+            REQUIRE_FALSE(LLD::Ledger->HasBlock(hash));
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 3) == fValidRoot);
+        for(const auto& hash : vMissing)
+            REQUIRE(LLD::Ledger->HasBlock(hash) == fValidRoot);
+        if(fValidRoot)
+        {
+            TAO::Ledger::BlockState restored;
+            REQUIRE(LLD::Ledger->ReadBlock(fixture.hashGenesis, restored));
+            REQUIRE(restored.GetHash() == TAO::Ledger::ChainState::Genesis());
+            REQUIRE(restored.nHeight == 0);
+            REQUIRE(restored.hashPrevBlock == 0);
+            REQUIRE(restored.hashNextBlock == fixture.hashOne);
+            REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(false, 3));
+        }
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+        uint1024_t hashBestDisk;
+        REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
+        REQUIRE(hashBestDisk == fixture.hashThree);
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 

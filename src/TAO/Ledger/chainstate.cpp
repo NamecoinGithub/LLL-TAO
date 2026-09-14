@@ -366,6 +366,11 @@ namespace TAO
                     hashChild = hashPrevByHeight;
                 }
 
+                if(stateChild.hashPrevBlock == 0
+                && stateChild.nHeight == 0
+                && hashChild == ChainState::Genesis())
+                    audit.fCanRepairFromHeight = !audit.vRecoveredSuffix.empty();
+
                 return true;
             }
 
