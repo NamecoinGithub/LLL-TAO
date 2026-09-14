@@ -2235,16 +2235,20 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         auto fixture = BuildCheckpointChainFixture(38110, blocksGuard);
         REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
         REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        bool fExpectRepair = false;
+        bool fExpectHashOnePresent = true;
 
         SECTION("another predecessor is unavailable")
         {
             REQUIRE(LLD::Ledger->EraseBlock(fixture.hashOne));
             REQUIRE_FALSE(LLD::Ledger->Exists(std::make_pair(std::string("height"), uint32_t(1))));
+            fExpectHashOnePresent = false;
         }
         SECTION("another predecessor is recoverable")
         {
             REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
             REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+            fExpectRepair = true;
         }
         SECTION("an older predecessor has an invalid successor link")
         {
@@ -2257,14 +2261,15 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
             REQUIRE(LLD::Ledger->WriteBlock(fixture.hashOne, fixture.one));
         }
 
-        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
-        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16) == fExpectRepair);
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo) == fExpectRepair);
         REQUIRE_FALSE(LLD::HasOpenTransaction());
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         TAO::Ledger::BlockState byHeight;
         REQUIRE(LLD::Ledger->ReadBlock(uint32_t(2), byHeight));
         REQUIRE(byHeight.GetHash() == fixture.hashTwo);
         REQUIRE(byHeight.hashNextBlock == fixture.hashThree);
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashOne) == fExpectHashOnePresent);
         uint1024_t hashBestDisk;
         REQUIRE(LLD::Ledger->ReadBestChain(hashBestDisk));
         REQUIRE(hashBestDisk == fixture.hashThree);
@@ -2777,41 +2782,41 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     std::filesystem::remove(pathSector);
     std::filesystem::create_directory(pathSector);
     Run({target, "-auditblockstartfile=99999", "-lldmeters=1"}, 3);
-}
 
-{
-    const auto pathDuplicate = pathLedger / "datachain/_block.99998";
-    DataStream record(SER_LLD, LLD::DATABASE_VERSION);
-    record << std::string("block") << state;
-    std::ofstream stream(pathDuplicate, std::ios::binary);
-    WriteCompactSize(stream, record.size());
-    stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+    {
+        const auto pathDuplicate = pathLedger / "datachain/_block.99998";
+        DataStream recordDuplicate(SER_LLD, LLD::DATABASE_VERSION);
+        recordDuplicate << std::string("block") << state;
+        std::ofstream stream(pathDuplicate, std::ios::binary);
+        WriteCompactSize(stream, recordDuplicate.size());
+        stream.write(reinterpret_cast<const char*>(recordDuplicate.Bytes().data()), recordDuplicate.size());
 
-    LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
-        LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
-    DataStream ssHashKey(SER_LLD, LLD::DATABASE_VERSION);
-    ssHashKey << hash;
+        LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
+            LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
+        DataStream ssHashKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHashKey << hash;
 
-    DataStream ssHeightKey(SER_LLD, LLD::DATABASE_VERSION);
-    ssHeightKey << std::make_pair(std::string("height"), uint32_t(42));
+        DataStream ssHeightKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssHeightKey << std::make_pair(std::string("height"), uint32_t(42));
 
-    LLD::SectorKey cHash;
-    REQUIRE(keychain.Get(ssHashKey.Bytes(), cHash));
-    LLD::SectorKey cHeight(cHash);
-    cHeight.nSectorFile = 99998;
-    cHeight.nSectorStart = 0;
-    cHeight.nSectorSize = record.size() + GetSizeOfCompactSize(record.size());
-    cHeight.SetKey(ssHeightKey.Bytes());
-    REQUIRE(keychain.Put(cHeight));
+        LLD::SectorKey cHash;
+        REQUIRE(keychain.Get(ssHashKey.Bytes(), cHash));
+        LLD::SectorKey cHeight(cHash);
+        cHeight.nSectorFile = 99998;
+        cHeight.nSectorStart = 0;
+        cHeight.nSectorSize = recordDuplicate.size() + GetSizeOfCompactSize(recordDuplicate.size());
+        cHeight.SetKey(ssHeightKey.Bytes());
+        REQUIRE(keychain.Put(cHeight));
 
-    auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99998",
-        "-auditblockendfile=99999"}, 0);
-    REQUIRE(summary["status"] == "FOUND");
-    REQUIRE(summary["classification"] == "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS");
-    REQUIRE(summary["hash_key"]["matches"] == true);
-    REQUIRE(summary["height_index"]["matches"] == true);
-    REQUIRE(summary["alias_relation"]["comparable"] == true);
-    REQUIRE(summary["alias_relation"]["same_sector"] == false);
+        auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99998",
+            "-auditblockendfile=99999"}, 0);
+        REQUIRE(summary["status"] == "FOUND");
+        REQUIRE(summary["classification"] == "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS");
+        REQUIRE(summary["hash_key"]["matches"] == true);
+        REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["alias_relation"]["comparable"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"] == false);
+    }
 }
 #endif
 
