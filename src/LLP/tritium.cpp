@@ -4660,6 +4660,19 @@ namespace LLP
                 if(nSpecifier == SPECIFIER::TRANSACTIONS)
                 {
                     std::vector<MessagePacket> vMessages;
+                    uint64_t nBundleBytes = 0;
+                    const auto AppendMessage = [&](const uint16_t nType, const DataStream& ssData)
+                    {
+                        const uint64_t nHeader =
+                            MessagePacket(nType).GetSerializeSize(SER_NETWORK, MIN_PROTO_VERSION);
+                        if(nHeader > MAX_BUNDLE_BYTES - nBundleBytes ||
+                           ssData.size() > MAX_BUNDLE_BYTES - nBundleBytes - nHeader)
+                            return false;
+
+                        nBundleBytes += nHeader + ssData.size();
+                        vMessages.push_back(NewMessage(nType, ssData));
+                        return true;
+                    };
 
                     /* Loop through transactions. */
                     for(const auto& proof : block.vtx)
@@ -4675,7 +4688,8 @@ namespace LLP
                             /* Pre-collect transaction message. */
                             DataStream ssData(SER_NETWORK, MIN_PROTO_VERSION);
                             ssData << uint8_t(SPECIFIER::LEGACY) << tx;
-                            vMessages.push_back(NewMessage(TYPES::TRANSACTION, ssData));
+                            if(!AppendMessage(TYPES::TRANSACTION, ssData))
+                                return false;
                         }
 
                         /* Basic checks for tritium transactions. */
@@ -4689,14 +4703,16 @@ namespace LLP
                             /* Pre-collect transaction message. */
                             DataStream ssData(SER_NETWORK, MIN_PROTO_VERSION);
                             ssData << uint8_t(SPECIFIER::TRITIUM) << tx;
-                            vMessages.push_back(NewMessage(TYPES::TRANSACTION, ssData));
+                            if(!AppendMessage(TYPES::TRANSACTION, ssData))
+                                return false;
                         }
                     }
 
                     /* Pre-collect block message. */
                     DataStream ssBlock(SER_NETWORK, MIN_PROTO_VERSION);
                     ssBlock << uint8_t(SPECIFIER::TRITIUM) << block;
-                    vMessages.push_back(NewMessage(TYPES::BLOCK, ssBlock));
+                    if(!AppendMessage(TYPES::BLOCK, ssBlock))
+                        return false;
 
                     return WritePackets(vMessages);
                 }

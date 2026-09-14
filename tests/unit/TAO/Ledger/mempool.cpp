@@ -27,6 +27,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/types/credentials.h>
 
 #include <unit/catch2/catch.hpp>
@@ -35,6 +36,47 @@ ________________________________________________________________________________
 #include <atomic>
 #include <chrono>
 #include <future>
+
+namespace TAO::Ledger
+{
+    struct MempoolTestAccess
+    {
+        static void Root(Mempool& pool, const Transaction& tx)
+        {
+            RECURSIVE(pool.MUTEX);
+            pool.AddConflictRoot(tx);
+        }
+
+        static bool Park(Mempool& pool, const Transaction& tx)
+        {
+            RECURSIVE(pool.MUTEX);
+            return pool.ParkConflictDependent(tx);
+        }
+
+        static void Drain(Mempool& pool, const uint512_t& hash)
+        {
+            pool.ProcessConflictDependents(hash);
+        }
+
+        static void Unroot(Mempool& pool, const uint512_t& hash)
+        {
+            RECURSIVE(pool.MUTEX);
+            pool.EraseConflictRoot(hash);
+        }
+
+        static void Claim(Mempool& pool, const uint512_t& hash)
+        {
+            RECURSIVE(pool.MUTEX);
+            pool.mapClaimed[hash] = uint512_t(1);
+        }
+
+        static bool Rejected(Mempool& pool, const uint512_t& hash)
+        {
+            RECURSIVE(pool.MUTEX);
+            return pool.mapRejected.count(hash);
+        }
+    };
+}
 
 namespace
 {
@@ -55,6 +97,262 @@ namespace
         REQUIRE(tx.Sign(LLC::GetRand512()));
         return tx;
     }
+
+    struct RetryChain
+    {
+        TAO::Ledger::Mempool& pool = TAO::Ledger::mempool;
+        std::vector<TAO::Register::Address> addresses;
+        std::vector<TAO::Ledger::Transaction> txs;
+
+        RetryChain()
+        {
+            uint512_t key = LLC::GetRand512();
+            for(uint32_t i = 0; i < 3; ++i)
+            {
+                addresses.emplace_back(TAO::Register::Address::ACCOUNT);
+                auto tx = CoordinatorTestTransaction(addresses.back());
+                if(i)
+                {
+                    tx.hashGenesis = txs.front().hashGenesis;
+                    tx.nSequence = i;
+                    tx.hashPrevTx = txs.back().GetHash();
+                }
+                const auto next = LLC::GetRand512();
+                tx.NextHash(next);
+                tx.hashCache = 0;
+                REQUIRE(tx.Build());
+                REQUIRE(tx.Sign(key));
+                key = next;
+                txs.push_back(tx);
+            }
+        }
+
+        ~RetryChain()
+        {
+            for(auto it = txs.rbegin(); it != txs.rend(); ++it)
+            {
+                pool.Remove(it->GetHash());
+                LLD::Ledger->EraseIndex(it->GetHash());
+                LLD::Ledger->EraseTx(it->GetHash());
+            }
+            LLD::Ledger->EraseLast(txs.front().hashGenesis);
+            for(const auto& address : addresses)
+                LLD::Register->EraseState(address, TAO::Ledger::FLAGS::MEMPOOL);
+        }
+
+        void Park()
+        {
+            TAO::Ledger::MempoolTestAccess::Root(pool, txs[0]);
+            REQUIRE(TAO::Ledger::MempoolTestAccess::Park(pool, txs[1]));
+            REQUIRE(TAO::Ledger::MempoolTestAccess::Park(pool, txs[2]));
+        }
+
+        void DiskParent()
+        {
+            REQUIRE(LLD::Ledger->WriteTx(txs[0].GetHash(), txs[0]));
+            REQUIRE(LLD::Ledger->WriteLast(txs[0].hashGenesis, txs[0].GetHash()));
+        }
+    };
+}
+
+TEST_CASE("Mempool conflict lookup excludes queued orphans and admitted transactions",
+          "[mempool][mempool_retry]")
+{
+    RetryChain chain;
+    auto& pool = chain.pool;
+    REQUIRE_FALSE(pool.Accept(chain.txs[1]));
+    REQUIRE(pool.Has(chain.txs[1].GetHash()));
+    REQUIRE_FALSE(pool.IsConflictNode(chain.txs[1].GetHash()));
+    REQUIRE_FALSE(pool.Accept(chain.txs[1]));
+    REQUIRE_FALSE(pool.IsConflictNode(chain.txs[1].GetHash()));
+    // Resurrection must not suppress the next orphan in the same sigchain.
+    REQUIRE_FALSE(pool.Accept(chain.txs[2]));
+    REQUIRE(pool.Has(chain.txs[2].GetHash()));
+    REQUIRE_FALSE(pool.IsConflictNode(chain.txs[2].GetHash()));
+    REQUIRE(pool.AddUnchecked(chain.txs[0]));
+    REQUIRE_FALSE(pool.IsConflictNode(chain.txs[0].GetHash()));
+    pool.Remove(chain.txs[0].GetHash());
+    TAO::Ledger::MempoolTestAccess::Root(pool, chain.txs[0]);
+    REQUIRE(pool.IsConflictNode(chain.txs[0].GetHash()));
+}
+
+TEST_CASE("Mempool dependent retries retain reclassified and transient tails",
+          "[mempool][mempool_retry]")
+{
+    using Access = TAO::Ledger::MempoolTestAccess;
+    const auto outcome = GENERATE(std::string("root"), std::string("dependent"),
+                                 std::string("orphan"), std::string("transient"),
+                                 std::string("rejected"));
+    CAPTURE(outcome);
+    RetryChain chain;
+    chain.Park();
+    if(outcome != "dependent")
+        Access::Unroot(chain.pool, chain.txs[0].GetHash());
+    if(outcome == "root" || outcome == "transient" || outcome == "rejected")
+    {
+        chain.DiskParent();
+        if(outcome == "root")
+            REQUIRE(LLD::Ledger->WriteLast(chain.txs[0].hashGenesis, LLC::GetRand512()));
+        else if(outcome == "transient")
+            REQUIRE(LLD::Ledger->EraseLast(chain.txs[0].hashGenesis));
+        else
+        {
+            // A changed register prestate is a definitive Verify rejection.
+            TAO::Register::State state;
+            state.nType = TAO::Register::REGISTER::OBJECT;
+            REQUIRE(LLD::Register->WriteState(chain.addresses[1], state, TAO::Ledger::FLAGS::MEMPOOL));
+        }
+    }
+    Access::Drain(chain.pool, chain.txs[0].GetHash());
+    REQUIRE(chain.pool.Has(chain.txs[2].GetHash()) == (outcome != "rejected"));
+    REQUIRE(Access::Rejected(chain.pool, chain.txs[1].GetHash()) == (outcome == "rejected"));
+    if(outcome == "root" || outcome == "dependent" || outcome == "transient")
+        REQUIRE(chain.pool.IsConflictNode(chain.txs[1].GetHash()));
+    if(outcome == "orphan")
+    {
+        REQUIRE(chain.pool.Has(chain.txs[1].GetHash()));
+        REQUIRE_FALSE(chain.pool.IsConflictNode(chain.txs[1].GetHash()));
+    }
+}
+
+TEST_CASE("Mempool stale marker guard preserves retryable tails",
+          "[mempool][mempool_retry]")
+{
+    const auto outcome = GENERATE(std::string("root"), std::string("transient"), std::string("rejected"));
+    CAPTURE(outcome);
+    RetryChain chain;
+    chain.Park();
+    chain.DiskParent();
+    if(outcome == "root")
+        REQUIRE(LLD::Ledger->WriteLast(chain.txs[0].hashGenesis, LLC::GetRand512()));
+    else if(outcome == "transient")
+        REQUIRE(LLD::Ledger->EraseLast(chain.txs[0].hashGenesis));
+    else
+    {
+        TAO::Register::State state;
+        state.nType = TAO::Register::REGISTER::OBJECT;
+        REQUIRE(LLD::Register->WriteState(chain.addresses[1], state, TAO::Ledger::FLAGS::MEMPOOL));
+    }
+    REQUIRE_FALSE(chain.pool.Accept(chain.txs[1]));
+    REQUIRE(chain.pool.Has(chain.txs[2].GetHash()) == (outcome != "rejected"));
+    REQUIRE(chain.pool.IsConflictNode(chain.txs[1].GetHash()) == (outcome != "rejected"));
+}
+
+TEST_CASE("Mempool Check preserves reclassified roots and orphan tails",
+          "[mempool][mempool_retry]")
+{
+    using Access = TAO::Ledger::MempoolTestAccess;
+    const auto outcome = GENERATE(std::string("root"), std::string("orphan"),
+                                 std::string("transient"), std::string("rejected"),
+                                 std::string("confirmed"));
+    CAPTURE(outcome);
+    RetryChain chain;
+    TAO::Ledger::Mempool pool;
+    Access::Root(pool, chain.txs[1]);
+    REQUIRE(Access::Park(pool, chain.txs[2]));
+    chain.DiskParent();
+    if(outcome == "root")
+        Access::Claim(pool, chain.txs[0].GetHash());
+    else if(outcome == "orphan")
+        REQUIRE(LLD::Ledger->EraseTx(chain.txs[0].GetHash()));
+    else if(outcome == "rejected")
+    {
+        TAO::Register::State state;
+        state.nType = TAO::Register::REGISTER::OBJECT;
+        REQUIRE(LLD::Register->WriteState(chain.addresses[1], state, TAO::Ledger::FLAGS::MEMPOOL));
+    }
+    else if(outcome == "confirmed")
+    {
+        REQUIRE(LLD::Ledger->WriteTx(chain.txs[1].GetHash(), chain.txs[1]));
+        REQUIRE(LLD::Ledger->IndexBlock(chain.txs[1].GetHash(), TAO::Ledger::ChainState::hashBestChain.load()));
+    }
+    if(outcome == "transient")
+    {
+        LLD::TransactionGuard transaction(TAO::Ledger::FLAGS::MEMPOOL);
+        REQUIRE(bool(transaction));
+        pool.Check();
+    }
+    else
+        pool.Check();
+    const bool retryable = outcome != "rejected" && outcome != "confirmed";
+    REQUIRE(pool.Has(chain.txs[2].GetHash()) == retryable);
+    REQUIRE(Access::Rejected(pool, chain.txs[1].GetHash()) == (outcome == "rejected"));
+    REQUIRE(pool.Has(chain.txs[1].GetHash()) == retryable);
+}
+
+TEST_CASE("Mempool commit-time confirmation wins over admission and detached queues",
+          "[mempool][mempool_coordinator][mempool_retry]")
+{
+    using Access = TAO::Ledger::MempoolTestAccess;
+    const auto mode = GENERATE(std::string("accept"), std::string("orphan"), std::string("dependent"));
+    CAPTURE(mode);
+    RetryChain chain;
+    auto& pool = chain.pool;
+    if(mode == "orphan")
+        REQUIRE_FALSE(pool.Accept(chain.txs[1]));
+    else if(mode == "dependent")
+        chain.Park();
+    chain.DiskParent();
+
+    std::promise<void> waiting;
+    auto waitFuture = waiting.get_future();
+    std::atomic<bool> notified{false};
+    bool committed = true;
+    bool confirmed = false;
+    bool waitingObserved = false;
+    bool wrote = false;
+    std::future<bool> contender;
+    {
+        LLD::TransactionCoordinatorGuard coordinator;
+        LLD::SetTxnCoordinatorWaitHook([&]()
+        {
+            if(!notified.exchange(true))
+                waiting.set_value();
+        });
+        contender = std::async(std::launch::async, [&]()
+        {
+            if(mode == "orphan")
+                pool.ProcessOrphans(chain.txs[0].GetHash());
+            else if(mode == "dependent")
+                Access::Drain(pool, chain.txs[0].GetHash());
+            else
+                return pool.Accept(chain.txs[1], nullptr, &committed, &confirmed);
+            return false;
+        });
+        waitingObserved = waitFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        wrote = LLD::Ledger->WriteTx(chain.txs[1].GetHash(), chain.txs[1]) &&
+            LLD::Ledger->IndexBlock(chain.txs[1].GetHash(), TAO::Ledger::ChainState::hashBestChain.load());
+    }
+    const bool accepted = contender.get();
+    LLD::SetTxnCoordinatorWaitHook({});
+    REQUIRE(waitingObserved);
+    REQUIRE(wrote);
+    REQUIRE_FALSE(accepted);
+    REQUIRE_FALSE(pool.Has(chain.txs[1].GetHash()));
+    REQUIRE_FALSE(pool.Has(chain.txs[2].GetHash()));
+    if(mode == "accept")
+    {
+        REQUIRE_FALSE(committed);
+        REQUIRE(confirmed);
+    }
+    TAO::Register::State state;
+    REQUIRE_FALSE(LLD::Register->ReadState(chain.addresses[1], state, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+TEST_CASE("Mempool resurrects disk transactions after their block index is disconnected",
+          "[mempool][mempool_retry]")
+{
+    RetryChain chain;
+    chain.DiskParent();
+    REQUIRE(LLD::Ledger->WriteTx(chain.txs[1].GetHash(), chain.txs[1]));
+    REQUIRE(LLD::Ledger->IndexBlock(chain.txs[1].GetHash(), TAO::Ledger::ChainState::hashBestChain.load()));
+    REQUIRE(LLD::Ledger->EraseIndex(chain.txs[1].GetHash()));
+    bool committed = false;
+    bool confirmed = true;
+    REQUIRE(chain.pool.Accept(chain.txs[1], nullptr, &committed, &confirmed));
+    REQUIRE(committed);
+    REQUIRE_FALSE(confirmed);
+    REQUIRE(chain.pool.Has(chain.txs[1].GetHash()));
 }
 
 TEST_CASE("Mempool preflight and empty orphan drains do not reserve the coordinator",

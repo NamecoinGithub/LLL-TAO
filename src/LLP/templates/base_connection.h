@@ -165,6 +165,9 @@ namespace LLP
             return config::GetArg("-maxsendbuffer", MAX_SEND_BUFFER);
         }
 
+        /** Hard wire-byte cap for one atomic bundle, independent of -maxsendbuffer. */
+        static constexpr uint64_t MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
+
         /** Runtime limit includes at most one admitted oversized bundle. */
         uint64_t GetSendBufferLimit() const
         {
@@ -534,7 +537,8 @@ namespace LLP
         /** WritePackets
          *
          *  Admit an ordered bundle under the socket lock, then write it once.
-         *  Rejection leaves every packet in the bundle unsent.
+         *  Rejection leaves every packet in the bundle unsent. Bundles are
+         *  bounded by MAX_BUNDLE_BYTES even when the normal queue limit is larger.
          *
          *  @param[in] vPackets The packets to send as one bundle.
          *  @return true if the complete bundle was queued.

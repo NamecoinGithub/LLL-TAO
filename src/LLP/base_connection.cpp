@@ -28,6 +28,8 @@ ________________________________________________________________________________
 
 #include <Util/include/runtime.h>
 
+#include <type_traits>
+
 
 namespace LLP
 {
@@ -332,11 +334,35 @@ namespace LLP
         }
 
         std::vector<uint8_t> vBytes;
+        if constexpr(std::is_same_v<PacketType, MessagePacket>)
+        {
+            /* Reject transaction bundles before making any wire-buffer copies. */
+            uint64_t nBundleBytes = 0;
+            for(const auto& packet : vPackets)
+            {
+                const uint64_t nHeader = packet.GetSerializeSize(SER_NETWORK, MIN_PROTO_VERSION);
+                if(nHeader > MAX_BUNDLE_BYTES - nBundleBytes ||
+                   packet.DATA.size() > MAX_BUNDLE_BYTES - nBundleBytes - nHeader)
+                {
+                    fBufferFull.store(true);
+                    return false;
+                }
+                nBundleBytes += nHeader + packet.DATA.size();
+            }
+            vBytes.reserve(nBundleBytes);
+        }
+
         uint64_t nReserve = 0;
         bool fOversized = false;
         for(const auto& packet : vPackets)
         {
             const auto bytes = packet.GetBytes();
+            if(bytes.size() > MAX_BUNDLE_BYTES - vBytes.size())
+            {
+                fBufferFull.store(true);
+                return false;
+            }
+
             const uint64_t nMaxSendBuffer = GetMaxSendBuffer();
             nReserve = std::max(nReserve, std::max(uint64_t(1024), nMaxSendBuffer / 100));
             const uint64_t nRequired = nBuffered + vBytes.size() + bytes.size() + nReserve;
@@ -351,7 +377,7 @@ namespace LLP
                 }
 
                 /* A block's transaction bodies can exceed the normal queue
-                 * limit. Admit one such bundle only on an empty queue. */
+                 * limit. Admit one bounded bundle only on an empty queue. */
                 fOversized = true;
             }
 
