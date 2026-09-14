@@ -25,6 +25,7 @@ ________________________________________________________________________________
 
 #include <functional>
 #include <map>
+#include <vector>
 
 /* Global TAO namespace. */
 namespace TAO
@@ -285,7 +286,7 @@ namespace TAO
                 uint32_t nDepthScanned{0};
                 BlockState stateChild;
                 uint1024_t hashMissingPrev;
-                BlockState stateRecoveredPrev;
+                std::vector<BlockState> vRecoveredSuffix;
             };
 
 
@@ -297,6 +298,73 @@ namespace TAO
                 const uint1024_t hashState = stateOut.GetHash();
                 if(hashState == 0 || stateOut.nHeight != nHeight)
                     return false;
+
+                return true;
+            }
+
+
+            bool BuildHeightIndexedRepairSuffix(const uint32_t nMaxDepth, ChainHoleAudit& audit)
+            {
+                audit.fCanRepairFromHeight = false;
+                audit.vRecoveredSuffix.clear();
+
+                BlockState stateChild = audit.stateChild;
+                uint1024_t hashChild = stateChild.GetHash();
+                if(hashChild == 0)
+                    return debug::error(FUNCTION, "best-chain repair preflight failed: child hash is null");
+
+                const uint32_t nBound = std::max<uint32_t>(1, nMaxDepth);
+                while(stateChild.hashPrevBlock != 0 && audit.vRecoveredSuffix.size() < nBound)
+                {
+                    BlockState statePrevByHash;
+                    if(LLD::Ledger->ReadBlock(stateChild.hashPrevBlock, statePrevByHash))
+                    {
+                        const uint1024_t hashPrev = statePrevByHash.GetHash();
+                        if(hashPrev != stateChild.hashPrevBlock)
+                        {
+                            return debug::error(FUNCTION,
+                                "best-chain repair preflight failed: anchor hash mismatch expected ",
+                                stateChild.hashPrevBlock.SubString(), " but read ", hashPrev.SubString(),
+                                " for child height ", stateChild.nHeight, " hash ", hashChild.SubString());
+                        }
+
+                        if(stateChild.nHeight == 0 || statePrevByHash.nHeight + 1 != stateChild.nHeight)
+                        {
+                            return debug::error(FUNCTION,
+                                "best-chain repair preflight failed: anchor height mismatch child=",
+                                stateChild.nHeight, " prev=", statePrevByHash.nHeight, " childHash=",
+                                hashChild.SubString(), " prevHash=", hashPrev.SubString());
+                        }
+
+                        if(statePrevByHash.hashNextBlock != hashChild)
+                        {
+                            return debug::error(FUNCTION,
+                                "best-chain repair preflight failed: anchor successor mismatch at height ",
+                                statePrevByHash.nHeight, " hash ", hashPrev.SubString(), " expected next ",
+                                hashChild.SubString(), " but found ", statePrevByHash.hashNextBlock.SubString());
+                        }
+
+                        audit.fCanRepairFromHeight = !audit.vRecoveredSuffix.empty();
+                        return true;
+                    }
+
+                    if(stateChild.nHeight == 0)
+                        break;
+
+                    BlockState statePrevByHeight;
+                    if(!ReadRecoveryCandidateFromHeightIndex(stateChild.nHeight - 1, statePrevByHeight))
+                        return true;
+
+                    const uint1024_t hashPrevByHeight = statePrevByHeight.GetHash();
+                    if(hashPrevByHeight != stateChild.hashPrevBlock
+                    || statePrevByHeight.nHeight + 1 != stateChild.nHeight
+                    || statePrevByHeight.hashNextBlock != hashChild)
+                        return true;
+
+                    audit.vRecoveredSuffix.push_back(statePrevByHeight);
+                    stateChild = statePrevByHeight;
+                    hashChild = hashPrevByHeight;
+                }
 
                 return true;
             }
@@ -331,18 +399,24 @@ namespace TAO
                             stateWalk.nHeight, " hash ", hashWalk.SubString(), " references missing predecessor ",
                             stateWalk.hashPrevBlock.SubString());
 
-                        BlockState stateByHeight;
-                        if(stateWalk.nHeight > 0
-                        && ReadRecoveryCandidateFromHeightIndex(stateWalk.nHeight - 1, stateByHeight)
-                        && stateByHeight.GetHash() == stateWalk.hashPrevBlock
-                        && stateByHeight.hashNextBlock == hashWalk)
+                        const uint32_t nRepairDepth = (nBound > (nDepth + 1))
+                            ? (nBound - (nDepth + 1))
+                            : 1;
+                        if(BuildHeightIndexedRepairSuffix(nRepairDepth, audit))
                         {
-                            audit.fCanRepairFromHeight = true;
-                            audit.stateRecoveredPrev = stateByHeight;
-                            debug::log(0, FUNCTION,
-                                "located matching predecessor candidate via height index at height ",
-                                stateByHeight.nHeight, " hash ", stateByHeight.GetHash().SubString());
+                            if(audit.fCanRepairFromHeight)
+                            {
+                                const BlockState& stateHighestRecovered = audit.vRecoveredSuffix.front();
+                                const BlockState& stateLowestRecovered = audit.vRecoveredSuffix.back();
+                                debug::log(0, FUNCTION,
+                                    "located matching predecessor suffix via height index: recovered ",
+                                    audit.vRecoveredSuffix.size(), " hash alias(es) covering heights ",
+                                    stateLowestRecovered.nHeight, "..", stateHighestRecovered.nHeight,
+                                    " for child height ", stateWalk.nHeight, " hash ", hashWalk.SubString());
+                            }
                         }
+                        else
+                            return false;
 
                         return true;
                     }
@@ -408,7 +482,7 @@ namespace TAO
                         "from a trusted snapshot.");
                 }
 
-                if(!audit.fCanRepairFromHeight)
+                if(!audit.fCanRepairFromHeight || audit.vRecoveredSuffix.empty())
                 {
                     return debug::error(FUNCTION,
                         "best-chain repair could not locate a verified predecessor record for missing hash ",
@@ -423,13 +497,18 @@ namespace TAO
                     return debug::error(FUNCTION, "failed to begin best-chain repair transaction");
 
                 /* Discard unreadable cached data and preserve the sector shared with the height index. */
-                if(!LLD::Ledger->Erase(audit.hashMissingPrev, true)
-                || !LLD::Ledger->Index(audit.hashMissingPrev,
-                    std::make_pair(std::string("height"), audit.stateRecoveredPrev.nHeight)))
+                for(const auto& stateRecovered : audit.vRecoveredSuffix)
                 {
-                    LLD::TxnAbort();
-                    return debug::error(FUNCTION, "failed to restore missing predecessor block key ",
-                        audit.hashMissingPrev.SubString());
+                    const uint1024_t hashRecovered = stateRecovered.GetHash();
+                    if(hashRecovered == 0
+                    || !LLD::Ledger->Erase(hashRecovered, true)
+                    || !LLD::Ledger->Index(hashRecovered,
+                        std::make_pair(std::string("height"), stateRecovered.nHeight)))
+                    {
+                        LLD::TxnAbort();
+                        return debug::error(FUNCTION, "failed to restore missing predecessor block key ",
+                            hashRecovered.SubString());
+                    }
                 }
 
                 /* Validate the staged repair before making any mutation durable. */
@@ -452,18 +531,23 @@ namespace TAO
                     return debug::error(FUNCTION, "disk commit failed while restoring predecessor block key");
                 }
 
-                BlockState stateRestored;
-                if(!LLD::Ledger->ReadBlock(audit.hashMissingPrev, stateRestored)
-                || stateRestored.GetHash() != audit.hashMissingPrev)
+                for(const auto& stateRecovered : audit.vRecoveredSuffix)
                 {
-                    return debug::error(FUNCTION,
-                        "post-repair verification failed for restored predecessor block key ",
-                        audit.hashMissingPrev.SubString());
+                    const uint1024_t hashRecovered = stateRecovered.GetHash();
+                    BlockState stateRestored;
+                    if(!LLD::Ledger->ReadBlock(hashRecovered, stateRestored)
+                    || stateRestored.GetHash() != hashRecovered
+                    || stateRestored.nHeight != stateRecovered.nHeight)
+                    {
+                        return debug::error(FUNCTION,
+                            "post-repair verification failed for restored predecessor block key ",
+                            hashRecovered.SubString());
+                    }
                 }
 
                 debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
-                    "restored missing predecessor key ", audit.hashMissingPrev.SubString(),
-                    " using height-index recovery data");
+                    "restored ", audit.vRecoveredSuffix.size(), " missing predecessor key(s) ending at ",
+                    audit.hashMissingPrev.SubString(), " using height-index recovery data");
 
                 return true;
             }

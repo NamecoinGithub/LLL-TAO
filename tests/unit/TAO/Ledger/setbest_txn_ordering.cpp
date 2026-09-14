@@ -1899,6 +1899,8 @@ TEST_CASE("ChainState hardcoded-checkpoint startup recovery is safe-by-default a
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 
+
+
     SECTION("opt-in repair refuses rollback when ancestry walk is unreadable")
     {
         const auto fixture = BuildCheckpointChainFixture(34000, blocksGuard);
@@ -2205,6 +2207,29 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         REQUIRE(byHeight.hashNextBlock == 0);
     }
 
+    SECTION("repairchain restores a consecutive missing suffix when the height index proves it")
+    {
+        const auto fixture = BuildCheckpointChainFixture(38105, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+
+        REQUIRE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashOne));
+        REQUIRE(LLD::Ledger->HasBlock(fixture.hashTwo));
+
+        TAO::Ledger::BlockState restoredOne;
+        TAO::Ledger::BlockState restoredTwo;
+        REQUIRE(LLD::Ledger->ReadBlock(fixture.hashOne, restoredOne));
+        REQUIRE(LLD::Ledger->ReadBlock(fixture.hashTwo, restoredTwo));
+        REQUIRE(restoredOne.GetHash() == fixture.hashOne);
+        REQUIRE(restoredTwo.GetHash() == fixture.hashTwo);
+        REQUIRE(restoredOne.hashNextBlock == fixture.hashTwo);
+        REQUIRE(restoredTwo.hashNextBlock == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
     SECTION("failed ancestry revalidation aborts the staged predecessor repair")
     {
         auto fixture = BuildCheckpointChainFixture(38110, blocksGuard);
@@ -2268,6 +2293,24 @@ TEST_CASE("ChainState startup best-chain audit localizes and repairs near-tip pr
         REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+        REQUIRE_FALSE(LLD::HasOpenTransaction());
+    }
+
+    SECTION("repairchain refuses a consecutive suffix repair that never re-anchors to a verified predecessor")
+    {
+        auto fixture = BuildCheckpointChainFixture(38210, blocksGuard);
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(1), fixture.hashOne));
+        REQUIRE(LLD::Ledger->IndexBlock(uint32_t(2), fixture.hashTwo));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashTwo, true));
+        REQUIRE(LLD::Ledger->Erase(fixture.hashOne, true));
+
+        auto genesis = fixture.genesis;
+        genesis.hashNextBlock = 0;
+        REQUIRE(LLD::Ledger->WriteBlock(fixture.hashGenesis, genesis));
+
+        REQUIRE_FALSE(TAO::Ledger::ChainState::RunBestChainIntegrityAuditForTests(true, 16));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashOne));
+        REQUIRE_FALSE(LLD::Ledger->HasBlock(fixture.hashTwo));
         REQUIRE_FALSE(LLD::HasOpenTransaction());
     }
 }
@@ -2513,7 +2556,11 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["classification"] == "HASH_KEY_READABLE");
         REQUIRE(summary["hash_key"]["matches"] == true);
         REQUIRE(summary["height_index"]["matches"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"] == true);
         REQUIRE(summary["candidate"]["valid_child_link"] == true);
+        REQUIRE(summary["child_link"]["checked"] == true);
+        REQUIRE(summary["child_link"]["child_prev_matches_target"] == false);
+        REQUIRE(summary["child_link"]["hash_next_matches_child"] == false);
 
         REQUIRE(writer.Index(heightKey, other.GetHash()));
         summary = Run({target}, 0);
@@ -2546,6 +2593,7 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
         REQUIRE(summary["height_index"]["height"] == 42);
         REQUIRE(summary["height_index"]["matches"] == true);
         REQUIRE(summary["raw_scan"]["found"] == true);
+        REQUIRE(summary["alias_relation"]["same_sector"].is_null());
 
         REQUIRE(writer.Index(heightKey, other.GetHash()));
         summary = Run({target}, 0);
@@ -2729,6 +2777,41 @@ TEST_CASE("Offline audit CLI validates arguments and reports exact source eviden
     std::filesystem::remove(pathSector);
     std::filesystem::create_directory(pathSector);
     Run({target, "-auditblockstartfile=99999", "-lldmeters=1"}, 3);
+}
+
+{
+    const auto pathDuplicate = pathLedger / "datachain/_block.99998";
+    DataStream record(SER_LLD, LLD::DATABASE_VERSION);
+    record << std::string("block") << state;
+    std::ofstream stream(pathDuplicate, std::ios::binary);
+    WriteCompactSize(stream, record.size());
+    stream.write(reinterpret_cast<const char*>(record.Bytes().data()), record.size());
+
+    LLD::BinaryHashMap keychain(config::GetDataDir() + strDatabase + "/keychain/",
+        LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, nBuckets);
+    DataStream ssHashKey(SER_LLD, LLD::DATABASE_VERSION);
+    ssHashKey << hash;
+
+    DataStream ssHeightKey(SER_LLD, LLD::DATABASE_VERSION);
+    ssHeightKey << std::make_pair(std::string("height"), uint32_t(42));
+
+    LLD::SectorKey cHash;
+    REQUIRE(keychain.Get(ssHashKey.Bytes(), cHash));
+    LLD::SectorKey cHeight(cHash);
+    cHeight.nSectorFile = 99998;
+    cHeight.nSectorStart = 0;
+    cHeight.nSectorSize = record.size() + GetSizeOfCompactSize(record.size());
+    cHeight.SetKey(ssHeightKey.Bytes());
+    REQUIRE(keychain.Put(cHeight));
+
+    auto summary = Run({target, "-auditblockheight=42", "-auditblockstartfile=99998",
+        "-auditblockendfile=99999"}, 0);
+    REQUIRE(summary["status"] == "FOUND");
+    REQUIRE(summary["classification"] == "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS");
+    REQUIRE(summary["hash_key"]["matches"] == true);
+    REQUIRE(summary["height_index"]["matches"] == true);
+    REQUIRE(summary["alias_relation"]["comparable"] == true);
+    REQUIRE(summary["alias_relation"]["same_sector"] == false);
 }
 #endif
 

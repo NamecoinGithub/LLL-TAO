@@ -1563,6 +1563,10 @@ namespace LLD
             return false;
 
         result.fExists = true;
+        result.fKeychainOnly = (cKey.nSectorFile == 0 && cKey.nSectorSize == 0 && cKey.nSectorStart == 0);
+        result.nState = cKey.nState;
+        result.nSectorFile = cKey.nSectorFile;
+        result.nSectorStart = cKey.nSectorStart;
         result.nSectorSize = cKey.nSectorSize;
 
         /* Reject a sector size the writer could never produce before allocating for it. */

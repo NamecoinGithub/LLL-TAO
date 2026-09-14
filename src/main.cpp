@@ -285,6 +285,7 @@ namespace
         bool fHeightMatches = false;
         uint32_t nHeightChecked = 0;
         TAO::Ledger::BlockState stateByHeight;
+        TAO::Ledger::BlockState stateByChild;
         bool fExpectedHeightCheckPerformed = false;
         bool fExpectedHeightExists = false;
         bool fExpectedHeightReadable = false;
@@ -292,6 +293,7 @@ namespace
         TAO::Ledger::BlockState stateByExpectedHeight;
         LLD::BlockAuditAliasResult heightAlias;
         LLD::BlockAuditAliasResult expectedHeightAlias;
+        LLD::BlockAuditAliasResult childAlias;
 
         if(fHashKeyReadable)
         {
@@ -338,6 +340,26 @@ namespace
         const size_t nRawMatches = rawScan.vMatches.size();
         const bool fMultipleRawMatches = nRawMatches > 1;
         const bool fRawFound = rawScan.fFound;
+        const bool fHeightComparable = fHeightExists && hashAlias.fExists;
+        const bool fAliasSameSector = fHeightComparable
+            && hashAlias.nSectorFile == heightAlias.nSectorFile
+            && hashAlias.nSectorStart == heightAlias.nSectorStart
+            && hashAlias.nSectorSize == heightAlias.nSectorSize;
+
+        bool fChildExists = false;
+        bool fChildReadable = false;
+        bool fChildPrevMatchesTarget = false;
+        bool fHashNextMatchesChild = false;
+        bool fHeightNextMatchesChild = false;
+        if(fChildProvided)
+        {
+            fChildExists = pLedger->Exists(hashChild);
+            fChildReadable = pLedger->AuditReadBlockRecord(hashChild, stateByChild, childAlias);
+            fChildPrevMatchesTarget = fChildReadable && (stateByChild.hashPrevBlock == hashTarget);
+            fHashNextMatchesChild = fHashKeyReadable && (stateByHash.hashNextBlock == hashChild);
+            fHeightNextMatchesChild = fHeightReadable && fHeightMatches
+                && (stateByHeight.hashNextBlock == hashChild);
+        }
 
         std::string strClassification = "BLOCK_NOT_FOUND_IN_BOUNDED_SCAN";
         if(rawScan.fTruncatedRecord || rawScan.fMalformedRecord)
@@ -345,6 +367,8 @@ namespace
         else if((fHeightChecked && fHeightReadable && !fHeightMatches)
              || (fExpectedHeightCheckPerformed && fExpectedHeightReadable && !fExpectedHeightMatches))
             strClassification = "HEIGHT_INDEX_POINTS_TO_DIFFERENT_BLOCK";
+        else if(fHeightComparable && fHashKeyMatches && fHeightMatches && !fAliasSameSector)
+            strClassification = "HASH_HEIGHT_ALIAS_DIFFERENT_SECTORS";
         else if(fHashKeyExists && fHashKeyReadable && fHashKeyMatches)
             strClassification = "HASH_KEY_READABLE";
         else if(fHashKeyExists && fHashKeyReadable && !fHashKeyMatches)
@@ -378,6 +402,9 @@ namespace
                 " exists=", fHeightExists ? "true" : "false",
                 " readable=", fHeightReadable ? "true" : "false",
                 " matches=", fHeightMatches ? "true" : "false");
+            debug::log(0, "AUDITBLOCK alias_sector hash_exists=", hashAlias.fExists ? "true" : "false",
+                " height_exists=", fHeightExists ? "true" : "false",
+                " same_sector=", fHeightComparable ? (fAliasSameSector ? "true" : "false") : "unknown");
 
             if(fExpectedHeightCheckPerformed)
             {
@@ -389,6 +416,16 @@ namespace
         }
         else
             debug::log(0, "AUDITBLOCK height_index checked=false");
+
+        if(fChildProvided)
+        {
+            debug::log(0, "AUDITBLOCK child_link checked=true child=", hashChild.ToString(),
+                " child_exists=", fChildExists ? "true" : "false",
+                " child_readable=", fChildReadable ? "true" : "false",
+                " child_prev_matches_target=", fChildPrevMatchesTarget ? "true" : "false",
+                " hash_next_matches_child=", fHashNextMatchesChild ? "true" : "false",
+                " height_next_matches_child=", fHeightNextMatchesChild ? "true" : "false");
+        }
 
         for(size_t i = 0; i < nRawMatches; ++i)
         {
@@ -416,7 +453,11 @@ namespace
             {"exists", fHashKeyExists},
             {"readable", fHashKeyReadable},
             {"matches", fHashKeyMatches},
-            {"oversized", hashAlias.fOversized}
+            {"oversized", hashAlias.fOversized},
+            {"keychain_only", hashAlias.fKeychainOnly},
+            {"sector_file", hashAlias.fExists ? encoding::json(hashAlias.nSectorFile) : encoding::json(nullptr)},
+            {"sector_offset", hashAlias.fExists ? encoding::json(hashAlias.nSectorStart) : encoding::json(nullptr)},
+            {"sector_size", hashAlias.fExists ? encoding::json(hashAlias.nSectorSize) : encoding::json(nullptr)}
         };
         jSummary["height_index"] = {
             {"checked", fHeightChecked},
@@ -424,7 +465,11 @@ namespace
             {"exists", fHeightExists},
             {"readable", fHeightReadable},
             {"matches", fHeightMatches},
-            {"oversized", heightAlias.fOversized}
+            {"oversized", heightAlias.fOversized},
+            {"keychain_only", heightAlias.fKeychainOnly},
+            {"sector_file", heightAlias.fExists ? encoding::json(heightAlias.nSectorFile) : encoding::json(nullptr)},
+            {"sector_offset", heightAlias.fExists ? encoding::json(heightAlias.nSectorStart) : encoding::json(nullptr)},
+            {"sector_size", heightAlias.fExists ? encoding::json(heightAlias.nSectorSize) : encoding::json(nullptr)}
         };
         if(fExpectedHeightCheckPerformed)
         {
@@ -434,9 +479,33 @@ namespace
                 {"exists", fExpectedHeightExists},
                 {"readable", fExpectedHeightReadable},
                 {"matches", fExpectedHeightMatches},
-                {"oversized", expectedHeightAlias.fOversized}
+                {"oversized", expectedHeightAlias.fOversized},
+                {"keychain_only", expectedHeightAlias.fKeychainOnly},
+                {"sector_file", expectedHeightAlias.fExists ? encoding::json(expectedHeightAlias.nSectorFile) : encoding::json(nullptr)},
+                {"sector_offset", expectedHeightAlias.fExists ? encoding::json(expectedHeightAlias.nSectorStart) : encoding::json(nullptr)},
+                {"sector_size", expectedHeightAlias.fExists ? encoding::json(expectedHeightAlias.nSectorSize) : encoding::json(nullptr)}
             };
         }
+        jSummary["alias_relation"] = {
+            {"comparable", fHeightComparable},
+            {"same_sector", fHeightComparable ? encoding::json(fAliasSameSector) : encoding::json(nullptr)}
+        };
+        if(fChildProvided)
+        {
+            jSummary["child_link"] = {
+                {"checked", true},
+                {"hash", hashChild.ToString()},
+                {"exists", fChildExists},
+                {"readable", fChildReadable},
+                {"child_prev_matches_target", fChildPrevMatchesTarget},
+                {"hash_next_matches_child", fHashNextMatchesChild},
+                {"height_next_matches_child", fHeightNextMatchesChild},
+                {"sector_file", childAlias.fExists ? encoding::json(childAlias.nSectorFile) : encoding::json(nullptr)},
+                {"sector_offset", childAlias.fExists ? encoding::json(childAlias.nSectorStart) : encoding::json(nullptr)},
+                {"sector_size", childAlias.fExists ? encoding::json(childAlias.nSectorSize) : encoding::json(nullptr)}
+            };
+        }
+
         jSummary["raw_scan"] = {
             {"scan_start_file", rawScan.nScanStartFile},
             {"scan_end_file", rawScan.nScanEndFile},
