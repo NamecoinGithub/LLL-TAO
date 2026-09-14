@@ -1045,14 +1045,28 @@ namespace LLP
          * Clear any stale fBufferFull flag — the buffer has fully drained so the
          * latch is no longer meaningful.  Without this, a previous overflow can
          * leave fBufferFull permanently set after the buffer empties, causing
-         * respond() and other callers to perform unnecessary flush attempts. */
+         * respond() and other callers to perform unnecessary flush attempts.
+         *
+         * The recheck and latch clear must happen under SOCKET_MUTEX: WritePackets()
+         * buffers an oversized-bundle remainder and then sets fBufferFull while
+         * holding SOCKET_MUTEX, so an unsynchronized clear here could observe the
+         * pre-write empty buffer and then wipe the freshly set latch, leaving
+         * bytes buffered with the latch false and control packets rejected. */
         if(nBufferSize.load() == 0)
         {
-            /* Use compare_exchange to avoid clobbering a concurrent
-             * fBufferFull.store(true) from WritePacket(). */
-            bool expected = true;
-            fBufferFull.compare_exchange_strong(expected, false);
-            return 0;
+            RECURSIVE(SOCKET_MUTEX);
+
+            /* Recompute under the lock — the atomic snapshot above may be stale. */
+            const size_t nBuffered =
+                (vPriorityBuffer.size() - m_nPriorityFlushOffset)
+                + (vBuffer.size() - m_nFlushOffset);
+
+            if(nBuffered == 0)
+            {
+                bool expected = true;
+                fBufferFull.compare_exchange_strong(expected, false);
+                return 0;
+            }
         }
 
         /* maximum transmission unit. */

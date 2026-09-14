@@ -2930,9 +2930,12 @@ namespace LLP
                         ssPacket >> block;
                         CloseTxResponseWindowForBlock(block.GetHash());
 
-                        /* Process the block. */
+                        /* Process the block. Session ids are zero before VERSION
+                         * establishes a session and while no sync is active, so a
+                         * nonzero match is required to credit sync-only counters. */
                         TAO::Ledger::Process(block, nStatus, this, false,
-                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
+                            TAO::Ledger::nSyncSession.load() != 0
+                            && nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         break;
                     }
@@ -2964,9 +2967,10 @@ namespace LLP
                                                LLP::FalconConstants::SUBMIT_BLOCK_PRIME_OFFSETS_MAX, ")");
                         }
 
-                        /* Process the block. */
+                        /* Process the block. Nonzero session match required (see LEGACY above). */
                         TAO::Ledger::Process(block, nStatus, this, false,
-                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
+                            TAO::Ledger::nSyncSession.load() != 0
+                            && nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         /* Check for missing transactions. */
                         if(nStatus & TAO::Ledger::PROCESS::INCOMPLETE)
@@ -3284,9 +3288,10 @@ namespace LLP
                                                LLP::FalconConstants::SUBMIT_BLOCK_PRIME_OFFSETS_MAX, ")");
                         }
 
-                        /* Process the block. */
+                        /* Process the block. Nonzero session match required (see LEGACY above). */
                         TAO::Ledger::Process(block, nStatus, nullptr, false,
-                            nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
+                            TAO::Ledger::nSyncSession.load() != 0
+                            && nCurrentSession == TAO::Ledger::nSyncSession.load() && !fSynchronized.load());
 
                         /* Check for duplicate and ask for previous block. */
                         if(!(nStatus & TAO::Ledger::PROCESS::DUPLICATE)

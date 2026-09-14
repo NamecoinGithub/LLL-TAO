@@ -312,10 +312,33 @@ namespace TAO
                 tx.hashCache = hashThis;
                 lock.unlock();
 
-                Accept(tx);
+                bool fCommitted = false;
+                Accept(tx, nullptr, &fCommitted);
                 lock.lock();
                 if(!mapLedger.count(hashThis))
                 {
+                    /* Transient admission failures (e.g. deferred local state,
+                     * a memory transaction failing to begin) must not lose the
+                     * detached dependent: re-park it for retry unless Accept
+                     * recorded it in another tracked set, it committed and was
+                     * concurrently removed, or the parent slot was re-occupied. */
+                    if(!fCommitted &&
+                       !mapRejected.count(hashThis) &&
+                       !mapConflicts.count(hashThis) &&
+                       !mapConflictDependentsByIndex.count(hashThis) &&
+                       !mapOrphansByIndex.count(hashThis) &&
+                       !mapConflictDependents.count(hashTx))
+                    {
+                        mapConflictDependents[hashTx] = tx;
+                        mapConflictDependentsByIndex[hashThis] = tx;
+
+                        debug::log(0, FUNCTION, "CONFLICT-DEPENDENT tx ",
+                            hashThis.SubString(), " retained after transient failure: ",
+                            debug::GetLastError());
+
+                        return;
+                    }
+
                     debug::log(0, FUNCTION, "CONFLICT-DEPENDENT tx ",
                         hashThis.SubString(), " not re-admitted: ",
                         debug::GetLastError());
@@ -361,20 +384,29 @@ namespace TAO
 
 
         /* Accepts a transaction with validation rules. */
-        bool Mempool::Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode)
+        bool Mempool::Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode, bool* pfCommitted)
         {
+            if(pfCommitted)
+                *pfCommitted = false;
+
             try
             {
                 std::vector<uint512_t> vResolved;
                 bool fCommitted = false;
-                const bool fAccepted = AcceptTransaction(tx, pnode, vResolved, fCommitted);
+                AcceptTransaction(tx, pnode, vResolved, fCommitted);
+                if(pfCommitted)
+                    *pfCommitted = fCommitted;
 
                 /* Recursive admission must not inherit either lock from its parent. */
                 for(const auto& hash : vResolved)
                     ProcessConflictDependents(hash);
 
+                /* Non-committed short-circuits (e.g. an already-queued orphan)
+                 * must not report successful admission: callers such as the
+                 * Tritium transaction handler treat true as a committed accept
+                 * and relay / reset orphan state on it. */
                 if(!fCommitted)
-                    return fAccepted;
+                    return false;
 
                 const uint512_t hashTx = tx.GetHash();
                 if(nOrphanDrainDepth == 0)
@@ -507,328 +539,308 @@ namespace TAO
                 if(mapOrphans.count(tx.hashPrevTx))
                     return true;
 
-                /* Check for orphans and conflicts when not first transaction. */
-                if(!tx.IsFirst())
-                {
-                    /* Check memory and disk for previous transaction. */
-                    if(!LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
-                       (mapOrphansByIndex.count(tx.hashPrevTx) &&
-                        !mapLedger.count(tx.hashPrevTx) &&
-                        !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK)))
-                    {
-                        /* Debug output. */
-                        debug::log(0, FUNCTION, "tx ", hashTx.SubString(), " ",
-                            tx.nSequence, " prev ", tx.hashPrevTx.SubString(),
-                            " ORPHAN in ", std::dec, timer.ElapsedMilliseconds(), " ms");
-
-                        /* Push to orphan queue. */
-                        mapOrphans[tx.hashPrevTx] = tx;
-                        setOrphansByIndex.insert(hashTx);
-                        mapOrphansByIndex[hashTx] = tx;
-
-                        /* Increment consecutive orphans. */
-                        if(pnode)
-                            ++pnode->nConsecutiveOrphans;
-
-                        lock.unlock();
-
-                        /* Ask for our previous transaction now. */
-                        if(LLP::TRITIUM_SERVER)
-                        {
-                            /* Get a random node in case we have an unreliable node that gave us an ORPHAN */
-                            std::shared_ptr<LLP::TritiumNode> pCheck =
-                                LLP::TRITIUM_SERVER->RandomConnection();
-
-                            /* Ask the random node for our orphan data. */
-                            if(pCheck)
-                                pCheck->PushMessage(LLP::TritiumNode::ACTION::GET, uint8_t(LLP::TritiumNode::TYPES::TRANSACTION), tx.hashPrevTx);
-                        }
-
-                        return false;
-                    }
-
-                    /* True double-spend against a live mempool tip: another
-                     * in-pool transaction already claims this hashPrevTx.
-                     * Option C: this is a ROOT conflict (direct tip disagreement). */
-                    if(mapClaimed.count(tx.hashPrevTx))
-                    {
-                        /* We only need to output debug info and insert if this is a new conflict.
-                         * [B2] Matches upstream Nexusoft/LLL-TAO: avoids repeated ERROR-level log
-                         * spam for a conflict that has already been recorded, and relays the
-                         * conflicted transaction so peers (and our own re-sync logic) can resolve
-                         * it once the fork/reorg settles instead of it becoming a silent dead end. */
-                        if(!mapConflicts.count(hashTx))
-                        {
-                            debug::error(FUNCTION, "CONFLICT: prev tx CLAIMED ", tx.hashPrevTx.SubString());
-                            AddConflictRoot(tx);
-                            lock.unlock();
-
-                            /* Relay the conflict if we are running over tritium protocol. */
-                            if(pnode && LLP::TRITIUM_SERVER)
-                            {
-                                LLP::TRITIUM_SERVER->Relay
-                                (
-                                    LLP::TritiumNode::ACTION::NOTIFY,
-                                    uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
-                                    hashTx
-                                );
-                            }
-                        }
-
-                        return false;
-                    }
-
-                    /* Predecessor is itself a conflict DAG node (root OR parked
-                     * dependent). Option C:
-                     *
-                     * Historical behavior cascaded every descendant into
-                     * mapConflicts with an ERROR log + NOTIFY relay. That made a
-                     * handful of seed conflicts (visible as mempool_conflicts=N
-                     * on BESTCHAIN while mempool_size=0) explode into a multi-
-                     * second ERROR flood when peers offered long sigchain tails,
-                     * and the relay amplified the same storm across the mesh.
-                     * Best-chain advancement is unaffected (conflicts are
-                     * mempool-only), which is why operators see the node "power
-                     * through" the spam while BESTCHAIN keeps moving — and why a
-                     * restart (which wipes the DAG) clears the symptom.
-                     *
-                     * Correct handling:
-                     *  1. If the conflicted/dependent predecessor is now confirmed
-                     *     on disk, drop the stale DAG markers and continue Accept
-                     *     so the child can validate against ReadLast normally;
-                     *     also drain any parked dependents of that parent.
-                     *  2. Otherwise soft-park the child as a DEPENDENT (not a
-                     *     root) WITHOUT ERROR and WITHOUT relaying. Roots stay in
-                     *     mapConflicts for Check() reconciliation; dependents
-                     *     re-evaluate via ProcessConflictDependents when the
-                     *     root resolves, or when peers re-offer after eviction. */
-                    if(IsConflictNode(tx.hashPrevTx))
-                    {
-                        if(LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK))
-                        {
-                            debug::log(1, FUNCTION, "stale CONFLICT DAG marker for confirmed prev ",
-                                tx.hashPrevTx.SubString(), "; clearing and re-evaluating");
-
-                            /* Arm unconditionally covering both root-self-clear
-                             * and dependent-self-clear. EraseConflictRoot does
-                             * not drop a parked tail, so a later Accept failure
-                             * after clearing hashTx as a root would otherwise
-                             * leave grandchildren keyed under a hash that is no
-                             * longer a live conflict node. DropConflictDependents
-                             * is a no-op when no tail exists. */
-                            depTailGuard.Arm();
-
-                            /* Drop any stale marker for THIS tx first so the
-                             * dependent walk cannot re-enter Accept(hashTx)
-                             * while we are already accepting it. */
-                            EraseConflictRoot(hashTx);
-                            if(mapConflictDependentsByIndex.count(hashTx))
-                            {
-                                const TAO::Ledger::Transaction& txSelf =
-                                    mapConflictDependentsByIndex[hashTx];
-                                mapConflictDependents.erase(txSelf.hashPrevTx);
-                                mapConflictDependentsByIndex.erase(hashTx);
-                            }
-
-                            /* Prev may be a root or a parked dependent. */
-                            if(mapConflicts.count(tx.hashPrevTx))
-                            {
-                                EraseConflictRoot(tx.hashPrevTx);
-                                vResolved.push_back(tx.hashPrevTx);
-                            }
-                            else if(mapConflictDependentsByIndex.count(tx.hashPrevTx))
-                            {
-                                const TAO::Ledger::Transaction& txPrevDep =
-                                    mapConflictDependentsByIndex[tx.hashPrevTx];
-                                mapConflictDependents.erase(txPrevDep.hashPrevTx);
-                                mapConflictDependentsByIndex.erase(tx.hashPrevTx);
-                                vResolved.push_back(tx.hashPrevTx);
-                            }
-
-                            /* Stale-marker clear may have removed the last root
-                             * for this genesis. Drop DEFERRED/UNKNOWN retry and
-                             * once-per-genesis diagnostic state so a future,
-                             * unrelated conflict does not inherit stale counters
-                             * and get evicted prematurely. */
-                            if(!mapConflictRootByGenesis.count(tx.hashGenesis))
-                                ClearGenesisConflictState(tx.hashGenesis);
-
-                            /* Fall through to ReadLast / Verify path. */
-                        }
-                        else
-                        {
-                            ParkConflictDependent(tx);
-                            return false;
-                        }
-                    }
-
-                    /* Get the last hash. */
-                    uint512_t hashLast = 0;
-                    if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL))
-                        return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: Failed to read hash last");
-
-                    /* Check for conflicts against the live tip — ROOT only. */
-                    if(tx.hashPrevTx != hashLast)
-                    {
-                        /* We only need to output debug info and insert if this is a new conflict. [B2] */
-                        if(!mapConflicts.count(hashTx))
-                        {
-                            /* Option C: root-only insert (no descendant cascade). */
-                            AddConflictRoot(tx);
-                            lock.unlock();
-
-                            /* Relay the conflict if we are running over tritium protocol, so the
-                             * genesis's canonical last-hash and the conflicted tx are both
-                             * re-announced. This gives peers (and this node, via its own GET
-                             * follow-up) a chance to re-sync the sigchain once the fork resolves,
-                             * rather than leaving the transaction permanently stranded. */
-                            if(pnode && LLP::TRITIUM_SERVER)
-                            {
-                                LLP::TRITIUM_SERVER->Relay
-                                (
-                                    LLP::TritiumNode::ACTION::NOTIFY,
-                                    uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
-                                    hashLast
-                                );
-
-                                /* Relay the transaction notification. */
-                                LLP::TRITIUM_SERVER->Relay
-                                (
-                                    LLP::TritiumNode::ACTION::NOTIFY,
-                                    uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
-                                    hashTx
-                                );
-                            }
-                        }
-
-                        return false;
-                    }
-                }
-                else if(tx.IsFirst() && LLD::Ledger->HasFirst(tx.hashGenesis))
-                {
-                    /* Duplicate genesis is a ROOT conflict. [B2] */
-                    if(!mapConflicts.count(hashTx))
-                    {
-                        debug::error(FUNCTION, "CONFLICT: duplicate genesis-id ", tx.hashGenesis.SubString());
-                        AddConflictRoot(tx);
-                    }
-
-                    return false;
-                }
-
-                /* Never wait for the coordinator while holding the mempool.
-                 * Block commits take these locks in the opposite direction. */
+                /* All LLD-dependent classification (HasTx / HasFirst / ReadLast)
+                 * must run while the transaction coordinator is held: those reads
+                 * consult staged state (pTransaction), so classifying against a
+                 * block commit that later aborts would leave a stale orphan or
+                 * conflict entry behind. Never wait for the coordinator while
+                 * holding the mempool — block commits take these locks in the
+                 * opposite direction. */
                 lock.unlock();
+
+                /* Network actions recorded during classification and performed
+                 * only after the coordinator has been released. */
+                bool fClassified  = false;
+                bool fRequestPrev = false;
+                std::vector<uint512_t> vRelay;
                 {
                     LLD::TransactionCoordinatorGuard coordinator;
                     RECURSIVE(MUTEX);
 
-                    /* Classification above is advisory until both locks are held:
-                     * another admission or block may have changed the live tip. */
+                    /* In-memory state may have changed while unlocked. */
                     if(mapLedger.count(hashTx) || mapRejected.count(tx.hashPrevTx))
                         return false;
+                    if(mapOrphans.count(tx.hashPrevTx))
+                        return true;
 
-                    if(tx.IsFirst())
+                    /* Check for orphans and conflicts when not first transaction. */
+                    if(!tx.IsFirst())
                     {
-                        if(Has(tx.hashGenesis) || LLD::Ledger->HasFirst(tx.hashGenesis))
-                        {
-                            AddConflictRoot(tx);
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        /* Predecessor disappeared while waiting for the
-                         * coordinator (e.g. evicted): this is an ORPHAN again,
-                         * not a conflict. Re-park it for retry. */
+                        /* Check memory and disk for previous transaction. */
                         if(!LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
                            (mapOrphansByIndex.count(tx.hashPrevTx) &&
                             !mapLedger.count(tx.hashPrevTx) &&
                             !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK)))
                         {
-                            mapOrphans[tx.hashPrevTx] = tx;
-                            setOrphansByIndex.insert(hashTx);
-                            mapOrphansByIndex[hashTx] = tx;
-                            return false;
+                            /* Debug output. */
+                            debug::log(0, FUNCTION, "tx ", hashTx.SubString(), " ",
+                                tx.nSequence, " prev ", tx.hashPrevTx.SubString(),
+                                " ORPHAN in ", std::dec, timer.ElapsedMilliseconds(), " ms");
+
+                            /* Push to orphan queue. mapOrphans keeps one child
+                             * per parent: reconcile an occupied slot instead of
+                             * displacing it, which would strand the previous
+                             * occupant in the by-index maps with no drain path. */
+                            const auto itSlot = mapOrphans.find(tx.hashPrevTx);
+                            if(itSlot == mapOrphans.end())
+                            {
+                                mapOrphans[tx.hashPrevTx] = tx;
+                                setOrphansByIndex.insert(hashTx);
+                                mapOrphansByIndex[hashTx] = tx;
+                            }
+                            else if(itSlot->second.GetHash() == hashTx)
+                            {
+                                setOrphansByIndex.insert(hashTx);
+                                mapOrphansByIndex[hashTx] = tx;
+                            }
+
+                            /* Increment consecutive orphans. */
+                            if(pnode)
+                                ++pnode->nConsecutiveOrphans;
+
+                            /* Ask for our previous transaction once unlocked. */
+                            fRequestPrev = true;
+                            fClassified  = true;
                         }
 
-                        /* Direct tip disagreement is a ROOT conflict. */
-                        if(mapClaimed.count(tx.hashPrevTx))
+                        /* True double-spend against a live mempool tip: another
+                         * in-pool transaction already claims this hashPrevTx.
+                         * Option C: this is a ROOT conflict (direct tip disagreement). */
+                        else if(mapClaimed.count(tx.hashPrevTx))
                         {
-                            AddConflictRoot(tx);
-                            return false;
+                            /* We only need to output debug info and insert if this is a new conflict.
+                             * [B2] Matches upstream Nexusoft/LLL-TAO: avoids repeated ERROR-level log
+                             * spam for a conflict that has already been recorded, and relays the
+                             * conflicted transaction so peers (and our own re-sync logic) can resolve
+                             * it once the fork/reorg settles instead of it becoming a silent dead end. */
+                            if(!mapConflicts.count(hashTx))
+                            {
+                                debug::error(FUNCTION, "CONFLICT: prev tx CLAIMED ", tx.hashPrevTx.SubString());
+                                AddConflictRoot(tx);
+
+                                /* Relay the conflict if we are running over tritium protocol. */
+                                if(pnode)
+                                    vRelay.push_back(hashTx);
+                            }
+
+                            fClassified = true;
                         }
-
-                        /* Predecessor became a conflict DAG node: soft-park as
-                         * a DEPENDENT to preserve the root-only invariant. */
-                        if(IsConflictNode(tx.hashPrevTx))
+                        else
                         {
-                            ParkConflictDependent(tx);
-                            return false;
-                        }
+                            /* Predecessor is itself a conflict DAG node (root OR parked
+                             * dependent). Option C:
+                             *
+                             * Historical behavior cascaded every descendant into
+                             * mapConflicts with an ERROR log + NOTIFY relay. That made a
+                             * handful of seed conflicts (visible as mempool_conflicts=N
+                             * on BESTCHAIN while mempool_size=0) explode into a multi-
+                             * second ERROR flood when peers offered long sigchain tails,
+                             * and the relay amplified the same storm across the mesh.
+                             * Best-chain advancement is unaffected (conflicts are
+                             * mempool-only), which is why operators see the node "power
+                             * through" the spam while BESTCHAIN keeps moving — and why a
+                             * restart (which wipes the DAG) clears the symptom.
+                             *
+                             * Correct handling:
+                             *  1. If the conflicted/dependent predecessor is now confirmed
+                             *     on disk, drop the stale DAG markers and continue Accept
+                             *     so the child can validate against ReadLast normally;
+                             *     also drain any parked dependents of that parent.
+                             *  2. Otherwise soft-park the child as a DEPENDENT (not a
+                             *     root) WITHOUT ERROR and WITHOUT relaying. Roots stay in
+                             *     mapConflicts for Check() reconciliation; dependents
+                             *     re-evaluate via ProcessConflictDependents when the
+                             *     root resolves, or when peers re-offer after eviction. */
+                            if(IsConflictNode(tx.hashPrevTx))
+                            {
+                                if(LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK))
+                                {
+                                    debug::log(1, FUNCTION, "stale CONFLICT DAG marker for confirmed prev ",
+                                        tx.hashPrevTx.SubString(), "; clearing and re-evaluating");
 
-                        uint512_t hashLast = 0;
-                        if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL))
-                            return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: Failed to read hash last");
+                                    /* Arm unconditionally covering both root-self-clear
+                                     * and dependent-self-clear. EraseConflictRoot does
+                                     * not drop a parked tail, so a later Accept failure
+                                     * after clearing hashTx as a root would otherwise
+                                     * leave grandchildren keyed under a hash that is no
+                                     * longer a live conflict node. DropConflictDependents
+                                     * is a no-op when no tail exists. */
+                                    depTailGuard.Arm();
 
-                        if(hashLast != tx.hashPrevTx)
-                        {
-                            /* A moving tip is retryable, not an absolute rejection. */
-                            AddConflictRoot(tx);
-                            return false;
+                                    /* Drop any stale marker for THIS tx first so the
+                                     * dependent walk cannot re-enter Accept(hashTx)
+                                     * while we are already accepting it. */
+                                    EraseConflictRoot(hashTx);
+                                    if(mapConflictDependentsByIndex.count(hashTx))
+                                    {
+                                        const TAO::Ledger::Transaction& txSelf =
+                                            mapConflictDependentsByIndex[hashTx];
+                                        mapConflictDependents.erase(txSelf.hashPrevTx);
+                                        mapConflictDependentsByIndex.erase(hashTx);
+                                    }
+
+                                    /* Prev may be a root or a parked dependent. */
+                                    if(mapConflicts.count(tx.hashPrevTx))
+                                    {
+                                        EraseConflictRoot(tx.hashPrevTx);
+                                        vResolved.push_back(tx.hashPrevTx);
+                                    }
+                                    else if(mapConflictDependentsByIndex.count(tx.hashPrevTx))
+                                    {
+                                        const TAO::Ledger::Transaction& txPrevDep =
+                                            mapConflictDependentsByIndex[tx.hashPrevTx];
+                                        mapConflictDependents.erase(txPrevDep.hashPrevTx);
+                                        mapConflictDependentsByIndex.erase(tx.hashPrevTx);
+                                        vResolved.push_back(tx.hashPrevTx);
+                                    }
+
+                                    /* Stale-marker clear may have removed the last root
+                                     * for this genesis. Drop DEFERRED/UNKNOWN retry and
+                                     * once-per-genesis diagnostic state so a future,
+                                     * unrelated conflict does not inherit stale counters
+                                     * and get evicted prematurely. */
+                                    if(!mapConflictRootByGenesis.count(tx.hashGenesis))
+                                        ClearGenesisConflictState(tx.hashGenesis);
+
+                                    /* Fall through to ReadLast / Verify path. */
+                                }
+                                else
+                                {
+                                    ParkConflictDependent(tx);
+                                    fClassified = true;
+                                }
+                            }
+
+                            if(!fClassified)
+                            {
+                                /* Get the last hash. */
+                                uint512_t hashLast = 0;
+                                if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL))
+                                    return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: Failed to read hash last");
+
+                                /* Check for conflicts against the live tip — ROOT only. */
+                                if(tx.hashPrevTx != hashLast)
+                                {
+                                    /* We only need to output debug info and insert if this is a new conflict. [B2] */
+                                    if(!mapConflicts.count(hashTx))
+                                    {
+                                        /* Option C: root-only insert (no descendant cascade).
+                                         * A moving tip is retryable, not an absolute rejection. */
+                                        AddConflictRoot(tx);
+
+                                        /* Relay the conflict if we are running over tritium protocol, so the
+                                         * genesis's canonical last-hash and the conflicted tx are both
+                                         * re-announced. This gives peers (and this node, via its own GET
+                                         * follow-up) a chance to re-sync the sigchain once the fork resolves,
+                                         * rather than leaving the transaction permanently stranded. */
+                                        if(pnode)
+                                        {
+                                            vRelay.push_back(hashLast);
+                                            vRelay.push_back(hashTx);
+                                        }
+                                    }
+
+                                    fClassified = true;
+                                }
+                            }
                         }
                     }
-
-                    /* Verify prestates against the same state that Connect commits. */
-                    if(!tx.Verify(FLAGS::MEMPOOL))
+                    else if(Has(tx.hashGenesis) || LLD::Ledger->HasFirst(tx.hashGenesis))
                     {
-                        mapRejected.insert(hashTx);
-                        return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
-                    }
-
-                    /* Connect transaction in memory. */
-                    LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
-                    if(!transaction)
-                        return debug::error(FUNCTION, "failed to begin mempool transaction");
-                    if(!tx.Connect(FLAGS::MEMPOOL))
-                    {
-                        /* Abort memory commits on failures. */
-                        LLD::TxnAbort(FLAGS::MEMPOOL);
-
-                        /* Check if Transaction::Connect() classified this as a
-                         * local-state-dependent failure (e.g. coinbase appears
-                         * immature at our stale local height but would pass at
-                         * the peer-advertised best height). In that case do NOT
-                         * blacklist the tx: peers must be able to re-offer it
-                         * once our height advances. */
-                        const AdmissibilityClass nClass = TakeLastConnectClass();
-                        if(nClass == AdmissibilityClass::DEFERRED_LOCAL_STATE)
+                        /* Duplicate genesis is a ROOT conflict. [B2] */
+                        if(!mapConflicts.count(hashTx))
                         {
-                            debug::warning(FUNCTION,
-                                "=== STRANDED_STATE_DETECTED === tx ", hashTx.SubString(),
-                                " deferred (local state stale): ", debug::GetLastError(),
-                                " — will retry when height advances");
-                            return false;
+                            debug::error(FUNCTION, "CONFLICT: duplicate genesis-id ", tx.hashGenesis.SubString());
+                            AddConflictRoot(tx);
                         }
 
-                        mapRejected.insert(hashTx);
-                        return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                        fClassified = true;
                     }
 
-                    /* Commit new memory into database states. */
-                    if(!LLD::TxnCommit(FLAGS::MEMPOOL))
-                        return debug::error(FUNCTION, "failed to commit mempool transaction");
+                    if(!fClassified)
+                    {
+                        /* Verify prestates against the same state that Connect commits. */
+                        if(!tx.Verify(FLAGS::MEMPOOL))
+                        {
+                            mapRejected.insert(hashTx);
+                            return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                        }
 
-                    /* Set the internal memory. */
-                    mapLedger[hashTx] = tx;
+                        /* Connect transaction in memory. */
+                        LLD::TransactionGuard transaction(FLAGS::MEMPOOL);
+                        if(!transaction)
+                            return debug::error(FUNCTION, "failed to begin mempool transaction");
+                        if(!tx.Connect(FLAGS::MEMPOOL))
+                        {
+                            /* Abort memory commits on failures. */
+                            LLD::TxnAbort(FLAGS::MEMPOOL);
 
-                    /* Update map claimed if not first tx. */
-                    if(!tx.IsFirst())
-                        mapClaimed[tx.hashPrevTx] = hashTx;
+                            /* Check if Transaction::Connect() classified this as a
+                             * local-state-dependent failure (e.g. coinbase appears
+                             * immature at our stale local height but would pass at
+                             * the peer-advertised best height). In that case do NOT
+                             * blacklist the tx: peers must be able to re-offer it
+                             * once our height advances. */
+                            const AdmissibilityClass nClass = TakeLastConnectClass();
+                            if(nClass == AdmissibilityClass::DEFERRED_LOCAL_STATE)
+                            {
+                                debug::warning(FUNCTION,
+                                    "=== STRANDED_STATE_DETECTED === tx ", hashTx.SubString(),
+                                    " deferred (local state stale): ", debug::GetLastError(),
+                                    " — will retry when height advances");
+                                return false;
+                            }
 
-                    /* Success path owns the tail drain; do not drop on scope exit. */
-                    depTailGuard.Disarm();
-                    fCommitted = true;
+                            mapRejected.insert(hashTx);
+                            return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
+                        }
+
+                        /* Commit new memory into database states. */
+                        if(!LLD::TxnCommit(FLAGS::MEMPOOL))
+                            return debug::error(FUNCTION, "failed to commit mempool transaction");
+
+                        /* Set the internal memory. */
+                        mapLedger[hashTx] = tx;
+
+                        /* Update map claimed if not first tx. */
+                        if(!tx.IsFirst())
+                            mapClaimed[tx.hashPrevTx] = hashTx;
+
+                        /* Success path owns the tail drain; do not drop on scope exit. */
+                        depTailGuard.Disarm();
+                        fCommitted = true;
+                    }
+                }
+
+                /* Deferred network actions — never performed while holding the
+                 * coordinator, which would stall block commits on socket I/O. */
+                if(fClassified)
+                {
+                    if(fRequestPrev && LLP::TRITIUM_SERVER)
+                    {
+                        /* Get a random node in case we have an unreliable node that gave us an ORPHAN */
+                        std::shared_ptr<LLP::TritiumNode> pCheck =
+                            LLP::TRITIUM_SERVER->RandomConnection();
+
+                        /* Ask the random node for our orphan data. */
+                        if(pCheck)
+                            pCheck->PushMessage(LLP::TritiumNode::ACTION::GET, uint8_t(LLP::TritiumNode::TYPES::TRANSACTION), tx.hashPrevTx);
+                    }
+
+                    if(LLP::TRITIUM_SERVER)
+                    {
+                        for(const auto& hashRelay : vRelay)
+                        {
+                            LLP::TRITIUM_SERVER->Relay
+                            (
+                                LLP::TritiumNode::ACTION::NOTIFY,
+                                uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
+                                hashRelay
+                            );
+                        }
+                    }
+
+                    return false;
                 }
 
                 /* Debug output. */
@@ -896,7 +908,8 @@ namespace TAO
                 lock.unlock();
 
                 /* Accept the transaction into memory pool. */
-                Accept(tx);
+                bool fCommitted = false;
+                Accept(tx, nullptr, &fCommitted);
                 lock.lock();
                 if(!mapLedger.count(hashThis))
                 {
@@ -904,11 +917,16 @@ namespace TAO
                      * a memory transaction failing to begin) must not lose the
                      * orphan: restore the detached indexes so the transaction
                      * is retried when its state becomes admissible, unless
-                     * Accept already recorded it in another tracked set. */
-                    if(!mapRejected.count(hashThis) &&
+                     * Accept already recorded it in another tracked set. A
+                     * committed admission that is now absent was explicitly
+                     * removed (e.g. Mempool::Remove) and must NOT be restored.
+                     * Never displace a parent slot re-occupied while unlocked. */
+                    if(!fCommitted &&
+                       !mapRejected.count(hashThis) &&
                        !mapConflicts.count(hashThis) &&
                        !mapConflictDependentsByIndex.count(hashThis) &&
-                       !mapOrphansByIndex.count(hashThis))
+                       !mapOrphansByIndex.count(hashThis) &&
+                       !mapOrphans.count(hashTx))
                     {
                         mapOrphans[hashTx] = tx;
                         setOrphansByIndex.insert(hashThis);
@@ -1224,7 +1242,23 @@ namespace TAO
                     RECURSIVE(MUTEX);
                     fLive = mapLedger.count(hashTx);
                     if(!fAccepted && !fLive)
+                    {
+                        /* Transient admission failures (e.g. the mempool
+                         * transaction failing to begin or commit) must not lose
+                         * the detached root: restore it unless Accept recorded
+                         * a definitive rejection/conflict or re-parked it,
+                         * matching the transient handling of orphan drains. */
+                        if(!mapRejected.count(hashTx) &&
+                           !mapConflicts.count(hashTx) &&
+                           !mapConflictDependentsByIndex.count(hashTx) &&
+                           !mapOrphansByIndex.count(hashTx))
+                        {
+                            AddConflictRoot(tx);
+                            continue;
+                        }
+
                         DropConflictDependents(hashTx);
+                    }
                 }
 
                 if(fAccepted || fLive)

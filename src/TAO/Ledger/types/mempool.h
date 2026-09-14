@@ -393,11 +393,13 @@ namespace TAO
              *
              *  @param[in] tx The transaction to add.
              *  @param[in] pnode The node that transaction is accepted from.
+             *  @param[out] pfCommitted Optional: set true only when this call
+             *              committed the transaction into the live mempool.
              *
-             *  @return true if added.
+             *  @return true if committed into the mempool.
              *
              **/
-            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr);
+            bool Accept(const TAO::Ledger::Transaction& tx, LLP::TritiumNode* pnode = nullptr, bool* pfCommitted = nullptr);
 
 
             /** Accept
