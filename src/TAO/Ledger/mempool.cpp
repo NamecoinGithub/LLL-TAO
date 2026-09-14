@@ -738,12 +738,40 @@ namespace TAO
                     }
                     else
                     {
+                        /* Predecessor disappeared while waiting for the
+                         * coordinator (e.g. evicted): this is an ORPHAN again,
+                         * not a conflict. Re-park it for retry. */
+                        if(!LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
+                           (mapOrphansByIndex.count(tx.hashPrevTx) &&
+                            !mapLedger.count(tx.hashPrevTx) &&
+                            !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::BLOCK)))
+                        {
+                            mapOrphans[tx.hashPrevTx] = tx;
+                            setOrphansByIndex.insert(hashTx);
+                            mapOrphansByIndex[hashTx] = tx;
+                            return false;
+                        }
+
+                        /* Direct tip disagreement is a ROOT conflict. */
+                        if(mapClaimed.count(tx.hashPrevTx))
+                        {
+                            AddConflictRoot(tx);
+                            return false;
+                        }
+
+                        /* Predecessor became a conflict DAG node: soft-park as
+                         * a DEPENDENT to preserve the root-only invariant. */
+                        if(IsConflictNode(tx.hashPrevTx))
+                        {
+                            ParkConflictDependent(tx);
+                            return false;
+                        }
+
                         uint512_t hashLast = 0;
-                        if(mapClaimed.count(tx.hashPrevTx) ||
-                           IsConflictNode(tx.hashPrevTx) ||
-                           !LLD::Ledger->HasTx(tx.hashPrevTx, FLAGS::MEMPOOL) ||
-                           !LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL) ||
-                           hashLast != tx.hashPrevTx)
+                        if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast, FLAGS::MEMPOOL))
+                            return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: Failed to read hash last");
+
+                        if(hashLast != tx.hashPrevTx)
                         {
                             /* A moving tip is retryable, not an absolute rejection. */
                             AddConflictRoot(tx);
@@ -872,7 +900,21 @@ namespace TAO
                 lock.lock();
                 if(!mapLedger.count(hashThis))
                 {
-                    //mapRejected.insert(hashTx);
+                    /* Transient admission failures (e.g. deferred local state,
+                     * a memory transaction failing to begin) must not lose the
+                     * orphan: restore the detached indexes so the transaction
+                     * is retried when its state becomes admissible, unless
+                     * Accept already recorded it in another tracked set. */
+                    if(!mapRejected.count(hashThis) &&
+                       !mapConflicts.count(hashThis) &&
+                       !mapConflictDependentsByIndex.count(hashThis) &&
+                       !mapOrphansByIndex.count(hashThis))
+                    {
+                        mapOrphans[hashTx] = tx;
+                        setOrphansByIndex.insert(hashThis);
+                        mapOrphansByIndex[hashThis] = tx;
+                    }
+
                     debug::log(0, FUNCTION, "ORPHAN tx ", hashTx.SubString(), " REJECTED");
 
                     return;

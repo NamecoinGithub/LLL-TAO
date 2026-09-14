@@ -251,8 +251,10 @@ namespace LLP
 
         /* Per-connection buffer limit — mining connections return a larger value
          * (5 MB by default) so push notifications are not dropped under normal
-         * mining pressure. */
-        const uint64_t nMaxSendBuffer = GetSendBufferLimit();
+         * mining pressure.  Ordinary writes are always constrained to this
+         * configured maximum: the oversized-bundle allowance must not be
+         * refilled by unrelated traffic as the bundle drains. */
+        const uint64_t nMaxSendBuffer = GetMaxSendBuffer();
 
         /* Get the bytes of the packet. */
         const std::vector<uint8_t> vBytes = PACKET.GetBytes();
@@ -263,9 +265,15 @@ namespace LLP
          * The old hardcoded 1 KB was meaningless for large mining buffers. */
         const uint64_t nReserve = std::max(uint64_t(1024), nMaxSendBuffer / 100);
 
+        /* While an oversized bundle occupies the queue, only small control
+         * messages (e.g. LASTINDEX) may use the narrow reserve above it. */
+        const uint64_t nBundleLimit = nBundleBufferLimit.load();
+
         /* Stop sending packets if send buffer is full. */
         if(Buffered() + vBytes.size() + nReserve < nMaxSendBuffer
-        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer)) //catch for critical messages (< reserve)
+        || (fBufferFull.load() && Buffered() + vBytes.size() < nMaxSendBuffer) //catch for critical messages (< reserve)
+        || (fBufferFull.load() && nBundleLimit != 0 && vBytes.size() <= nReserve
+            && Buffered() + vBytes.size() < nBundleLimit)) //control reserve above an active oversized bundle
         {
             /* Debug dump of message type. */
             debug::log(4, NODE, "sent packet (", vBytes.size(), " bytes)");
