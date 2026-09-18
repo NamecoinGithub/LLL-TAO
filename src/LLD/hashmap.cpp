@@ -661,6 +661,14 @@ namespace LLD
     {
         LOCK(KEY_MUTEX);
 
+        /* Interval flush callers also hit empty participants; avoid walking the
+         * stream cache when nothing is waiting for a durable sync. */
+        if(setDirtyFiles.empty() && !fDirectoryDirty)
+            return true;
+
+        /* Push any user-space stream buffers before durable file sync. */
+        Flush();
+
         for(const auto& strPath : setDirtyFiles)
         {
             FILE* stream = std::fopen(strPath.c_str(), "rb+");
@@ -670,16 +678,31 @@ namespace LLD
             #ifdef WIN32
             const bool fSynced = (_commit(_fileno(stream)) == 0);
             #else
-            const bool fSynced = (fsync(fileno(stream)) == 0);
+            bool fSynced = false;
+            #if defined(__linux__)
+            fSynced = (fdatasync(fileno(stream)) == 0);
+            #endif
+            if(!fSynced)
+                fSynced = (fsync(fileno(stream)) == 0);
             #endif
 
             if(std::fclose(stream) != 0 || !fSynced)
                 return false;
         }
 
-        if(fDirectoryDirty || !setDirtyFiles.empty())
+        /* Directory entries only change when a new hashmap file is created.
+         * Content updates of existing files do not need a directory chain walk
+         * on every commit (the NODE vs RC-25 disk stall regression). */
+        if(fDirectoryDirty)
         {
-            if(!config::SyncDataDirectoryChain(strBaseLocation))
+            std::filesystem::path path = std::filesystem::path(strBaseLocation).lexically_normal();
+            if(path.has_relative_path() && path.filename().empty())
+                path = path.parent_path();
+
+            if(!filesystem::sync_directory(path.string()))
+                return false;
+
+            if(!config::SyncDataDirectories())
                 return false;
         }
 

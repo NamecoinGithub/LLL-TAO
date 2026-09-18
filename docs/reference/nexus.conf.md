@@ -794,6 +794,33 @@ rescan=1
 
 ---
 
+### `lldflush`
+
+**Type:** Integer (seconds)  
+**Default:** `2`  
+**Description:** Interval between durable LLD data-file flushes (`fsync` of sector and keychain files).
+
+Journal commit records are still fsynced on every transaction checkpoint (write-ahead durability). Data-file fsyncs are batched on this interval to avoid the per-block multi-fsync stall that regressed NODE versus RC-25 (same class of issue as Bitcoin Core chainstate flush frequency).
+
+**Values:**
+- `0`: Flush data files on every commit (maximum durability, slowest disk path)
+- `N > 0`: Flush data files at most every `N` seconds (default `2`)
+
+**Example:**
+```ini
+# Maximum durability during archival validation
+lldflush=0
+
+# Default batched flushes for IBD / live sync
+lldflush=2
+```
+
+**Notes:**
+- Use `-syncprofile` to measure `checkpoint_fsync_us` / `apply_fsync_us` / `release_fsync_us` when tuning.
+- Shutdown still best-effort flushes pending data files.
+
+---
+
 ## Logging Configuration
 
 ### `verbose`

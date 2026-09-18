@@ -21,9 +21,12 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/sync_profile.h>
 
+#include <Util/include/args.h>
+#include <Util/include/config.h>
 #include <Util/include/filesystem.h>
 #include <Util/include/hex.h>
 
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -41,19 +44,90 @@ namespace LLD
 {
     namespace
     {
+        /* Last successful durable data flush across all sector databases. */
+        std::atomic<uint64_t> nLastDataFlushMs{0};
+
+
+        /* -lldflush=<seconds>: 0 flushes data every commit; default 2 batches
+         * data fsyncs like Bitcoin Core chainstate flush intervals. Journal
+         * commit records remain fsynced on every checkpoint either way. */
+        int64_t DataFlushIntervalSeconds()
+        {
+            return config::GetArg("-lldflush", 2);
+        }
+
+
+        bool ShouldFlushDataFiles(const bool fForce = false)
+        {
+            if(fForce || config::fShutdown.load())
+                return true;
+
+            const int64_t nInterval = DataFlushIntervalSeconds();
+            if(nInterval <= 0)
+                return true;
+
+            const uint64_t nNow = runtime::timestamp(true);
+            const uint64_t nLast = nLastDataFlushMs.load(std::memory_order_relaxed);
+            return nLast == 0
+                || (nNow - nLast) >= static_cast<uint64_t>(nInterval) * 1000ull;
+        }
+
+
+        void MarkDataFilesFlushed()
+        {
+            nLastDataFlushMs.store(runtime::timestamp(true), std::memory_order_relaxed);
+        }
+
+
+        bool SyncFileHandle(FILE* stream)
+        {
+            if(!stream)
+                return false;
+
+            #ifdef WIN32
+            return (_commit(_fileno(stream)) == 0);
+            #else
+            /* Prefer fdatasync on Linux: content durability without a full
+             * metadata flush on every call. */
+            #if defined(__linux__)
+            if(fdatasync(fileno(stream)) == 0)
+                return true;
+            #endif
+            return (fsync(fileno(stream)) == 0);
+            #endif
+        }
+
+
         bool SyncFile(const std::string& strPath)
         {
             FILE* stream = std::fopen(strPath.c_str(), "rb+");
             if(!stream)
                 return false;
 
-            #ifdef WIN32
-            const bool fSynced = (_commit(_fileno(stream)) == 0);
-            #else
-            const bool fSynced = (fsync(fileno(stream)) == 0);
-            #endif
-
+            const bool fSynced = SyncFileHandle(stream);
             return (std::fclose(stream) == 0 && fSynced);
+        }
+
+
+        /* Sync only the immediate parent directory of a path. Full directory
+         * chain walks on every commit were a major source of NODE disk stalls
+         * versus RC-25 buffered writes. */
+        bool SyncParentDirectory(const std::string& strPath)
+        {
+            std::filesystem::path path = std::filesystem::path(strPath).lexically_normal();
+            if(path.has_relative_path() && path.filename().empty())
+                path = path.parent_path();
+            else if(!path.empty() && !std::filesystem::is_directory(path))
+                path = path.parent_path();
+
+            if(path.empty())
+                return false;
+
+            if(!filesystem::sync_directory(path.string()))
+                return false;
+
+            /* First-run datadir parents still need a one-shot sync. */
+            return config::SyncDataDirectories();
         }
 
     }
@@ -75,6 +149,8 @@ namespace LLD
     , runtime()
     , pTransaction(nullptr)
     , fTxnReleaseRequired(false)
+    , setPendingSectorFiles( )
+    , fSectorDirectoryDirty(false)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"),
           nFlagsIn | ((nFlagsIn & (FLAGS::FORCE | FLAGS::WRITE | FLAGS::APPEND)) ? 0 : FLAGS::READONLY),
           nBucketsIn))
@@ -123,6 +199,24 @@ namespace LLD
 
         if(MeterThread.joinable())
             MeterThread.join();
+
+        /* Best-effort durable flush of any interval-batched data files. */
+        if(!(nFlags & FLAGS::READONLY) && pSectorKeys)
+        {
+            for(const uint16_t nSectorFile : setPendingSectorFiles)
+            {
+                const std::string strPath = debug::safe_printstr(
+                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
+                SyncFile(strPath);
+            }
+
+            if(fSectorDirectoryDirty && !setPendingSectorFiles.empty())
+                SyncParentDirectory(strBaseLocation);
+
+            pSectorKeys->SyncTouchedFiles();
+            setPendingSectorFiles.clear();
+            fSectorDirectoryDirty = false;
+        }
 
         if(pTransaction)
             delete pTransaction;
@@ -177,6 +271,7 @@ namespace LLD
                     /* Create a new file if it doesn't exist. */
                     std::ofstream cStream(strPath, std::ios::binary | std::ios::out | std::ios::trunc);
                     cStream.close();
+                    fSectorDirectoryDirty = true;
                 }
 
                 break;
@@ -395,6 +490,7 @@ namespace LLD
                         std::ios::out | std::ios::binary | std::ios::trunc
                     );
                     stream.close();
+                    fSectorDirectoryDirty = true;
                 }
 
                 /* Find the file stream for LRU cache. */
@@ -735,24 +831,29 @@ namespace LLD
         if(fProfile)
             timerCheckpoint.Start();
 
-        /* A durable journal must never reference newly created keychain storage
-         * whose file and directory entries have not reached stable storage. */
-        if(fProfile)
-            timerFsync.Start();
-        if(!pSectorKeys->SyncTouchedFiles())
-            return debug::error(FUNCTION, "failed to sync keychain storage");
-
-        /* Recovery requires a commit marker from every participant, including empty ones. */
+        /* Recovery requires a commit marker from every participant, including empty ones.
+         *
+         * Journal fsync is the write-ahead commit point. Keychain/sector data
+         * files are flushed on an interval during apply (see -lldflush), not
+         * here — pre-apply SyncTouchedFiles doubled blocking disk syncs on the
+         * hot path and matched the Bitcoin Core "constant chainstate flush"
+         * stall pattern versus RC-25 buffered writes. */
         pTransaction->ssJournal << std::string("commit");
 
+        const std::string strJournal =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+        const bool fJournalCreated = !filesystem::exists(strJournal);
+
         /* Create an append only stream. */
-        FILE* stream = std::fopen(
-            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat").c_str(), "ab");
+        FILE* stream = std::fopen(strJournal.c_str(), "ab");
         if(!stream)
             return debug::error(FUNCTION, "failed to open journal file");
 
         /* Even a failed write or sync may leave journal bytes that abort must discard. */
         fTxnReleaseRequired = true;
+
+        if(fProfile)
+            timerFsync.Start();
 
         /* Write to the file.  */
         const std::vector<uint8_t>& vBytes = pTransaction->ssJournal.Bytes();
@@ -763,13 +864,7 @@ namespace LLD
             return debug::error(FUNCTION, "failed to flush journal file");
         }
 
-        #ifdef WIN32
-        const bool fSynced = (_commit(_fileno(stream)) == 0);
-        #else
-        const bool fSynced = (fsync(fileno(stream)) == 0);
-        #endif
-
-        if(!fSynced)
+        if(!SyncFileHandle(stream))
         {
             std::fclose(stream);
             return debug::error(FUNCTION, "failed to sync journal file");
@@ -778,8 +873,9 @@ namespace LLD
         if(std::fclose(stream) != 0)
             return debug::error(FUNCTION, "failed to close journal file");
 
-        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
-            return debug::error(FUNCTION, "failed to sync journal directory chain");
+        /* Directory entries only need a sync when the journal file is new. */
+        if(fJournalCreated && !SyncParentDirectory(strJournal))
+            return debug::error(FUNCTION, "failed to sync journal directory");
 
         if(fProfile)
         {
@@ -817,24 +913,17 @@ namespace LLD
             timerFsync.Start();
         }
 
-        /* Durably truncate the transaction journal. */
+        /* Durably truncate the transaction journal. The file already exists, so
+         * only the truncated contents need an fsync — not a full directory chain. */
         const std::string strJournal =
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
         FILE* stream = std::fopen(strJournal.c_str(), "wb");
         if(!stream)
             return debug::error(FUNCTION, "failed to truncate journal file");
 
-        #ifdef WIN32
-        const bool fSynced = (_commit(_fileno(stream)) == 0);
-        #else
-        const bool fSynced = (fsync(fileno(stream)) == 0);
-        #endif
-
+        const bool fSynced = SyncFileHandle(stream);
         if(std::fclose(stream) != 0 || !fSynced)
             return debug::error(FUNCTION, "failed to sync truncated journal file");
-
-        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
-            return debug::error(FUNCTION, "failed to sync journal directory chain");
 
         fTxnReleaseRequired = false;
         if(fProfile)
@@ -858,95 +947,109 @@ namespace LLD
         if(!pTransaction)
             return false;
 
-        if(pTransaction->mapTransactions.empty()
-        && pTransaction->setKeychain.empty()
-        && pTransaction->mapIndex.empty()
-        && pTransaction->setErasedData.empty())
-        {
-            delete pTransaction;
-            pTransaction = nullptr;
-            return true;
-        }
+        const bool fEmpty =
+            pTransaction->mapTransactions.empty()
+            && pTransaction->setKeychain.empty()
+            && pTransaction->mapIndex.empty()
+            && pTransaction->setErasedData.empty();
 
         runtime::timer timerApply;
         runtime::timer timerFsync;
         const bool fProfile = TAO::Ledger::SyncProfile::Enabled();
-        if(fProfile)
+        if(fProfile && !fEmpty)
             timerApply.Start();
 
-        pSectorKeys->BeginDurabilityTracking();
-
-        /* Erase data set to be removed. Erase is idempotent for missing keys
-         * and still propagates keychain I/O failures. */
-        for(const auto& item : pTransaction->setErasedData)
+        if(!fEmpty)
         {
-            if(!pSectorKeys->Erase(item))
-                return debug::error(FUNCTION, "failed to erase from keychain");
-        }
+            pSectorKeys->BeginDurabilityTracking();
 
-        /* Track every sector file changed by this transaction. */
-        std::set<uint16_t> setSectorFiles;
-
-        /* Commit the sector data. */
-        for(const auto& item : pTransaction->mapTransactions)
-        {
-            if(!Force(item.first, item.second))
-                return debug::error(FUNCTION, "failed to commit sector data");
-
-            SectorKey cKey;
-            if(!pSectorKeys->Get(item.first, cKey))
-                return debug::error(FUNCTION, "failed to read committed sector key");
-
-            setSectorFiles.insert(cKey.nSectorFile);
-        }
-
-        /* Commit keychain entries. */
-        for(const auto& item : pTransaction->setKeychain)
-        {
-            SectorKey cKey(STATE::READY, item, 0, 0, 0);
-            if(!pSectorKeys->Put(cKey))
-                return debug::error(FUNCTION, "failed to commit to keychain");
-        }
-
-        /* Commit the index data. */
-        std::map<std::vector<uint8_t>, SectorKey> mapIndex;
-        for(const auto& item : pTransaction->mapIndex)
-        {
-            /* Get the key. */
-            SectorKey cKey;
-            if(mapIndex.count(item.second))
-                cKey = mapIndex[item.second];
-            else
+            /* Erase data set to be removed. Erase is idempotent for missing keys
+             * and still propagates keychain I/O failures. */
+            for(const auto& item : pTransaction->setErasedData)
             {
-                /* Check for the new indexing entry. */
-                if(!pSectorKeys->Get(item.second, cKey))
-                    return debug::error(FUNCTION, "failed to read indexing entry");
-
-                mapIndex[item.second] = cKey;
+                if(!pSectorKeys->Erase(item))
+                    return debug::error(FUNCTION, "failed to erase from keychain");
             }
 
-            /* Write the new sector key. */
-            cKey.SetKey(item.first);
-            if(!pSectorKeys->Put(cKey))
-                return debug::error(FUNCTION, "failed to write indexing entry");
+            /* Track every sector file changed by this transaction. */
+            std::set<uint16_t> setSectorFiles;
+
+            /* Commit the sector data. */
+            for(const auto& item : pTransaction->mapTransactions)
+            {
+                if(!Force(item.first, item.second))
+                    return debug::error(FUNCTION, "failed to commit sector data");
+
+                SectorKey cKey;
+                if(!pSectorKeys->Get(item.first, cKey))
+                    return debug::error(FUNCTION, "failed to read committed sector key");
+
+                setSectorFiles.insert(cKey.nSectorFile);
+            }
+
+            /* Commit keychain entries. */
+            for(const auto& item : pTransaction->setKeychain)
+            {
+                SectorKey cKey(STATE::READY, item, 0, 0, 0);
+                if(!pSectorKeys->Put(cKey))
+                    return debug::error(FUNCTION, "failed to commit to keychain");
+            }
+
+            /* Commit the index data. */
+            std::map<std::vector<uint8_t>, SectorKey> mapIndex;
+            for(const auto& item : pTransaction->mapIndex)
+            {
+                /* Get the key. */
+                SectorKey cKey;
+                if(mapIndex.count(item.second))
+                    cKey = mapIndex[item.second];
+                else
+                {
+                    /* Check for the new indexing entry. */
+                    if(!pSectorKeys->Get(item.second, cKey))
+                        return debug::error(FUNCTION, "failed to read indexing entry");
+
+                    mapIndex[item.second] = cKey;
+                }
+
+                /* Write the new sector key. */
+                cKey.SetKey(item.first);
+                if(!pSectorKeys->Put(cKey))
+                    return debug::error(FUNCTION, "failed to write indexing entry");
+            }
+
+            /* Queue touched sector files for the next durable data flush. */
+            setPendingSectorFiles.insert(setSectorFiles.begin(), setSectorFiles.end());
         }
 
-        /* Make the applied data and keychain durable before its journal can be released. */
+        /* Batch data-file fsyncs on an interval (Bitcoin Core chainstate pattern).
+         * Journal records are fsynced every checkpoint; data-file fsyncs are
+         * coalesced so block apply is not blocked on per-file durable writes.
+         * Empty participants still participate so pending files from earlier
+         * commits are flushed when the interval elapses. */
         if(fProfile)
             timerFsync.Start();
-        for(const uint16_t nSectorFile : setSectorFiles)
+        if(ShouldFlushDataFiles())
         {
-            const std::string strPath = debug::safe_printstr(
-                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
-            if(!SyncFile(strPath))
-                return debug::error(FUNCTION, "failed to sync sector file");
+            for(const uint16_t nSectorFile : setPendingSectorFiles)
+            {
+                const std::string strPath = debug::safe_printstr(
+                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
+                if(!SyncFile(strPath))
+                    return debug::error(FUNCTION, "failed to sync sector file");
+            }
+
+            if(fSectorDirectoryDirty && !setPendingSectorFiles.empty()
+            && !SyncParentDirectory(strBaseLocation))
+                return debug::error(FUNCTION, "failed to sync sector directory");
+
+            if(!pSectorKeys->SyncTouchedFiles())
+                return debug::error(FUNCTION, "failed to sync keychain files");
+
+            setPendingSectorFiles.clear();
+            fSectorDirectoryDirty = false;
+            MarkDataFilesFlushed();
         }
-
-        if(!setSectorFiles.empty() && !config::SyncDataDirectoryChain(strBaseLocation))
-            return debug::error(FUNCTION, "failed to sync sector directory chain");
-
-        if(!pSectorKeys->SyncTouchedFiles())
-            return debug::error(FUNCTION, "failed to sync keychain files");
         if(fProfile)
             timerFsync.Stop();
 
@@ -954,7 +1057,7 @@ namespace LLD
         delete pTransaction;
         pTransaction = nullptr;
 
-        if(fProfile)
+        if(fProfile && !fEmpty)
         {
             timerApply.Stop();
             TAO::Ledger::SyncProfile::RecordTxnApply(1, timerApply.ElapsedMicroseconds(), timerFsync.ElapsedMicroseconds());

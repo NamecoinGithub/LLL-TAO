@@ -3852,6 +3852,47 @@ TEST_CASE("Recovery rolls forward a partial apply with empty group participants"
 
 
 #ifdef __linux__
+TEST_CASE("Interval data flush still commits readable state with durable journals",
+          "[lld][txncommit][durability][lldflush]")
+{
+    LedgerGuard ledgerGuard;
+    const std::string strPrevious = config::mapArgs.count("-lldflush")
+        ? config::mapArgs["-lldflush"] : std::string("0");
+    struct FlushGuard
+    {
+        std::string strPrevious;
+        ~FlushGuard() { config::mapArgs["-lldflush"] = strPrevious; }
+    } flushGuard{strPrevious};
+
+    /* Large interval: data-file fsyncs are skipped after the first process flush,
+     * while journal commit records remain fsynced every checkpoint. */
+    config::mapArgs["-lldflush"] = "3600";
+
+    const auto key = std::make_pair(std::string("lldflush-interval"), 1u);
+    LLD::Ledger->Erase(key);
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(JournalSize("_LEDGER") == 0);
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 77);
+
+    /* Second commit within the interval must still apply and release journals. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(78)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(JournalSize("_LEDGER") == 0);
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 78);
+
+    LLD::Ledger->Erase(key);
+    config::mapArgs["-lldflush"] = "0";
+}
+
+
 TEST_CASE("Failed checkpoint writes still require durable journal release",
           "[lld][txncommit][recovery]")
 {
