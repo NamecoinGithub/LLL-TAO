@@ -24,6 +24,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/admissibility.h>
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/chainstate.h>
+#include <TAO/Ledger/include/sync_profile.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/timelocks.h>
 #include <TAO/Ledger/types/mempool.h>
@@ -304,6 +305,413 @@ namespace
 }
 
 #ifndef WIN32
+namespace
+{
+    struct BatchSyncSettings
+    {
+        const std::map<std::string, std::string> args = config::mapArgs;
+        const bool client = config::fClient.exchange(false);
+        const bool synchronized = LLP::TritiumNode::fSynchronized.exchange(false);
+        const uint64_t session = TAO::Ledger::nSyncSession.load();
+        const uint32_t maxHeight = TAO::Ledger::ChainState::nMaxPeerHeight.load();
+
+        BatchSyncSettings()
+        {
+            config::mapArgs["-sync"] = "1";
+            config::mapArgs["-dns"] = "1";
+            config::mapArgs["-syncpeers"] = "3";
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(TAO::Ledger::ChainState::nBestHeight.load());
+        }
+
+        ~BatchSyncSettings()
+        {
+            config::mapArgs = args;
+            config::fClient.store(client);
+            LLP::TritiumNode::fSynchronized.store(synchronized);
+            TAO::Ledger::nSyncSession.store(session);
+            TAO::Ledger::ChainState::nMaxPeerHeight.store(maxHeight);
+        }
+
+        static void Prepare(RecoverySocketNode& node)
+        {
+            node.fOUTGOING = true;
+            node.nProtocolVersion = LLP::PROTOCOL_VERSION;
+            node.nCurrentHeight = TAO::Ledger::ChainState::nBestHeight.load() + 10;
+        }
+
+        static std::vector<uint8_t> ExpectedList()
+        {
+            DataStream stream(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+            stream << uint8_t(LLP::TritiumNode::SPECIFIER::SYNC)
+                   << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+                   << uint8_t(LLP::TritiumNode::TYPES::LOCATOR)
+                   << TAO::Ledger::Locator(TAO::Ledger::ChainState::hashBestChain.load())
+                   << uint1024_t(0);
+            return LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, stream).GetBytes();
+        }
+    };
+}
+
+TEST_CASE("Concurrent sync batches authorize each peer and continue at the shared tip",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode first, second, third, standby;
+    for(auto* node : {&first, &second, &third, &standby})
+    {
+        BatchSyncSettings::Prepare(*node);
+        node->Sync();
+    }
+
+    REQUIRE(first.IsSyncPeer());
+    REQUIRE(second.IsSyncPeer());
+    REQUIRE(third.IsSyncPeer());
+    REQUIRE(LLP::TritiumNode::SyncPeerCount() == 3);
+    REQUIRE_FALSE(standby.IsSyncPeer());
+    REQUIRE(standby.Receive().empty());
+    for(auto* node : {&first, &second, &third})
+    {
+        REQUIRE_FALSE(node->Receive().empty());
+        node->Sync();
+        REQUIRE(node->Receive().empty());
+    }
+
+    auto& helper = TAO::Ledger::nSyncSession.load() == second.nCurrentSession ? third : second;
+    REQUIRE(helper.nCurrentSession != TAO::Ledger::nSyncSession.load());
+    DataStream batchEnd(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    batchEnd << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+             << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << uint1024_t(0xCB0201);
+    helper.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, batchEnd);
+    REQUIRE(helper.ProcessPacket());
+    REQUIRE(helper.IsSyncPeer());
+    REQUIRE(helper.Receive() == BatchSyncSettings::ExpectedList());
+    REQUIRE(first.IsSyncPeer());
+
+    /* No raw-transaction response may replace an outstanding sync boundary. */
+    REQUIRE_FALSE(helper.PushTxResponseRequest(LLP::TxResponseKind::LIST, uint1024_t(1),
+        uint1024_t(0), true, LLP::TritiumNode::ACTION::LIST,
+        uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+        uint8_t(LLP::TritiumNode::TYPES::BLOCK), uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+        TAO::Ledger::Locator(TAO::Ledger::ChainState::hashBestChain.load()), uint1024_t(0)));
+    REQUIRE(helper.Receive().empty());
+}
+
+TEST_CASE("Sync batch continuation prioritizes deferred missing transactions",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode node;
+    BatchSyncSettings::Prepare(node);
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE_FALSE(node.Receive().empty());
+
+    const uint1024_t missing(0xCB0203);
+    REQUIRE(node.RequestMissingTransactions(missing));
+    REQUIRE(node.Receive().empty());
+
+    SECTION("Recovery GET is queued at the batch boundary")
+    {
+        node.reject = false;
+    }
+    SECTION("Rejected recovery GET retains priority until retry")
+    {
+        node.reject = true;
+    }
+
+    DataStream batchEnd(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    batchEnd << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+             << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << uint1024_t(0xCB0204);
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, batchEnd);
+    REQUIRE(node.ProcessPacket());
+    REQUIRE_FALSE(node.IsSyncPeer());
+
+    if(node.reject)
+    {
+        REQUIRE(node.Receive().empty());
+        node.reject = false;
+        REQUIRE(node.RequestMissingTransactions());
+    }
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(missing));
+
+    node.Sync();
+    REQUIRE_FALSE(node.IsSyncPeer());
+    REQUIRE(node.Receive().empty());
+
+    node.CloseTxResponseWindowForBlock(missing);
+    REQUIRE_FALSE(node.RequestMissingTransactions());
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE(node.Receive() == BatchSyncSettings::ExpectedList());
+}
+
+TEST_CASE("Sync rotation keeps commit notifications and late batch boundaries valid",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    config::mapArgs["-syncpeers"] = "1";
+    RecoverySocketNode first, replacement;
+    BatchSyncSettings::Prepare(first);
+    BatchSyncSettings::Prepare(replacement);
+    first.Sync();
+    REQUIRE(first.IsSyncPeer());
+    first.Receive();
+
+    LLP::TritiumNode::SwitchNode();
+    REQUIRE_FALSE(first.IsSyncPeer());
+    REQUIRE(first.Receive().empty());
+    replacement.Sync();
+    REQUIRE(replacement.IsSyncPeer());
+    REQUIRE_FALSE(replacement.Receive().empty());
+
+    /* A retired stream cannot be reauthorized before its old tail drains. */
+    first.Sync();
+    REQUIRE_FALSE(first.IsSyncPeer());
+    DataStream notify(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    notify << uint8_t(LLP::TritiumNode::TYPES::BESTCHAIN)
+           << TAO::Ledger::ChainState::hashBestChain.load()
+           << uint8_t(LLP::TritiumNode::TYPES::BESTHEIGHT) << first.nCurrentHeight
+           << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+           << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << uint1024_t(0xCB0202);
+    first.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, notify);
+    REQUIRE(first.ProcessPacket());
+    REQUIRE_FALSE(first.IsSyncPeer());
+    REQUIRE(replacement.IsSyncPeer());
+    REQUIRE_FALSE(LLP::TritiumNode::fSynchronized.load());
+}
+
+TEST_CASE("Any active sync peer may finalize only after the full tip notification",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode first, second;
+    BatchSyncSettings::Prepare(first);
+    BatchSyncSettings::Prepare(second);
+    first.Sync();
+    second.Sync();
+    first.Receive();
+    second.Receive();
+    auto& helper = TAO::Ledger::nSyncSession.load() == second.nCurrentSession ? first : second;
+
+    const uint32_t height = TAO::Ledger::ChainState::nBestHeight.load();
+    const auto hash = TAO::Ledger::ChainState::hashBestChain.load();
+    helper.nCurrentHeight = height;
+    DataStream ahead(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    ahead << uint8_t(LLP::TritiumNode::TYPES::BESTCHAIN) << hash
+          << uint8_t(LLP::TritiumNode::TYPES::BESTHEIGHT) << uint32_t(height + 1);
+    helper.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, ahead);
+    REQUIRE(helper.ProcessPacket());
+    REQUIRE_FALSE(LLP::TritiumNode::fSynchronized.load());
+
+    DataStream caughtUp(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    caughtUp << uint8_t(LLP::TritiumNode::TYPES::BESTCHAIN) << hash
+             << uint8_t(LLP::TritiumNode::TYPES::BESTHEIGHT) << height;
+    helper.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, caughtUp);
+    REQUIRE(helper.ProcessPacket());
+    REQUIRE(LLP::TritiumNode::fSynchronized.load());
+    REQUIRE(TAO::Ledger::nSyncSession.load() == 0);
+    REQUIRE_FALSE(first.IsSyncPeer());
+    REQUIRE_FALSE(second.IsSyncPeer());
+    REQUIRE(LLP::TritiumNode::SyncPeerCount() == 0);
+
+    for(auto* node : {&first, &second})
+    {
+        /* Ignore late SYNC payloads without decoding them or dropping the peer. */
+        DataStream stale(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        stale << uint8_t(LLP::TritiumNode::SPECIFIER::SYNC);
+        node->INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, stale);
+        REQUIRE(node->ProcessPacket());
+        DataStream end(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+        end << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+            << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << hash;
+        node->INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, end);
+        REQUIRE(node->ProcessPacket());
+        REQUIRE(node->Receive().empty());
+    }
+}
+
+TEST_CASE("Old protocols and unqueueable sync requests do not occupy peer slots",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    config::mapArgs["-syncpeers"] = "1";
+    RecoverySocketNode old, full, healthy;
+    for(auto* node : {&old, &full, &healthy})
+        BatchSyncSettings::Prepare(*node);
+    old.nProtocolVersion = LLP::MIN_PROTO_VERSION;
+    full.reject = true;
+    old.Sync();
+    full.Sync();
+    REQUIRE_FALSE(old.IsSyncPeer());
+    REQUIRE_FALSE(full.IsSyncPeer());
+    REQUIRE(old.Receive().empty());
+    REQUIRE(full.Receive().empty());
+    healthy.nProtocolVersion = LLP::MIN_TRITIUM_VERSION;
+    healthy.Sync();
+    REQUIRE(healthy.IsSyncPeer());
+    REQUIRE_FALSE(healthy.Receive().empty());
+}
+
+TEST_CASE("Concurrent sync duplicate headers avoid transaction decoding",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    config::mapArgs["-syncprofile"] = "3600";
+    RecoverySocketNode first, second;
+    BatchSyncSettings::Prepare(first);
+    BatchSyncSettings::Prepare(second);
+    first.Sync();
+    second.Sync();
+    auto& node = TAO::Ledger::nSyncSession.load() == first.nCurrentSession ? second : first;
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE(node.nCurrentSession != TAO::Ledger::nSyncSession.load());
+    REQUIRE_FALSE(node.Receive().empty());
+    const auto state = TAO::Ledger::ChainState::tStateBest.load();
+    REQUIRE(LLD::Ledger->HasBlock(state.GetHash()));
+    TAO::Ledger::SyncBlock duplicate(state, false);
+    duplicate.vtx.push_back({0xff, {0xff}});
+    DataStream packet(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    packet << uint8_t(LLP::TritiumNode::SPECIFIER::SYNC) << duplicate;
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, packet);
+    const auto before = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(node.ProcessPacket());
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nBlocksReceived == before.nBlocksReceived + 1);
+    REQUIRE(node.nConsecutiveFails == 0);
+    REQUIRE(node.IsSyncPeer());
+}
+
+TEST_CASE("Sync preserves a persisted side branch cursor across batches",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode node;
+    BatchSyncSettings::Prepare(node);
+    node.Sync();
+    node.Receive();
+
+    TAO::Ledger::BlockState branch = TAO::Ledger::ChainState::tStateBest.load();
+    branch.hashPrevBlock = branch.GetHash();
+    branch.hashNextBlock = 0;
+    ++branch.nHeight;
+    branch.nNonce = LLC::GetRand();
+    const auto hash = branch.GetHash();
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hash));
+    REQUIRE(LLD::Ledger->WriteBlock(hash, branch));
+    struct BranchGuard
+    {
+        uint1024_t hash;
+        ~BranchGuard() { LLD::Ledger->EraseBlock(hash); }
+    } branchGuard{hash};
+    REQUIRE_FALSE(branch.IsInMainChain());
+
+    DataStream end(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    end << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << hash;
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, end);
+    REQUIRE(node.ProcessPacket());
+    DataStream expected(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    expected << uint8_t(LLP::TritiumNode::SPECIFIER::SYNC)
+             << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+             << uint8_t(LLP::TritiumNode::TYPES::UINT1024_T) << hash << uint1024_t(0);
+    REQUIRE(node.Receive() ==
+        LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, expected).GetBytes());
+    REQUIRE(node.IsSyncPeer());
+}
+
+TEST_CASE("Recovery LIST tails block sync even after transaction authorization closes",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode node;
+    BatchSyncSettings::Prepare(node);
+    const auto hash = TAO::Ledger::ChainState::hashBestChain.load();
+    REQUIRE(node.PushTxResponseRequest(LLP::TxResponseKind::LIST, hash, uint1024_t(0), false,
+        LLP::TritiumNode::ACTION::LIST, uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+        uint8_t(LLP::TritiumNode::TYPES::BLOCK), uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+        TAO::Ledger::Locator(hash), uint1024_t(0)));
+    REQUIRE_FALSE(node.Receive().empty());
+    node.RollbackTxResponseWindow(1);
+    node.Sync();
+    REQUIRE_FALSE(node.IsSyncPeer());
+    REQUIRE(node.Receive().empty());
+
+    DataStream end(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    end << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << hash;
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, end);
+    REQUIRE(node.ProcessPacket());
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE_FALSE(node.Receive().empty());
+}
+
+TEST_CASE("Client sync retains one source and the client protocol minimum",
+    "[llp][ledger][multi_peer_sync]")
+{
+    ChainStateGuard chain;
+    BatchSyncSettings settings;
+    config::fClient.store(true);
+    TAO::Ledger::ChainState::hashBestChain.store(TAO::Ledger::ChainState::Genesis());
+    RecoverySocketNode old, first, second;
+    for(auto* node : {&old, &first, &second})
+        BatchSyncSettings::Prepare(*node);
+    old.nProtocolVersion = LLP::MIN_TRITIUM_VERSION;
+    old.Sync();
+    REQUIRE_FALSE(old.IsSyncPeer());
+    REQUIRE(old.Receive().empty());
+    first.Sync();
+    second.Sync();
+    REQUIRE(first.IsSyncPeer());
+    REQUIRE_FALSE(second.IsSyncPeer());
+    REQUIRE(second.Receive().empty());
+}
+
+TEST_CASE("Post-sync recovery subscribes to and drains every tracked LIST boundary",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode node;
+    BatchSyncSettings::Prepare(node);
+    LLP::TritiumNode::fSynchronized.store(true);
+    const auto hash = TAO::Ledger::ChainState::hashBestChain.load();
+    DataStream list(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    list << uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS)
+         << uint8_t(LLP::TritiumNode::TYPES::BLOCK)
+         << uint8_t(LLP::TritiumNode::TYPES::LOCATOR)
+         << TAO::Ledger::Locator(hash) << uint1024_t(0);
+    const auto request = [&]()
+    {
+        return node.PushTxResponseRequest(LLP::TxResponseKind::LIST, hash, uint1024_t(0), false,
+            LLP::TritiumNode::ACTION::LIST, uint8_t(LLP::TritiumNode::SPECIFIER::TRANSACTIONS),
+            uint8_t(LLP::TritiumNode::TYPES::BLOCK), uint8_t(LLP::TritiumNode::TYPES::LOCATOR),
+            TAO::Ledger::Locator(hash), uint1024_t(0));
+    };
+    REQUIRE(request());
+    DataStream subscription(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    subscription << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX);
+    auto expected = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::SUBSCRIBE, subscription).GetBytes();
+    const auto listBytes = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::LIST, list).GetBytes();
+    expected.insert(expected.end(), listBytes.begin(), listBytes.end());
+    REQUIRE(node.Receive() == expected);
+    REQUIRE(request());
+    REQUIRE(node.Receive() == listBytes);
+    LLP::TritiumNode::fSynchronized.store(false);
+    node.RollbackTxResponseWindow(2);
+
+    DataStream end(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    end << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+        << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << hash;
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, end);
+    REQUIRE(node.ProcessPacket());
+    node.Sync();
+    REQUIRE_FALSE(node.IsSyncPeer());
+    REQUIRE(node.Receive().empty());
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, end);
+    REQUIRE(node.ProcessPacket());
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+}
+
 TEST_CASE("Missing transaction recovery retains distinct work in FIFO order",
     "[ledger][process][recovery_queue]")
 {
@@ -3586,68 +3994,37 @@ TEST_CASE("SPECIFIER enum values are stable (regression guard)", "[ledger][proce
 }
 
 
-TEST_CASE("Unsolicited-sync guard: fSynchronized==true rejects SPECIFIER::SYNC",
+TEST_CASE("Unsolicited sync data cannot be authorized by the diagnostic primary session",
     "[ledger][process]")
 {
-    /* Document the guard condition that makes the SPECIFIER::SYNC regression
-     * possible.  In src/LLP/tritium.cpp the TYPES::BLOCK / SPECIFIER::SYNC
-     * handler reads:
-     *
-     *   if(nCurrentSession != TAO::Ledger::nSyncSession || fSynchronized.load())
-     *       return debug::drop(FUNCTION, "unsolicted sync block");
-     *
-     * After initial sync completes:
-     *   - TAO::Ledger::nSyncSession is reset to 0
-     *   - fSynchronized is set to true
-     *
-     * Therefore the guard trips for every SYNC block received on a fully
-     * synced node — including responses to our own recovery requests. */
+    struct SyncGuard
+    {
+        const uint64_t session = TAO::Ledger::nSyncSession.load();
+        const bool synchronized = LLP::TritiumNode::fSynchronized.load();
+        const bool client = config::fClient.exchange(false);
+        ~SyncGuard()
+        {
+            TAO::Ledger::nSyncSession.store(session);
+            LLP::TritiumNode::fSynchronized.store(synchronized);
+            config::fClient.store(client);
+        }
+    } guard;
+    LLP::TritiumNode node;
+    node.nCurrentSession = 42;
+    DataStream stale(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    stale << uint8_t(LLP::TritiumNode::SPECIFIER::SYNC);
 
-    /* Save and restore the global sync session so we don't disturb other tests. */
-    const uint64_t nSavedSession = TAO::Ledger::nSyncSession.load();
-    const bool fSavedSynced      = LLP::TritiumNode::fSynchronized.load();
-
-    /* --- Simulate: initial-sync in progress -------------------------------- */
-    /* Assign an arbitrary non-zero sync session and clear fSynchronized. */
-    TAO::Ledger::nSyncSession.store(42);
-    LLP::TritiumNode::fSynchronized.store(false);
-
-    const uint64_t nCurrentSession = 42; /* matches nSyncSession */
-
-    /* Guard condition: (nCurrentSession != nSyncSession) || fSynchronized */
-    const bool fDropDuringSyncWithMatchingSession =
-        (nCurrentSession != TAO::Ledger::nSyncSession.load())
-        || LLP::TritiumNode::fSynchronized.load();
-
-    /* Should NOT drop during active sync when sessions match. */
-    REQUIRE_FALSE(fDropDuringSyncWithMatchingSession);
-
-    /* --- Simulate: sync complete (post-sync state) ------------------------- */
-    TAO::Ledger::nSyncSession.store(0);
-    LLP::TritiumNode::fSynchronized.store(true);
-
-    const bool fDropPostSync =
-        (nCurrentSession != TAO::Ledger::nSyncSession.load())
-        || LLP::TritiumNode::fSynchronized.load();
-
-    /* MUST drop: any SYNC block arriving on a synced node is unsolicited from
-     * the receiver's perspective, even if we sent the LIST ourselves. */
-    REQUIRE(fDropPostSync);
-
-    /* --- Simulate: session mismatch during sync (different peer) ----------- */
-    TAO::Ledger::nSyncSession.store(99);     /* different from nCurrentSession */
-    LLP::TritiumNode::fSynchronized.store(false);
-
-    const bool fDropMismatchedSession =
-        (nCurrentSession != TAO::Ledger::nSyncSession.load())
-        || LLP::TritiumNode::fSynchronized.load();
-
-    /* Must drop: this peer is not the designated sync peer. */
-    REQUIRE(fDropMismatchedSession);
-
-    /* Restore global state. */
-    TAO::Ledger::nSyncSession.store(nSavedSession);
-    LLP::TritiumNode::fSynchronized.store(fSavedSynced);
+    for(const auto session : {uint64_t(42), uint64_t(99), uint64_t(0)})
+    {
+        TAO::Ledger::nSyncSession.store(session);
+        for(const bool synchronized : {false, true})
+        {
+            LLP::TritiumNode::fSynchronized.store(synchronized);
+            REQUIRE_FALSE(node.IsSyncPeer());
+            node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::TYPES::BLOCK, stale);
+            REQUIRE(node.ProcessPacket());
+        }
+    }
 }
 
 
@@ -3673,17 +4050,11 @@ TEST_CASE("Post-sync state: nSyncSession==0 and fSynchronized==true after Sync()
     REQUIRE(LLP::TritiumNode::fSynchronized.load() == true);
     REQUIRE(TAO::Ledger::nSyncSession.load()       == 0);
 
-    /* In this state, the unsolicited-sync guard always fires regardless of
-     * what nCurrentSession the *receiving* handler reads: even if some stale
-     * connection still has nCurrentSession == 0 the condition
-     *   (0 != 0) || true  →  true
-     * causes a drop.  This is why SPECIFIER::TRANSACTIONS must be used for
-     * all post-sync fork-recovery LIST requests. */
-    const uint64_t nCurrentSession = 0;   /* worst-case stale session value */
-    const bool fWouldDrop =
-        (nCurrentSession != TAO::Ledger::nSyncSession.load())
-        || LLP::TritiumNode::fSynchronized.load();
-    REQUIRE(fWouldDrop);
+    /* Post-sync fork recovery must still use TRANSACTIONS, not SYNC. */
+    {
+        LLP::TritiumNode node;
+        REQUIRE_FALSE(node.IsSyncPeer());
+    }
 
     /* Restore. */
     TAO::Ledger::nSyncSession.store(nSavedSession);
