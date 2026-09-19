@@ -67,6 +67,7 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 #include <Util/templates/datastream.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -76,6 +77,7 @@ ________________________________________________________________________________
 #include <functional>
 #include <future>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -585,6 +587,33 @@ TEST_CASE("Wholly empty transactions leave every participant journal untouched",
     REQUIRE(snapshot.nTxnCheckpointParticipants == 0);
     REQUIRE(snapshot.nTxnApplyParticipants == 0);
     REQUIRE(snapshot.nTxnReleaseParticipants == 0);
+}
+
+
+TEST_CASE("Empty physical commits still publish memory-only changes",
+          "[lld][txncommit][syncprofile]")
+{
+    SyncProfileGuard profileGuard;
+    const uint256_t address(0x737465);
+    TAO::Register::State state;
+    REQUIRE(LLD::Register->WriteState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    struct StateGuard
+    {
+        uint256_t address;
+        ~StateGuard()
+        {
+            LLD::Register->WriteState(address, TAO::Register::State(), TAO::Ledger::FLAGS::ERASE);
+        }
+    } guard{address};
+    REQUIRE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    LLD::TransactionGuard transaction;
+    REQUIRE(transaction);
+    REQUIRE(LLD::Register->WriteState(address, state, TAO::Ledger::FLAGS::ERASE));
+    REQUIRE_FALSE(LLD::Register->HasPendingTransactionWork());
+    REQUIRE(LLD::TxnCommit());
+    REQUIRE_FALSE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnCheckpointParticipants == 0);
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnReleaseParticipants == 0);
 }
 
 
@@ -4338,6 +4367,43 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
     LLD::Contract->Erase(contractKey);
     LLD::Register->Erase(registerKey);
     LLD::Logical->Erase(logicalKey);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 20)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
+    REQUIRE(WriteRecoveryJournal("_API", MakeFailingIndexJournal()));
+    REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
+        std::make_pair(std::string("recovery-client"), 1), 23)));
+
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+    const uint64_t nLogicalJournal = JournalSize("_API");
+    const uint64_t nClientJournal = JournalSize("_CLIENT");
+
+    REQUIRE(nContractJournal > 0);
+    REQUIRE(nRegisterJournal > 0);
+    REQUIRE(nLogicalJournal > 0);
+    REQUIRE(nClientJournal > 0);
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE_FALSE(LLD::Logical->Exists(logicalKey));
+
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+    REQUIRE(JournalSize("_API") == nLogicalJournal);
+    REQUIRE(JournalSize("_CLIENT") == nClientJournal);
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Logical->TxnRelease());
+    REQUIRE(LLD::Client->TxnRelease());
+
+    LLD::Contract->Erase(contractKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Logical->Erase(logicalKey);
 }
 
 
@@ -4359,6 +4425,62 @@ TEST_CASE("SetBestHeight publishes one supplied head for advances and rewinds",
         const auto snapshot = TAO::Ledger::ChainState::tStateBest.load();
         REQUIRE(snapshot.GetHash() == state.GetHash());
         REQUIRE(snapshot.nHeight == height);
+    }
+
+    state.nHeight = 400;
+    const auto expectedHash = state.GetHash();
+    auto reader = std::async(std::launch::async, [&]()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while(TAO::Ledger::ChainState::nBestHeight.load(std::memory_order_acquire) != state.nHeight)
+        {
+            if(std::chrono::steady_clock::now() >= deadline)
+                return false;
+            std::this_thread::yield();
+        }
+        const auto snapshot = TAO::Ledger::ChainState::tStateBest.load();
+        return snapshot.GetHash() == expectedHash
+            && TAO::Ledger::ChainState::hashBestChain.load() == expectedHash
+            && TAO::Ledger::ChainState::nBestChainTrust.load() == state.nChainTrust
+            && TAO::API::nBlockCounter.load() == state.nHeight;
+    });
+    TAO::Ledger::ChainState::SetBestHeight(state);
+    REQUIRE(reader.get());
+}
+
+
+TEST_CASE("Genesis SetBest publishes the complete head only after commit",
+          "[ledger][setbest_txn][head][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard chainGuard;
+    BestChainDiskGuard bestGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    auto genesis = chainGuard.savedGenesis;
+    genesis.nNonce = 0x737465;
+    genesis.hashNextBlock = 0;
+    blocksGuard.hashes.push_back(genesis.GetHash());
+    TAO::Ledger::ChainState::tStateGenesis = TAO::Ledger::BlockState();
+    const bool fail = GENERATE(false, true);
+    LLD::TransactionGuard transaction;
+    REQUIRE(transaction);
+    if(fail)
+        REQUIRE(LLD::Trust->TxnRelease());
+    REQUIRE(genesis.SetBest() == !fail);
+    if(fail)
+    {
+        REQUIRE(TAO::Ledger::ChainState::tStateGenesis.IsNull());
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == chainGuard.savedBestHeight);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == chainGuard.savedBestHash);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
+    }
+    else
+    {
+        REQUIRE(TAO::Ledger::ChainState::tStateGenesis.GetHash() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == genesis.nHeight);
     }
 }
 
@@ -4550,40 +4672,4 @@ TEST_CASE("Empty apply retains sector writes made outside a transaction until sy
     uint32_t value = 0;
     REQUIRE(database.Read(uint32_t(1), value));
     REQUIRE(value == 78);
-
-    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 20)));
-    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(registerKey, 21)));
-    REQUIRE(WriteRecoveryJournal("_API", MakeFailingIndexJournal()));
-    REQUIRE(WriteRecoveryJournal("_CLIENT", MakeWriteJournal(
-        std::make_pair(std::string("recovery-client"), 1), 23)));
-
-    const uint64_t nContractJournal = JournalSize("_CONTRACT");
-    const uint64_t nRegisterJournal = JournalSize("_REGISTER");
-    const uint64_t nLogicalJournal = JournalSize("_API");
-    const uint64_t nClientJournal = JournalSize("_CLIENT");
-
-    REQUIRE(nContractJournal > 0);
-    REQUIRE(nRegisterJournal > 0);
-    REQUIRE(nLogicalJournal > 0);
-    REQUIRE(nClientJournal > 0);
-
-    REQUIRE_FALSE(LLD::TxnRecovery());
-
-    REQUIRE(LLD::Contract->Exists(contractKey));
-    REQUIRE(LLD::Register->Exists(registerKey));
-    REQUIRE_FALSE(LLD::Logical->Exists(logicalKey));
-
-    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
-    REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
-    REQUIRE(JournalSize("_API") == nLogicalJournal);
-    REQUIRE(JournalSize("_CLIENT") == nClientJournal);
-
-    LLD::ResetTxnRecoveryRequired();
-    REQUIRE(LLD::Contract->TxnRelease());
-    REQUIRE(LLD::Register->TxnRelease());
-    REQUIRE(LLD::Logical->TxnRelease());
-    REQUIRE(LLD::Client->TxnRelease());
-
-    LLD::Contract->Erase(contractKey);
-    LLD::Register->Erase(registerKey);
 }

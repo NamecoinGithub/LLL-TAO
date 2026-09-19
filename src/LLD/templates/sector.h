@@ -114,10 +114,10 @@ namespace LLD
         /* Retain unsynced journal directory metadata across transaction aborts. */
         bool fJournalDirectoryDirty;
 
-        /* Sector files awaiting a durable data flush. */
+        /* Sector files awaiting a durable data flush, guarded by SECTOR_MUTEX. */
         std::set<uint16_t> setPendingSectorFiles;
 
-        /* True when a new sector file needs a parent-directory sync. */
+        /* First writable use and new sectors require a directory-ancestry sync. */
         bool fSectorDirectoryDirty;
 
 
