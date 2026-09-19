@@ -661,7 +661,7 @@ namespace LLD
     {
         LOCK(KEY_MUTEX);
 
-        /* Interval flush callers also hit empty participants; avoid walking the
+        /* Transaction commits also hit empty participants; avoid walking the
          * stream cache when nothing is waiting for a durable sync. */
         if(setDirtyFiles.empty() && !fDirectoryDirty)
             return true;

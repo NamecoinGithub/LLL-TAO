@@ -59,9 +59,6 @@ namespace
         config::mapArgs["-private"] = "1";
         config::mapArgs["-testnet"] = "92349234";
         config::mapArgs["-flushwallet"] = "false";
-        /* Unit tests force every-commit data durability for deterministic crash
-         * recovery coverage. Production defaults to -lldflush=2 (interval). */
-        config::mapArgs["-lldflush"] = "0";
         config::mapArgs["-apiauth"]     = "0";
         config::mapArgs["-generate"]    = "password";
 

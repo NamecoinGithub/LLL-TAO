@@ -111,7 +111,7 @@ namespace LLD
         SectorTransaction* pTransaction;
         bool fTxnReleaseRequired;
 
-        /* Sector files awaiting an interval data flush. */
+        /* Sector files awaiting a durable data flush. */
         std::set<uint16_t> setPendingSectorFiles;
 
         /* True when a new sector file needs a parent-directory sync. */

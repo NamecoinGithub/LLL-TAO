@@ -3852,20 +3852,13 @@ TEST_CASE("Recovery rolls forward a partial apply with empty group participants"
 
 
 #ifdef __linux__
-TEST_CASE("Interval data flush still commits readable state with durable journals",
+TEST_CASE("Transaction commits release journals only after durable apply",
           "[lld][txncommit][durability][lldflush]")
 {
     LedgerGuard ledgerGuard;
-    const std::string strPrevious = config::mapArgs.count("-lldflush")
-        ? config::mapArgs["-lldflush"] : std::string("0");
-    struct FlushGuard
-    {
-        std::string strPrevious;
-        ~FlushGuard() { config::mapArgs["-lldflush"] = strPrevious; }
-    } flushGuard{strPrevious};
+    ArgsMapGuard argsGuard;
 
-    /* Large interval: data-file fsyncs are skipped after the first process flush,
-     * while journal commit records remain fsynced every checkpoint. */
+    /* The former interval option must not weaken transaction durability. */
     config::mapArgs["-lldflush"] = "3600";
 
     const auto key = std::make_pair(std::string("lldflush-interval"), 1u);
@@ -3889,7 +3882,84 @@ TEST_CASE("Interval data flush still commits readable state with durable journal
     REQUIRE(nValue == 78);
 
     LLD::Ledger->Erase(key);
-    config::mapArgs["-lldflush"] = "0";
+}
+
+
+TEST_CASE("Later participant sync failures retain all journals for recovery",
+          "[lld][txncommit][durability][lldflush][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ArgsMapGuard argsGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+    config::mapArgs["-lldflush"] = "3600";
+
+    const auto key = std::make_pair(std::string("lldflush-sync-failure"), 1u);
+    LLD::Ledger->Erase(key);
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    std::filesystem::path path;
+    bool fErase = false;
+    SECTION("sector data must be synced")
+    {
+        path = config::GetDataDir() + "_LEDGER/datachain";
+    }
+    SECTION("keychain data must be synced")
+    {
+        path = config::GetDataDir() + "_LEDGER/keychain";
+        fErase = true;
+    }
+    const std::filesystem::path backup = path.string() + ".sync-test";
+    struct RestoreGuard
+    {
+        std::filesystem::path path;
+        std::filesystem::path backup;
+        ~RestoreGuard()
+        {
+            if(std::filesystem::exists(backup))
+                std::filesystem::rename(backup, path);
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnAbort();
+            LLD::Contract->TxnRelease();
+            LLD::Register->TxnRelease();
+            LLD::Trust->TxnRelease();
+            LLD::Legacy->TxnRelease();
+            LLD::Ledger->TxnRelease();
+        }
+    } restoreGuard{path, backup};
+
+    /* Cached streams still accept writes, but reopening the file for sync fails.
+     * The empty Contract participant must not suppress the later Ledger sync. */
+    std::filesystem::rename(path, backup);
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    if(fErase)
+        REQUIRE(LLD::Ledger->Erase(key));
+    else
+        REQUIRE(LLD::Ledger->Write(key, uint32_t(78)));
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(config::fShutdown.load());
+    for(const auto* name : {"_CONTRACT", "_REGISTER", "_TRUST", "_LEGACY", "_LEDGER"})
+        REQUIRE(JournalSize(name) > 0);
+
+    std::filesystem::rename(backup, path);
+    REQUIRE(LLD::TxnRecovery());
+    for(const auto* name : {"_CONTRACT", "_REGISTER", "_TRUST", "_LEGACY", "_LEDGER"})
+        REQUIRE(JournalSize(name) == 0);
+    if(fErase)
+        REQUIRE_FALSE(LLD::Ledger->Exists(key));
+    else
+    {
+        uint32_t nValue = 0;
+        REQUIRE(LLD::Ledger->Read(key, nValue));
+        REQUIRE(nValue == 78);
+    }
+    LLD::Ledger->Erase(key);
 }
 
 

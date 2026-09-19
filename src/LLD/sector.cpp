@@ -26,7 +26,6 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 #include <Util/include/hex.h>
 
-#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -44,41 +43,6 @@ namespace LLD
 {
     namespace
     {
-        /* Last successful durable data flush across all sector databases. */
-        std::atomic<uint64_t> nLastDataFlushMs{0};
-
-
-        /* -lldflush=<seconds>: 0 flushes data every commit; default 2 batches
-         * data fsyncs like Bitcoin Core chainstate flush intervals. Journal
-         * commit records remain fsynced on every checkpoint either way. */
-        int64_t DataFlushIntervalSeconds()
-        {
-            return config::GetArg("-lldflush", 2);
-        }
-
-
-        bool ShouldFlushDataFiles(const bool fForce = false)
-        {
-            if(fForce || config::fShutdown.load())
-                return true;
-
-            const int64_t nInterval = DataFlushIntervalSeconds();
-            if(nInterval <= 0)
-                return true;
-
-            const uint64_t nNow = runtime::timestamp(true);
-            const uint64_t nLast = nLastDataFlushMs.load(std::memory_order_relaxed);
-            return nLast == 0
-                || (nNow - nLast) >= static_cast<uint64_t>(nInterval) * 1000ull;
-        }
-
-
-        void MarkDataFilesFlushed()
-        {
-            nLastDataFlushMs.store(runtime::timestamp(true), std::memory_order_relaxed);
-        }
-
-
         bool SyncFileHandle(FILE* stream)
         {
             if(!stream)
@@ -200,7 +164,7 @@ namespace LLD
         if(MeterThread.joinable())
             MeterThread.join();
 
-        /* Best-effort durable flush of any interval-batched data files. */
+        /* Best-effort durable flush of any pending data files. */
         if(!(nFlags & FLAGS::READONLY) && pSectorKeys)
         {
             for(const uint16_t nSectorFile : setPendingSectorFiles)
@@ -834,10 +798,8 @@ namespace LLD
         /* Recovery requires a commit marker from every participant, including empty ones.
          *
          * Journal fsync is the write-ahead commit point. Keychain/sector data
-         * files are flushed on an interval during apply (see -lldflush), not
-         * here — pre-apply SyncTouchedFiles doubled blocking disk syncs on the
-         * hot path and matched the Bitcoin Core "constant chainstate flush"
-         * stall pattern versus RC-25 buffered writes. */
+         * files are synced during apply, before any participant's journal
+         * can be released. */
         pTransaction->ssJournal << std::string("commit");
 
         const std::string strJournal =
@@ -1018,38 +980,32 @@ namespace LLD
                     return debug::error(FUNCTION, "failed to write indexing entry");
             }
 
-            /* Queue touched sector files for the next durable data flush. */
+            /* Queue touched sector files for durable data flush. */
             setPendingSectorFiles.insert(setSectorFiles.begin(), setSectorFiles.end());
         }
 
-        /* Batch data-file fsyncs on an interval (Bitcoin Core chainstate pattern).
-         * Journal records are fsynced every checkpoint; data-file fsyncs are
-         * coalesced so block apply is not blocked on per-file durable writes.
-         * Empty participants still participate so pending files from earlier
-         * commits are flushed when the interval elapses. */
+        /* Every participant must make its data durable before the coordinator
+         * releases any journals. A prior participant's flush cannot cover this
+         * database, even when it was empty. */
         if(fProfile)
             timerFsync.Start();
-        if(ShouldFlushDataFiles())
+        for(const uint16_t nSectorFile : setPendingSectorFiles)
         {
-            for(const uint16_t nSectorFile : setPendingSectorFiles)
-            {
-                const std::string strPath = debug::safe_printstr(
-                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
-                if(!SyncFile(strPath))
-                    return debug::error(FUNCTION, "failed to sync sector file");
-            }
-
-            if(fSectorDirectoryDirty && !setPendingSectorFiles.empty()
-            && !SyncParentDirectory(strBaseLocation))
-                return debug::error(FUNCTION, "failed to sync sector directory");
-
-            if(!pSectorKeys->SyncTouchedFiles())
-                return debug::error(FUNCTION, "failed to sync keychain files");
-
-            setPendingSectorFiles.clear();
-            fSectorDirectoryDirty = false;
-            MarkDataFilesFlushed();
+            const std::string strPath = debug::safe_printstr(
+                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
+            if(!SyncFile(strPath))
+                return debug::error(FUNCTION, "failed to sync sector file");
         }
+
+        if(fSectorDirectoryDirty && !setPendingSectorFiles.empty()
+        && !SyncParentDirectory(strBaseLocation))
+            return debug::error(FUNCTION, "failed to sync sector directory");
+
+        if(!pSectorKeys->SyncTouchedFiles())
+            return debug::error(FUNCTION, "failed to sync keychain files");
+
+        setPendingSectorFiles.clear();
+        fSectorDirectoryDirty = false;
         if(fProfile)
             timerFsync.Stop();
 

@@ -187,7 +187,7 @@ namespace LLD
         /** Begin tracking a durable transaction apply.
           *
           *  Dirty file metadata is retained across applies until SyncTouchedFiles
-          *  succeeds so -lldflush interval batching can coalesce durable writes.
+          *  succeeds so failed syncs can be retried without losing dirty files.
           *
           **/
         void BeginDurabilityTracking();
