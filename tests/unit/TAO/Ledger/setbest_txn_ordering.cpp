@@ -49,6 +49,7 @@ ________________________________________________________________________________
 #include <LLD/types/trust.h>
 
 #include <TAO/API/include/global.h>
+#include <TAO/API/types/cache.h>
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/checkpoints.h>
@@ -1436,6 +1437,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load()        == hashGenesis);
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()          == 0u);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
 
     /* ---- (b) Disk index for fakeTxHash must have been rolled back ----
      * TxnAbort() deleted pTransaction before it could be flushed to disk.
@@ -1731,7 +1733,7 @@ TEST_CASE("Real SetBest(): rewind publishes the updated tip without its disconne
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load().nMoneySupply == committed.nMoneySupply);
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == first.GetHash());
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == first.nHeight);
-    REQUIRE(TAO::API::nBlockCounter.load() == first.nHeight);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 3);
     REQUIRE_FALSE(LLD::Ledger->HasBlock(second.GetHash()));
     REQUIRE_FALSE(TAO::Ledger::ChainState::fChainReorg.load());
 
@@ -2072,10 +2074,10 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(hashBest == hashCandidate);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == candidate.nHeight);
-        REQUIRE(TAO::API::nBlockCounter.load() == candidate.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 1);
     }
 
-    SECTION("rewind publishes the updated client tip and cache height")
+    SECTION("rewind publishes the updated client tip and advances cache generation")
     {
         REQUIRE(candidate.Index());
         TAO::Ledger::ClientBlock rewind;
@@ -2085,7 +2087,7 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().hashNextBlock == 0);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
-        REQUIRE(TAO::API::nBlockCounter.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 2);
     }
 
     SECTION("startup restores the committed client tip")
@@ -2163,6 +2165,7 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
     }
 
     LLD::Client->EraseBlock(hashCandidate);
@@ -4407,19 +4410,30 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
 }
 
 
-TEST_CASE("SetBestHeight publishes one supplied head for advances and rewinds",
+TEST_CASE("SetBestHeight publishes one supplied head and invalidates caches for every transition",
           "[ledger][setbest_txn][head]")
 {
     ChainStateGuard chainGuard;
     TAO::Ledger::BlockState state = chainGuard.savedBest;
-    for(const uint32_t height : {201u, 201u, 7u, 0u})
+    TAO::API::ResponseCache cache({TAO::API::ENABLE::CACHING, &TAO::API::nBlockCounter});
+    const encoding::json params = encoding::json::object();
+    encoding::json cached, response;
+    uint32_t generation = chainGuard.savedBlockCounter;
+    for(const uint32_t height : {201u, 201u, 7u, 201u, 0u})
     {
+        cached = {{"hash", state.GetHash().ToString()}};
+        cache.Insert(params, cached);
+        REQUIRE(cache.Get(params, response));
+        REQUIRE(response == cached);
         state.nHeight = height;
         ++state.nNonce;
         ++state.nChainTrust;
         TAO::Ledger::ChainState::SetBestHeight(state);
+        ++generation;
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load(std::memory_order_acquire) == height);
-        REQUIRE(TAO::API::nBlockCounter.load(std::memory_order_acquire) == height);
+        REQUIRE(TAO::API::nBlockCounter.load(std::memory_order_acquire) == generation);
+        REQUIRE_FALSE(cache.Get(params, response));
+        REQUIRE_FALSE(cache.Get(params, response));
         REQUIRE(TAO::Ledger::ChainState::nBestChainTrust.load() == state.nChainTrust);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == state.GetHash());
         const auto snapshot = TAO::Ledger::ChainState::tStateBest.load();
@@ -4428,6 +4442,7 @@ TEST_CASE("SetBestHeight publishes one supplied head for advances and rewinds",
     }
 
     state.nHeight = 400;
+    ++generation;
     const auto expectedHash = state.GetHash();
     auto reader = std::async(std::launch::async, [&]()
     {
@@ -4442,7 +4457,7 @@ TEST_CASE("SetBestHeight publishes one supplied head for advances and rewinds",
         return snapshot.GetHash() == expectedHash
             && TAO::Ledger::ChainState::hashBestChain.load() == expectedHash
             && TAO::Ledger::ChainState::nBestChainTrust.load() == state.nChainTrust
-            && TAO::API::nBlockCounter.load() == state.nHeight;
+            && TAO::API::nBlockCounter.load() == generation;
     });
     TAO::Ledger::ChainState::SetBestHeight(state);
     REQUIRE(reader.get());
@@ -4480,7 +4495,7 @@ TEST_CASE("Genesis SetBest publishes the complete head only after commit",
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == genesis.GetHash());
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == genesis.GetHash());
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
-        REQUIRE(TAO::API::nBlockCounter.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 1);
     }
 }
 

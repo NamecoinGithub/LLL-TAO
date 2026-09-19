@@ -78,7 +78,7 @@ namespace TAO
             tStateBest.store(state);
             hashBestChain.store(state.GetHash());
             nBestChainTrust.store(state.nChainTrust, std::memory_order_release);
-            TAO::API::nBlockCounter.store(state.nHeight, std::memory_order_release);
+            TAO::API::nBlockCounter.fetch_add(1, std::memory_order_release);
             nBestHeight.store(state.nHeight, std::memory_order_release);
         }
 

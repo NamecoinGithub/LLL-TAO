@@ -48,7 +48,8 @@ namespace TAO
             /** SetBestHeight
              *
              *  Publish a committed best state and its derived height/hash/trust
-             *  and API cache height. Supports rewinds as well as advances.
+             *  and advance the API cache generation independently of height.
+             *  Supports rewinds and same-height reorganizations as well as advances.
              *  Callers must serialize chain transitions and finish durable commit
              *  and checkpoint hardening first. Performs no disk I/O.
              *
