@@ -1180,7 +1180,7 @@ namespace TAO
 
                 /* Read the updated tip while failure can still roll back the transition. */
                 BlockState stateNewBest;
-                if(!LLD::Ledger->ReadBlock(hash, stateNewBest))
+                if(!LLD::Ledger->ReadBlock(hash, stateNewBest) || stateNewBest.GetHash() != hash)
                 {
                     LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                     return debug::error(FUNCTION, "failed to read updated best chain state");

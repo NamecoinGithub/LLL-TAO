@@ -1745,6 +1745,45 @@ TEST_CASE("Real SetBest(): rewind publishes the updated tip without its disconne
 }
 
 
+TEST_CASE("Real SetBest(): mismatched tip identity aborts before commit and publication",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard chainGuard;
+    BestChainDiskGuard bestChainGuard;
+    GenesisDiskGuard genesisDiskGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    auto fixture = BuildCheckpointChainFixture(2300, blocksGuard);
+    const bool fOuterTxn = GENERATE(false, true);
+
+    TAO::Ledger::BlockState corrupt = fixture.three;
+    ++corrupt.nNonce;
+    REQUIRE(corrupt.GetHash() != fixture.hashThree);
+    if(fOuterTxn)
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+
+    REQUIRE(LLD::Ledger->WriteBlock(fixture.hashThree, corrupt));
+
+    REQUIRE_FALSE(fixture.three.SetBest());
+    REQUIRE(debug::GetLastError().find("failed to read updated best chain state") != std::string::npos);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+
+    uint1024_t hashBestOnDisk;
+    REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+    REQUIRE(hashBestOnDisk == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == fixture.three.nHeight);
+    REQUIRE(TAO::Ledger::ChainState::nBestChainTrust.load() == fixture.three.nChainTrust);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
+    REQUIRE(fixture.three.GetHash() == fixture.hashThree);
+
+    TAO::Ledger::BlockState stored;
+    REQUIRE(LLD::Ledger->ReadBlock(fixture.hashThree, stored));
+    REQUIRE(stored.GetHash() == (fOuterTxn ? fixture.hashThree : corrupt.GetHash()));
+}
+
+
 TEST_CASE("Real SetBest(): debugreorg reads transactions before rewind erases them",
           "[ledger][setbest_txn][real]")
 {
