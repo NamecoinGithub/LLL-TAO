@@ -180,6 +180,8 @@ namespace LLD
     void BinaryHashMap::Initialize()
     {
         const bool fReadOnly = (nFlags & FLAGS::READONLY);
+        if(!fReadOnly)
+            fDirectoryDirty = true;
         const auto nOpenMode = std::ios::in | std::ios::binary
             | (fReadOnly ? std::ios::openmode(0) : std::ios::out);
 
@@ -191,15 +193,16 @@ namespace LLD
         std::string index = debug::safe_printstr(strBaseLocation, "_hashmap.index");
         if(!fReadOnly && !filesystem::exists(index))
         {
-            /* Generate empty space for new file. */
-            const static std::vector<uint8_t> vSpace(HASHMAP_TOTAL_BUCKETS * 4, 0);
+            /* Preserve the on-disk layout without physically writing every zero. */
+            const uint64_t nSize = uint64_t(HASHMAP_TOTAL_BUCKETS) * 4;
 
             /* Write the new disk index .*/
             std::fstream stream(index, std::ios::out | std::ios::binary | std::ios::trunc);
             if(!stream)
                 throw debug::exception(FUNCTION, "failed to create disk index");
 
-            stream.write((char*)&vSpace[0], vSpace.size());
+            stream.seekp(nSize - 1);
+            stream.put('\0');
             stream.flush();
             if(!stream)
             {
@@ -219,7 +222,7 @@ namespace LLD
             fDirectoryDirty = true;
 
             /* Debug output showing generation of disk index. */
-            debug::log(0, FUNCTION, "Generated Disk Index of ", vSpace.size(), " bytes");
+            debug::log(0, FUNCTION, "Generated Disk Index of ", nSize, " bytes");
         }
 
         /* Read the hashmap indexes. */
@@ -252,15 +255,16 @@ namespace LLD
         std::string file = debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), 0u);
         if(!fReadOnly && !filesystem::exists(file))
         {
-            /* Build a vector with empty bytes to flush to disk. */
-            std::vector<uint8_t> vSpace(static_cast<std::size_t>(HASHMAP_TOTAL_BUCKETS) * HASHMAP_KEY_ALLOCATION, 0);
+            /* Sparse holes read as zero-filled buckets on supported filesystems. */
+            const uint64_t nSize = uint64_t(HASHMAP_TOTAL_BUCKETS) * HASHMAP_KEY_ALLOCATION;
 
             /* Flush the empty keychain file to disk. */
             std::fstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
             if(!stream)
                 throw debug::exception(FUNCTION, "failed to create disk hashmap");
 
-            stream.write((char*)&vSpace[0], vSpace.size());
+            stream.seekp(nSize - 1);
+            stream.put('\0');
             stream.flush();
             if(!stream)
             {
@@ -280,7 +284,7 @@ namespace LLD
             fDirectoryDirty = true;
 
             /* Debug output showing generating of the hashmap file. */
-            debug::log(0, FUNCTION, "Generated Disk Hash Map 0 of ", vSpace.size(), " bytes");
+            debug::log(0, FUNCTION, "Generated Disk Hash Map 0 of ", nSize, " bytes");
         }
 
         /* Create the stream index object. */
@@ -520,16 +524,13 @@ namespace LLD
 
         if(!filesystem::exists(file))
         {
-            /* Blank vector to write empty space in new disk file. */
-            std::vector<uint8_t> vSpace(HASHMAP_KEY_ALLOCATION, 0);
-
-            /* Write the blank data to the new file handle. */
+            /* Extend the new collision file without a full zero-fill write. */
             std::ofstream stream(file, std::ios::out | std::ios::binary | std::ios::trunc);
             if(!stream)
                 return debug::error(FUNCTION, strerror(errno));
 
-            for(uint32_t i = 0; i < HASHMAP_TOTAL_BUCKETS; ++i)
-                stream.write((char*)&vSpace[0], vSpace.size());
+            stream.seekp(nExpectedSize - 1);
+            stream.put('\0');
 
             stream.flush();
             if(!stream)
@@ -699,10 +700,7 @@ namespace LLD
             if(path.has_relative_path() && path.filename().empty())
                 path = path.parent_path();
 
-            if(!filesystem::sync_directory(path.string()))
-                return false;
-
-            if(!config::SyncDataDirectories())
+            if(!config::SyncDataDirectoryChain(path.string()))
                 return false;
         }
 

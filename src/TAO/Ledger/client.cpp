@@ -664,6 +664,14 @@ namespace TAO
                 }
             }
 
+            /* Disconnect may have cleared this candidate's successor link. */
+            ClientBlock stateNewBest;
+            if(!LLD::Client->ReadBlock(hash, stateNewBest) || stateNewBest.GetHash() != hash)
+            {
+                LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                return debug::error(FUNCTION, "failed to read updated best client state");
+            }
+
             /* Stage and durably commit the authoritative pointer before publication. */
             if(!LLD::Client->WriteBestChain(hash))
             {
@@ -705,9 +713,7 @@ namespace TAO
             }
 
             /* Set the best chain variables. */
-            ChainState::tStateBest          = *this;
-            ChainState::hashBestChain      = hash;
-            ChainState::nBestHeight        = nHeight;
+            ChainState::SetBestHeight(stateNewBest);
 
             return true;
         }

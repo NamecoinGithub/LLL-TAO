@@ -796,9 +796,13 @@ rescan=1
 
 ### LLD transaction durability
 
-Journal commit records are synced on every transaction checkpoint. Each participant's sector and keychain files are then synced before any transaction journals are released. A failed data sync retains the journals for recovery.
+Transactions with physical changes sync commit records for every recovery-group participant, including empty participants. Each participant's sector and keychain files are then synced before any transaction journals are released. A failed data sync retains the journals for recovery. Wholly empty transactions avoid journal writes but still flush any pending data and directory obligations.
+
+New hashmap files retain their existing logical layout but use sparse zero-filled regions where the filesystem supports them, avoiding bulk zero writes. Directory ancestry is synced on first writable use and file creation, with failed sync obligations retained for retry. Warm content-only commits do not repeatedly sync directories.
 
 Interval data flushing is not supported by the current journal protocol; `lldflush` has no effect. Use `-syncprofile` to measure `checkpoint_fsync_us` / `apply_fsync_us` / `release_fsync_us`.
+
+These optimizations preserve crash recovery; they do not reinstate RC-25's lack of durability barriers. Matching buffered-write throughput for nonempty commits requires a different journaling/group-commit design, not disabling participant flushes.
 
 ---
 

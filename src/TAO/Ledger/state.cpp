@@ -909,6 +909,7 @@ namespace TAO
 
                 /* Set the genesis block. */
                 ChainState::tStateGenesis = *this;
+                ChainState::SetBestHeight(*this);
             }
             else
             {
@@ -1179,7 +1180,7 @@ namespace TAO
 
                 /* Read the updated tip while failure can still roll back the transition. */
                 BlockState stateNewBest;
-                if(!LLD::Ledger->ReadBlock(hash, stateNewBest))
+                if(!LLD::Ledger->ReadBlock(hash, stateNewBest) || stateNewBest.GetHash() != hash)
                 {
                     LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                     return debug::error(FUNCTION, "failed to read updated best chain state");
@@ -1335,10 +1336,7 @@ namespace TAO
 
                 /* Set the best chain variables. */
                 *this                          = stateNewBest;
-                ChainState::tStateBest          = stateNewBest;
-                ChainState::hashBestChain      = hash;
-                ChainState::nBestChainTrust    = nChainTrust;
-                ChainState::nBestHeight        = nHeight;
+                ChainState::SetBestHeight(stateNewBest);
 
                 /* Capture whether this SetBest invocation was completing a chain reorganization.
                  * Must be read before fChainReorg is cleared so the value is preserved for the
@@ -1353,9 +1351,6 @@ namespace TAO
                 /* Set our cache to update state. */
                 if(nTotalConnected > 0)
                     TAO::API::nTransactionCounter++;
-
-                /* Set our chain cache update now. */
-                TAO::API::nBlockCounter.store(nHeight);
 
                 /* Reset contract meters. */
                 nTotalContracts = 0;

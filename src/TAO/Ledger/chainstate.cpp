@@ -23,6 +23,8 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/genesis_block.h>
 #include <TAO/Ledger/include/timelocks.h>
 
+#include <TAO/API/include/global.h>
+
 #include <functional>
 #include <map>
 #include <vector>
@@ -68,6 +70,17 @@ namespace TAO
 
         /* The best block in the chain. */
         BlockState ChainState::tStateGenesis;
+
+
+        /* Publish all best-tip fields from the same committed state. */
+        void ChainState::SetBestHeight(const BlockState& state)
+        {
+            tStateBest.store(state);
+            hashBestChain.store(state.GetHash());
+            nBestChainTrust.store(state.nChainTrust, std::memory_order_release);
+            TAO::API::nBlockCounter.fetch_add(1, std::memory_order_release);
+            nBestHeight.store(state.nHeight, std::memory_order_release);
+        }
 
 
         /* Flag to tell if initial blocks are downloading. */
@@ -792,8 +805,7 @@ namespace TAO
             }
 
             /* Fill out the best chain stats. */
-            nBestHeight     = tStateBest.load().nHeight;
-            nBestChainTrust = tStateBest.load().nChainTrust;
+            SetBestHeight(tStateBest.load());
 
             /* Set the checkpoint. */
             hashCheckpoint = tStateBest.load().hashCheckpoint;
@@ -953,9 +965,6 @@ namespace TAO
 
             /* Print our best block to console. */
             tStateBest.load().print();
-
-            /* Set our cache best height. */
-            TAO::API::nBlockCounter.store(tStateBest.load().nHeight);
 
             /* Log the weights. */
             debug::log(0, FUNCTION, "WEIGHTS",

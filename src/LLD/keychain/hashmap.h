@@ -80,7 +80,7 @@ namespace LLD
         /** Files awaiting a successful durability sync. **/
         std::set<std::string> setDirtyFiles;
 
-        /** Whether a new hashmap file requires directory metadata syncing. **/
+        /** Directory metadata awaiting the first successful sync or a new file sync. **/
         bool fDirectoryDirty;
 
 
@@ -193,7 +193,7 @@ namespace LLD
         void BeginDurabilityTracking();
 
 
-        /** Sync dirty keychain files; directory sync only if a new file was created. **/
+        /** Sync dirty files and directory ancestry on first use or file creation. **/
         bool SyncTouchedFiles();
 
 

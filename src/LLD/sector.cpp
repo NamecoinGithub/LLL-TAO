@@ -73,9 +73,8 @@ namespace LLD
         }
 
 
-        /* Sync only the immediate parent directory of a path. Full directory
-         * chain walks on every commit were a major source of NODE disk stalls
-         * versus RC-25 buffered writes. */
+        /* Creation-dirty paths must also persist newly created database parents.
+         * Content-only commits never enter this directory-chain sync. */
         bool SyncParentDirectory(const std::string& strPath)
         {
             std::filesystem::path path = std::filesystem::path(strPath).lexically_normal();
@@ -87,11 +86,7 @@ namespace LLD
             if(path.empty())
                 return false;
 
-            if(!filesystem::sync_directory(path.string()))
-                return false;
-
-            /* First-run datadir parents still need a one-shot sync. */
-            return config::SyncDataDirectories();
+            return config::SyncDataDirectoryChain(path.string());
         }
 
     }
@@ -113,9 +108,9 @@ namespace LLD
     , runtime()
     , pTransaction(nullptr)
     , fTxnReleaseRequired(false)
-    , fJournalDirectoryDirty(false)
+    , fJournalDirectoryDirty(true)
     , setPendingSectorFiles( )
-    , fSectorDirectoryDirty(false)
+    , fSectorDirectoryDirty(true)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"),
           nFlagsIn | ((nFlagsIn & (FLAGS::FORCE | FLAGS::WRITE | FLAGS::APPEND)) ? 0 : FLAGS::READONLY),
           nBucketsIn))
@@ -401,6 +396,7 @@ namespace LLD
                 pstream->open(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile), std::ios::in | std::ios::out | std::ios::binary);
 
             /* If it is a New Sector, Assign a Binary Position. */
+            setPendingSectorFiles.insert(key.nSectorFile);
             pstream->seekp(key.nSectorStart, std::ios::beg);
 
             /* Write the size of record. */
@@ -479,6 +475,7 @@ namespace LLD
                     pstream->open(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile), std::ios::in | std::ios::out | std::ios::binary);
 
                 /* If it is a New Sector, Assign a Binary Position. */
+                setPendingSectorFiles.insert(static_cast<uint16_t>(nCurrentFile));
                 pstream->seekp(nCurrentFileSize, std::ios::beg);
 
                 /* Write the size of record. */
@@ -597,6 +594,7 @@ namespace LLD
                 pstream->open(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile), std::ios::in | std::ios::out | std::ios::binary);
 
             /* Seek to write at specific location. */
+            setPendingSectorFiles.insert(key.nSectorFile);
             pstream->seekp(key.nSectorStart + GetSizeOfCompactSize(key.nSectorSize), std::ios::beg);
 
             /* Update the record with blank data. */
@@ -610,6 +608,8 @@ namespace LLD
 
             /* Flush the rest of the write buffer in stream. */
             pstream->flush();
+            if(!*pstream)
+                return debug::error(FUNCTION, "failed to flush deleted sector data");
 
             /* Verboe output. */
             if(config::nVerbose >= 4)
@@ -658,20 +658,6 @@ namespace LLD
 
                 vIndexes.swap(vDiskBuffer);
                 nBufferBytes = 0;
-            }
-
-            /* Create a new file if the sector file size is over file size limits. */
-            if(nCurrentFileSize > MAX_SECTOR_FILE_SIZE)
-            {
-                debug::log(0, FUNCTION, "allocating new sector file ", nCurrentFile + 1);
-
-                /* Iterate the current file and reset current file sie. */
-                ++nCurrentFile;
-                nCurrentFileSize = 0;
-
-                /* Create a new file for next writes. */
-                std::fstream stream(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile), std::ios::out | std::ios::binary | std::ios::trunc);
-                stream.close();
             }
 
             /* Iterate through buffer to queue disk writes. */
@@ -937,20 +923,11 @@ namespace LLD
                     return debug::error(FUNCTION, "failed to erase from keychain");
             }
 
-            /* Track every sector file changed by this transaction. */
-            std::set<uint16_t> setSectorFiles;
-
             /* Commit the sector data. */
             for(const auto& item : pTransaction->mapTransactions)
             {
                 if(!Force(item.first, item.second))
                     return debug::error(FUNCTION, "failed to commit sector data");
-
-                SectorKey cKey;
-                if(!pSectorKeys->Get(item.first, cKey))
-                    return debug::error(FUNCTION, "failed to read committed sector key");
-
-                setSectorFiles.insert(cKey.nSectorFile);
             }
 
             /* Commit keychain entries. */
@@ -983,9 +960,6 @@ namespace LLD
                 if(!pSectorKeys->Put(cKey))
                     return debug::error(FUNCTION, "failed to write indexing entry");
             }
-
-            /* Queue touched sector files for durable data flush. */
-            setPendingSectorFiles.insert(setSectorFiles.begin(), setSectorFiles.end());
         }
 
         /* Every participant must make its data durable before the coordinator
@@ -993,22 +967,25 @@ namespace LLD
          * database, even when it was empty. */
         if(fProfile)
             timerFsync.Start();
-        for(const uint16_t nSectorFile : setPendingSectorFiles)
         {
-            const std::string strPath = debug::safe_printstr(
-                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
-            if(!SyncFile(strPath))
-                return debug::error(FUNCTION, "failed to sync sector file");
+            WRITE_LOCK(SECTOR_MUTEX);
+            for(const uint16_t nSectorFile : setPendingSectorFiles)
+            {
+                const std::string strPath = debug::safe_printstr(
+                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
+                if(!SyncFile(strPath))
+                    return debug::error(FUNCTION, "failed to sync sector file");
+            }
+
+            if(fSectorDirectoryDirty && !SyncParentDirectory(strBaseLocation))
+                return debug::error(FUNCTION, "failed to sync sector directory");
+
+            if(!pSectorKeys->SyncTouchedFiles())
+                return debug::error(FUNCTION, "failed to sync keychain files");
+
+            setPendingSectorFiles.clear();
+            fSectorDirectoryDirty = false;
         }
-
-        if(fSectorDirectoryDirty && !SyncParentDirectory(strBaseLocation))
-            return debug::error(FUNCTION, "failed to sync sector directory");
-
-        if(!pSectorKeys->SyncTouchedFiles())
-            return debug::error(FUNCTION, "failed to sync keychain files");
-
-        setPendingSectorFiles.clear();
-        fSectorDirectoryDirty = false;
         if(fProfile)
             timerFsync.Stop();
 
@@ -1160,6 +1137,13 @@ namespace LLD
                 else if(strType == "commit")
                 {
                     LOCK(TRANSACTION_MUTEX);
+                    /* A process restart does not prove directory entries survived
+                     * a previous failed sync. Persist ancestry before recovery apply. */
+                    if(fJournalDirectoryDirty && !SyncParentDirectory(strJournal))
+                        return debug::error(FUNCTION, "failed to sync recovered journal directory"),
+                               RECOVERY::FAILED;
+
+                    fJournalDirectoryDirty = false;
                     delete pTransaction;
                     pTransaction = pRecovery.release();
                     fTxnReleaseRequired = true;

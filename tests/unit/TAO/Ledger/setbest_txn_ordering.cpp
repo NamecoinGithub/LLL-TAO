@@ -49,6 +49,7 @@ ________________________________________________________________________________
 #include <LLD/types/trust.h>
 
 #include <TAO/API/include/global.h>
+#include <TAO/API/types/cache.h>
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/checkpoints.h>
@@ -67,6 +68,7 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 #include <Util/templates/datastream.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -76,6 +78,7 @@ ________________________________________________________________________________
 #include <functional>
 #include <future>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -87,6 +90,7 @@ ________________________________________________________________________________
 #ifndef WIN32
 #include <csignal>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
@@ -541,6 +545,76 @@ TEST_CASE("Sync profile parses bare switches and explicit intervals",
     REQUIRE(TAO::Ledger::SyncProfile::Enabled() == enabled);
     TAO::Ledger::SyncProfile::RecordBlockReceived();
     REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nBlocksReceived == (enabled ? 1 : 0));
+}
+
+
+TEST_CASE("Wholly empty transactions leave every participant journal untouched",
+          "[lld][txncommit][syncprofile]")
+{
+    ClientGuard clientGuard;
+    SyncProfileGuard syncProfileGuard;
+    const bool fClient = GENERATE(false, true);
+    const uint16_t nInstances = fClient ? LLD::INSTANCES::MERKLE : LLD::INSTANCES::CONSENSUS;
+    const std::vector<std::string> names = fClient
+        ? std::vector<std::string>{"_CONTRACT", "_REGISTER", "_CLIENT", "_API"}
+        : std::vector<std::string>{"_CONTRACT", "_REGISTER", "_LEDGER", "_TRUST", "_LEGACY"};
+    std::map<std::string, std::filesystem::file_time_type> times;
+    for(const auto& name : names)
+    {
+        const auto path = config::GetDataDir() + name + "/journal.dat";
+        if(std::filesystem::exists(path))
+            times[name] = std::filesystem::last_write_time(path);
+    }
+
+    for(uint32_t n = 0; n < 8; ++n)
+    {
+        LLD::TransactionGuard transaction(TAO::Ledger::FLAGS::BLOCK, nInstances);
+        REQUIRE(transaction);
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, nInstances));
+        REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, nInstances));
+    }
+
+    for(const auto& name : names)
+    {
+        const auto path = config::GetDataDir() + name + "/journal.dat";
+        if(times.count(name))
+            REQUIRE(std::filesystem::last_write_time(path) == times.at(name));
+        else
+            REQUIRE_FALSE(std::filesystem::exists(path));
+    }
+    const auto snapshot = TAO::Ledger::SyncProfile::GetSnapshot();
+    REQUIRE(snapshot.nTxnOpenedParticipants == names.size() * 8);
+    REQUIRE(snapshot.nTxnTouchedParticipants == 0);
+    REQUIRE(snapshot.nTxnCheckpointParticipants == 0);
+    REQUIRE(snapshot.nTxnApplyParticipants == 0);
+    REQUIRE(snapshot.nTxnReleaseParticipants == 0);
+}
+
+
+TEST_CASE("Empty physical commits still publish memory-only changes",
+          "[lld][txncommit][syncprofile]")
+{
+    SyncProfileGuard profileGuard;
+    const uint256_t address(0x737465);
+    TAO::Register::State state;
+    REQUIRE(LLD::Register->WriteState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    struct StateGuard
+    {
+        uint256_t address;
+        ~StateGuard()
+        {
+            LLD::Register->WriteState(address, TAO::Register::State(), TAO::Ledger::FLAGS::ERASE);
+        }
+    } guard{address};
+    REQUIRE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    LLD::TransactionGuard transaction;
+    REQUIRE(transaction);
+    REQUIRE(LLD::Register->WriteState(address, state, TAO::Ledger::FLAGS::ERASE));
+    REQUIRE_FALSE(LLD::Register->HasPendingTransactionWork());
+    REQUIRE(LLD::TxnCommit());
+    REQUIRE_FALSE(LLD::Register->ReadState(address, state, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnCheckpointParticipants == 0);
+    REQUIRE(TAO::Ledger::SyncProfile::GetSnapshot().nTxnReleaseParticipants == 0);
 }
 
 
@@ -1363,6 +1437,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load()        == hashGenesis);
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()          == 0u);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
 
     /* ---- (b) Disk index for fakeTxHash must have been rolled back ----
      * TxnAbort() deleted pTransaction before it could be flushed to disk.
@@ -1658,6 +1733,7 @@ TEST_CASE("Real SetBest(): rewind publishes the updated tip without its disconne
     REQUIRE(TAO::Ledger::ChainState::tStateBest.load().nMoneySupply == committed.nMoneySupply);
     REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == first.GetHash());
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == first.nHeight);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 3);
     REQUIRE_FALSE(LLD::Ledger->HasBlock(second.GetHash()));
     REQUIRE_FALSE(TAO::Ledger::ChainState::fChainReorg.load());
 
@@ -1666,6 +1742,45 @@ TEST_CASE("Real SetBest(): rewind publishes the updated tip without its disconne
     REQUIRE(hashBestOnDisk == first.GetHash());
 
     LLD::Ledger->EraseBlock(first.GetHash());
+}
+
+
+TEST_CASE("Real SetBest(): mismatched tip identity aborts before commit and publication",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard chainGuard;
+    BestChainDiskGuard bestChainGuard;
+    GenesisDiskGuard genesisDiskGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    auto fixture = BuildCheckpointChainFixture(2300, blocksGuard);
+    const bool fOuterTxn = GENERATE(false, true);
+
+    TAO::Ledger::BlockState corrupt = fixture.three;
+    ++corrupt.nNonce;
+    REQUIRE(corrupt.GetHash() != fixture.hashThree);
+    if(fOuterTxn)
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+
+    REQUIRE(LLD::Ledger->WriteBlock(fixture.hashThree, corrupt));
+
+    REQUIRE_FALSE(fixture.three.SetBest());
+    REQUIRE(debug::GetLastError().find("failed to read updated best chain state") != std::string::npos);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+
+    uint1024_t hashBestOnDisk;
+    REQUIRE(LLD::Ledger->ReadBestChain(hashBestOnDisk));
+    REQUIRE(hashBestOnDisk == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == fixture.hashThree);
+    REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == fixture.three.nHeight);
+    REQUIRE(TAO::Ledger::ChainState::nBestChainTrust.load() == fixture.three.nChainTrust);
+    REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
+    REQUIRE(fixture.three.GetHash() == fixture.hashThree);
+
+    TAO::Ledger::BlockState stored;
+    REQUIRE(LLD::Ledger->ReadBlock(fixture.hashThree, stored));
+    REQUIRE(stored.GetHash() == (fOuterTxn ? fixture.hashThree : corrupt.GetHash()));
 }
 
 
@@ -1997,6 +2112,21 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(LLD::Client->ReadBestChain(hashBest));
         REQUIRE(hashBest == hashCandidate);
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashCandidate);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == candidate.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 1);
+    }
+
+    SECTION("rewind publishes the updated client tip and advances cache generation")
+    {
+        REQUIRE(candidate.Index());
+        TAO::Ledger::ClientBlock rewind;
+        REQUIRE(LLD::Client->ReadBlock(hashGenesis, rewind));
+        REQUIRE(rewind.hashNextBlock == hashCandidate);
+        REQUIRE(rewind.SetBest());
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().hashNextBlock == 0);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 2);
     }
 
     SECTION("startup restores the committed client tip")
@@ -2074,6 +2204,7 @@ TEST_CASE("Client SetBest commits or rolls back the block, links, and best point
         REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == hashGenesis);
         REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
         REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
     }
 
     LLD::Client->EraseBlock(hashCandidate);
@@ -4314,4 +4445,285 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
 
     LLD::Contract->Erase(contractKey);
     LLD::Register->Erase(registerKey);
+    LLD::Logical->Erase(logicalKey);
+}
+
+
+TEST_CASE("SetBestHeight publishes one supplied head and invalidates caches for every transition",
+          "[ledger][setbest_txn][head]")
+{
+    ChainStateGuard chainGuard;
+    TAO::Ledger::BlockState state = chainGuard.savedBest;
+    TAO::API::ResponseCache cache({TAO::API::ENABLE::CACHING, &TAO::API::nBlockCounter});
+    const encoding::json params = encoding::json::object();
+    encoding::json cached, response;
+    uint32_t generation = chainGuard.savedBlockCounter;
+    for(const uint32_t height : {201u, 201u, 7u, 201u, 0u})
+    {
+        cached = {{"hash", state.GetHash().ToString()}};
+        cache.Insert(params, cached);
+        REQUIRE(cache.Get(params, response));
+        REQUIRE(response == cached);
+        state.nHeight = height;
+        ++state.nNonce;
+        ++state.nChainTrust;
+        TAO::Ledger::ChainState::SetBestHeight(state);
+        ++generation;
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load(std::memory_order_acquire) == height);
+        REQUIRE(TAO::API::nBlockCounter.load(std::memory_order_acquire) == generation);
+        REQUIRE_FALSE(cache.Get(params, response));
+        REQUIRE_FALSE(cache.Get(params, response));
+        REQUIRE(TAO::Ledger::ChainState::nBestChainTrust.load() == state.nChainTrust);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == state.GetHash());
+        const auto snapshot = TAO::Ledger::ChainState::tStateBest.load();
+        REQUIRE(snapshot.GetHash() == state.GetHash());
+        REQUIRE(snapshot.nHeight == height);
+    }
+
+    state.nHeight = 400;
+    ++generation;
+    const auto expectedHash = state.GetHash();
+    auto reader = std::async(std::launch::async, [&]()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while(TAO::Ledger::ChainState::nBestHeight.load(std::memory_order_acquire) != state.nHeight)
+        {
+            if(std::chrono::steady_clock::now() >= deadline)
+                return false;
+            std::this_thread::yield();
+        }
+        const auto snapshot = TAO::Ledger::ChainState::tStateBest.load();
+        return snapshot.GetHash() == expectedHash
+            && TAO::Ledger::ChainState::hashBestChain.load() == expectedHash
+            && TAO::Ledger::ChainState::nBestChainTrust.load() == state.nChainTrust
+            && TAO::API::nBlockCounter.load() == generation;
+    });
+    TAO::Ledger::ChainState::SetBestHeight(state);
+    REQUIRE(reader.get());
+}
+
+
+TEST_CASE("Genesis SetBest publishes the complete head only after commit",
+          "[ledger][setbest_txn][head][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard chainGuard;
+    BestChainDiskGuard bestGuard;
+    CheckpointBlocksDiskGuard blocksGuard;
+    auto genesis = chainGuard.savedGenesis;
+    genesis.nNonce = 0x737465;
+    genesis.hashNextBlock = 0;
+    blocksGuard.hashes.push_back(genesis.GetHash());
+    TAO::Ledger::ChainState::tStateGenesis = TAO::Ledger::BlockState();
+    const bool fail = GENERATE(false, true);
+    LLD::TransactionGuard transaction;
+    REQUIRE(transaction);
+    if(fail)
+        REQUIRE(LLD::Trust->TxnRelease());
+    REQUIRE(genesis.SetBest() == !fail);
+    if(fail)
+    {
+        REQUIRE(TAO::Ledger::ChainState::tStateGenesis.IsNull());
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == chainGuard.savedBestHeight);
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == chainGuard.savedBestHash);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter);
+    }
+    else
+    {
+        REQUIRE(TAO::Ledger::ChainState::tStateGenesis.GetHash() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::hashBestChain.load() == genesis.GetHash());
+        REQUIRE(TAO::Ledger::ChainState::nBestHeight.load() == genesis.nHeight);
+        REQUIRE(TAO::API::nBlockCounter.load() == chainGuard.savedBlockCounter + 1);
+    }
+}
+
+
+TEST_CASE("BinaryHashMap sparsely initializes correctly sized collision files",
+          "[lld][txncommit][durability][sparse]")
+{
+    const uint32_t buckets = GENERATE(1u, 4096u);
+    const std::filesystem::path path = config::GetDataDir() + "_SPARSE_HASHMAP_TEST";
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard() { std::filesystem::remove_all(path); }
+    } guard{path};
+    std::filesystem::remove_all(path);
+    const std::string base = path.string() + "/";
+    std::vector<uint8_t> first, second;
+    {
+        LLD::BinaryHashMap map(base, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, buckets);
+        REQUIRE(std::filesystem::file_size(path / "_hashmap.index") == uint64_t(buckets) * 4);
+        REQUIRE(std::filesystem::file_size(path / "_hashmap.00000") == uint64_t(buckets) * 45);
+        std::ifstream stream(path / "_hashmap.00000", std::ios::binary);
+        const std::vector<char> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        REQUIRE(std::all_of(bytes.begin(), bytes.end(), [](char value) { return value == 0; }));
+
+        std::map<uint32_t, std::vector<uint8_t>> seen;
+        for(uint32_t n = 0; n <= buckets; ++n)
+        {
+            DataStream key(SER_LLD, LLD::DATABASE_VERSION);
+            key << n;
+            const uint32_t bucket = map.GetBucket(key.Bytes());
+            const auto result = seen.emplace(bucket, key.Bytes());
+            if(!result.second)
+            {
+                first = result.first->second;
+                second = key.Bytes();
+                break;
+            }
+        }
+        REQUIRE_FALSE(first.empty());
+        REQUIRE(map.Put(LLD::SectorKey(LLD::STATE::READY, first, 0, 12, 9)));
+        REQUIRE(map.Put(LLD::SectorKey(LLD::STATE::READY, second, 0, 21, 9)));
+        REQUIRE(map.SyncTouchedFiles());
+        REQUIRE(std::filesystem::file_size(path / "_hashmap.00001") == uint64_t(buckets) * 45);
+        #ifdef __linux__
+        if(buckets == 4096)
+        {
+            struct stat info {};
+            REQUIRE(::stat((path / "_hashmap.00001").c_str(), &info) == 0);
+            REQUIRE(uint64_t(info.st_blocks) * 512 < uint64_t(info.st_size));
+        }
+        #endif
+    }
+    {
+        LLD::BinaryHashMap map(base, LLD::FLAGS::READONLY, buckets);
+        LLD::SectorKey key;
+        REQUIRE(map.Get(first, key));
+        REQUIRE(key.nSectorStart == 12);
+        REQUIRE(map.Get(second, key));
+        REQUIRE(key.nSectorStart == 21);
+    }
+}
+
+
+#ifdef __linux__
+TEST_CASE("Journal ancestry remains dirty through retry and database reopen",
+          "[lld][txncommit][durability]")
+{
+    if(geteuid() == 0)
+    {
+        WARN("Directory permission failures require a non-root user");
+        return;
+    }
+    const bool reopen = GENERATE(false, true);
+    const std::string name = "_JOURNAL_ANCESTRY_TEST/child";
+    const std::filesystem::path parent = config::GetDataDir() + "_JOURNAL_ANCESTRY_TEST";
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+            std::filesystem::remove_all(path);
+        }
+    } guard{parent};
+    using Database = LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU>;
+    auto database = std::make_unique<Database>(name, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+    if(reopen)
+    {
+        database->TxnBegin();
+        REQUIRE(database->TxnCheckpoint());
+        REQUIRE(database->TxnCommit());
+        REQUIRE(database->TxnRelease());
+        database.reset();
+        database = std::make_unique<Database>(name, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+    }
+    std::filesystem::permissions(parent,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    for(unsigned int attempt = 0; attempt < 2; ++attempt)
+    {
+        database->TxnBegin();
+        REQUIRE(database->Write(uint32_t(1), uint32_t(77)));
+        REQUIRE_FALSE(database->TxnCheckpoint());
+        REQUIRE(database->TxnRelease());
+        REQUIRE_FALSE(database->Exists(uint32_t(1)));
+    }
+    std::filesystem::permissions(parent, std::filesystem::perms::owner_all);
+    database->TxnBegin();
+    REQUIRE(database->Write(uint32_t(1), uint32_t(78)));
+    REQUIRE(database->TxnCheckpoint());
+    REQUIRE(database->TxnCommit());
+    REQUIRE(database->TxnRelease());
+
+    /* Warm commits do not rewalk the ancestry for existing files. */
+    std::filesystem::permissions(parent,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    database->TxnBegin();
+    REQUIRE(database->Write(uint32_t(1), uint32_t(79)));
+    REQUIRE(database->TxnCheckpoint());
+    REQUIRE(database->TxnCommit());
+    REQUIRE(database->TxnRelease());
+}
+
+
+TEST_CASE("Keychain ancestry sync obligations survive repeated failures",
+          "[lld][txncommit][durability]")
+{
+    if(geteuid() == 0)
+    {
+        WARN("Directory permission failures require a non-root user");
+        return;
+    }
+    const std::filesystem::path parent = config::GetDataDir() + "_KEYCHAIN_ANCESTRY_TEST";
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+            std::filesystem::remove_all(path);
+        }
+    } guard{parent};
+    LLD::BinaryHashMap map((parent / "child" / "keychain").string() + "/",
+        LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1);
+    std::filesystem::permissions(parent,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    REQUIRE_FALSE(map.SyncTouchedFiles());
+    map.BeginDurabilityTracking();
+    REQUIRE_FALSE(map.SyncTouchedFiles());
+    std::filesystem::permissions(parent, std::filesystem::perms::owner_all);
+    REQUIRE(map.SyncTouchedFiles());
+    std::filesystem::permissions(parent,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    REQUIRE(map.SyncTouchedFiles());
+}
+#endif
+
+
+TEST_CASE("Empty apply retains sector writes made outside a transaction until synced",
+          "[lld][txncommit][durability]")
+{
+    const std::string name = "_PENDING_SECTOR_TEST";
+    const std::filesystem::path path = config::GetDataDir() + name;
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            if(std::filesystem::exists(path / "backup"))
+                std::filesystem::rename(path / "backup", path / "datachain");
+            std::filesystem::remove_all(path);
+        }
+    } guard{path};
+    LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU> database(
+        name, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+    database.TxnBegin();
+    REQUIRE(database.Write(uint32_t(1), uint32_t(77)));
+    REQUIRE(database.TxnCheckpoint());
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+    REQUIRE(database.Write(uint32_t(1), uint32_t(78)));
+    std::filesystem::rename(path / "datachain", path / "backup");
+    database.TxnBegin();
+    REQUIRE_FALSE(database.TxnCommit());
+    REQUIRE_FALSE(database.TxnCommit());
+    std::filesystem::rename(path / "backup", path / "datachain");
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+    uint32_t value = 0;
+    REQUIRE(database.Read(uint32_t(1), value));
+    REQUIRE(value == 78);
 }
