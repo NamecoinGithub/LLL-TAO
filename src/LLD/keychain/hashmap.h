@@ -184,11 +184,16 @@ namespace LLD
         void Flush();
 
 
-        /** Begin tracking a durable transaction apply. **/
+        /** Begin tracking a durable transaction apply.
+          *
+          *  Dirty file metadata is retained across applies until SyncTouchedFiles
+          *  succeeds so failed syncs can be retried without losing dirty files.
+          *
+          **/
         void BeginDurabilityTracking();
 
 
-        /** Sync only files modified by the current durable transaction apply. **/
+        /** Sync dirty keychain files; directory sync only if a new file was created. **/
         bool SyncTouchedFiles();
 
 

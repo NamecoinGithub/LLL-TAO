@@ -35,6 +35,7 @@ ________________________________________________________________________________
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
+#include <set>
 
 namespace LLD
 {
@@ -109,6 +110,15 @@ namespace LLD
         /* Class to handle Transaction Data. */
         SectorTransaction* pTransaction;
         bool fTxnReleaseRequired;
+
+        /* Retain unsynced journal directory metadata across transaction aborts. */
+        bool fJournalDirectoryDirty;
+
+        /* Sector files awaiting a durable data flush. */
+        std::set<uint16_t> setPendingSectorFiles;
+
+        /* True when a new sector file needs a parent-directory sync. */
+        bool fSectorDirectoryDirty;
 
 
         /* Sector Keys Database. */

@@ -794,6 +794,14 @@ rescan=1
 
 ---
 
+### LLD transaction durability
+
+Journal commit records are synced on every transaction checkpoint. Each participant's sector and keychain files are then synced before any transaction journals are released. A failed data sync retains the journals for recovery.
+
+Interval data flushing is not supported by the current journal protocol; `lldflush` has no effect. Use `-syncprofile` to measure `checkpoint_fsync_us` / `apply_fsync_us` / `release_fsync_us`.
+
+---
+
 ## Logging Configuration
 
 ### `verbose`

@@ -3852,6 +3852,222 @@ TEST_CASE("Recovery rolls forward a partial apply with empty group participants"
 
 
 #ifdef __linux__
+TEST_CASE("Failed journal directory sync is retried after abort",
+          "[lld][txncommit][durability]")
+{
+    if(geteuid() == 0)
+    {
+        WARN("Directory permission failures require a non-root user");
+        return;
+    }
+
+    const std::string strName = "_JOURNAL_DIRECTORY_SYNC_TEST";
+    const std::filesystem::path pathBase = config::GetDataDir() + strName;
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+            std::filesystem::remove_all(path);
+        }
+    } directoryGuard{pathBase};
+    LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU> database(
+        strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+    const auto pathJournal = pathBase / "journal.dat";
+
+    /* Allow journal creation and truncation, but deny opening its directory for sync. */
+    std::filesystem::permissions(pathBase,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    for(unsigned int nAttempt = 0; nAttempt < 2; ++nAttempt)
+    {
+        database.TxnBegin();
+        REQUIRE(database.Write(uint32_t(1), uint32_t(77)));
+        REQUIRE_FALSE(database.TxnCheckpoint());
+        REQUIRE(std::filesystem::file_size(pathJournal) > 0);
+        REQUIRE(database.TxnRelease());
+        REQUIRE(std::filesystem::file_size(pathJournal) == 0);
+        REQUIRE_FALSE(database.Exists(uint32_t(1)));
+    }
+
+    std::filesystem::permissions(pathBase, std::filesystem::perms::owner_all);
+    database.TxnBegin();
+    REQUIRE(database.Write(uint32_t(1), uint32_t(78)));
+    REQUIRE(database.TxnCheckpoint());
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+    uint32_t nValue = 0;
+    REQUIRE(database.Read(uint32_t(1), nValue));
+    REQUIRE(nValue == 78);
+
+    /* A successfully synced journal needs no directory sync on subsequent checkpoints. */
+    std::filesystem::permissions(pathBase,
+        std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+    database.TxnBegin();
+    REQUIRE(database.TxnCheckpoint());
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+}
+
+
+TEST_CASE("Empty and key-only applies sync newly created sector directories",
+          "[lld][txncommit][durability]")
+{
+    if(geteuid() == 0)
+    {
+        WARN("Directory permission failures require a non-root user");
+        return;
+    }
+
+    const bool fKeyOnly = GENERATE(false, true);
+    const std::string strName = "_SECTOR_DIRECTORY_SYNC_TEST";
+    const std::filesystem::path pathBase = config::GetDataDir() + strName;
+    const auto pathSector = pathBase / "datachain";
+    struct DirectoryGuard
+    {
+        std::filesystem::path path;
+        ~DirectoryGuard()
+        {
+            std::filesystem::permissions(path / "datachain", std::filesystem::perms::owner_all);
+            std::filesystem::remove_all(path);
+        }
+    } directoryGuard{pathBase};
+    LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU> database(
+        strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1, 1024);
+    REQUIRE(std::filesystem::exists(pathSector / "_block.00000"));
+
+    std::filesystem::permissions(pathSector, std::filesystem::perms::owner_exec);
+    database.TxnBegin();
+    if(fKeyOnly)
+        REQUIRE(database.Write(uint32_t(1)));
+    REQUIRE(database.TxnCheckpoint());
+    REQUIRE_FALSE(database.TxnCommit());
+    REQUIRE_FALSE(database.TxnCommit());
+    REQUIRE(std::filesystem::file_size(pathBase / "journal.dat") > 0);
+
+    std::filesystem::permissions(pathSector, std::filesystem::perms::owner_all);
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+    REQUIRE(std::filesystem::file_size(pathBase / "journal.dat") == 0);
+    if(fKeyOnly)
+        REQUIRE(database.Exists(uint32_t(1)));
+
+    database.TxnBegin();
+    REQUIRE(database.Write(uint32_t(2), uint32_t(79)));
+    REQUIRE(database.TxnCheckpoint());
+    REQUIRE(database.TxnCommit());
+    REQUIRE(database.TxnRelease());
+    uint32_t nValue = 0;
+    REQUIRE(database.Read(uint32_t(2), nValue));
+    REQUIRE(nValue == 79);
+}
+
+
+TEST_CASE("Transaction commits release journals only after durable apply",
+          "[lld][txncommit][durability]")
+{
+    LedgerGuard ledgerGuard;
+
+    const auto key = std::make_pair(std::string("durable-apply"), 1u);
+    LLD::Ledger->Erase(key);
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(JournalSize("_LEDGER") == 0);
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 77);
+
+    /* Consecutive commits must each apply durably before releasing journals. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(78)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(JournalSize("_LEDGER") == 0);
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 78);
+
+    LLD::Ledger->Erase(key);
+}
+
+
+TEST_CASE("Later participant sync failures retain all journals for recovery",
+          "[lld][txncommit][durability][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+
+    const auto key = std::make_pair(std::string("durable-sync-failure"), 1u);
+    LLD::Ledger->Erase(key);
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    std::filesystem::path path;
+    bool fErase = false;
+    SECTION("sector data must be synced")
+    {
+        path = config::GetDataDir() + "_LEDGER/datachain";
+    }
+    SECTION("keychain data must be synced")
+    {
+        path = config::GetDataDir() + "_LEDGER/keychain";
+        fErase = true;
+    }
+    const std::filesystem::path backup = path.string() + ".sync-test";
+    struct RestoreGuard
+    {
+        std::filesystem::path path;
+        std::filesystem::path backup;
+        ~RestoreGuard()
+        {
+            if(std::filesystem::exists(backup))
+                std::filesystem::rename(backup, path);
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnAbort();
+            LLD::Contract->TxnRelease();
+            LLD::Register->TxnRelease();
+            LLD::Trust->TxnRelease();
+            LLD::Legacy->TxnRelease();
+            LLD::Ledger->TxnRelease();
+        }
+    } restoreGuard{path, backup};
+
+    /* Cached streams still accept writes, but reopening the file for sync fails.
+     * The empty Contract participant must not suppress the later Ledger sync. */
+    std::filesystem::rename(path, backup);
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    if(fErase)
+        REQUIRE(LLD::Ledger->Erase(key));
+    else
+        REQUIRE(LLD::Ledger->Write(key, uint32_t(78)));
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(config::fShutdown.load());
+    for(const auto* name : {"_CONTRACT", "_REGISTER", "_TRUST", "_LEGACY", "_LEDGER"})
+        REQUIRE(JournalSize(name) > 0);
+
+    std::filesystem::rename(backup, path);
+    REQUIRE(LLD::TxnRecovery());
+    for(const auto* name : {"_CONTRACT", "_REGISTER", "_TRUST", "_LEGACY", "_LEDGER"})
+        REQUIRE(JournalSize(name) == 0);
+    if(fErase)
+        REQUIRE_FALSE(LLD::Ledger->Exists(key));
+    else
+    {
+        uint32_t nValue = 0;
+        REQUIRE(LLD::Ledger->Read(key, nValue));
+        REQUIRE(nValue == 78);
+    }
+    LLD::Ledger->Erase(key);
+}
+
+
 TEST_CASE("Failed checkpoint writes still require durable journal release",
           "[lld][txncommit][recovery]")
 {
