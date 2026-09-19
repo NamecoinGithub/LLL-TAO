@@ -111,6 +111,9 @@ namespace LLD
         SectorTransaction* pTransaction;
         bool fTxnReleaseRequired;
 
+        /* Retain unsynced journal directory metadata across transaction aborts. */
+        bool fJournalDirectoryDirty;
+
         /* Sector files awaiting a durable data flush. */
         std::set<uint16_t> setPendingSectorFiles;
 

@@ -113,6 +113,7 @@ namespace LLD
     , runtime()
     , pTransaction(nullptr)
     , fTxnReleaseRequired(false)
+    , fJournalDirectoryDirty(false)
     , setPendingSectorFiles( )
     , fSectorDirectoryDirty(false)
     , pSectorKeys(new KeychainType((config::GetDataDir() + strName + "/keychain/"),
@@ -174,7 +175,7 @@ namespace LLD
                 SyncFile(strPath);
             }
 
-            if(fSectorDirectoryDirty && !setPendingSectorFiles.empty())
+            if(fSectorDirectoryDirty)
                 SyncParentDirectory(strBaseLocation);
 
             pSectorKeys->SyncTouchedFiles();
@@ -804,7 +805,8 @@ namespace LLD
 
         const std::string strJournal =
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
-        const bool fJournalCreated = !filesystem::exists(strJournal);
+        if(!filesystem::exists(strJournal))
+            fJournalDirectoryDirty = true;
 
         /* Create an append only stream. */
         FILE* stream = std::fopen(strJournal.c_str(), "ab");
@@ -835,9 +837,11 @@ namespace LLD
         if(std::fclose(stream) != 0)
             return debug::error(FUNCTION, "failed to close journal file");
 
-        /* Directory entries only need a sync when the journal file is new. */
-        if(fJournalCreated && !SyncParentDirectory(strJournal))
+        /* Keep new journal entries dirty until their directory sync succeeds. */
+        if(fJournalDirectoryDirty && !SyncParentDirectory(strJournal))
             return debug::error(FUNCTION, "failed to sync journal directory");
+
+        fJournalDirectoryDirty = false;
 
         if(fProfile)
         {
@@ -997,8 +1001,7 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to sync sector file");
         }
 
-        if(fSectorDirectoryDirty && !setPendingSectorFiles.empty()
-        && !SyncParentDirectory(strBaseLocation))
+        if(fSectorDirectoryDirty && !SyncParentDirectory(strBaseLocation))
             return debug::error(FUNCTION, "failed to sync sector directory");
 
         if(!pSectorKeys->SyncTouchedFiles())
