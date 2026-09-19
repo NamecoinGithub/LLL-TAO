@@ -344,6 +344,38 @@ mininglegacytimeout=300
 
 ## Network Configuration
 
+### `syncpeers`
+
+**Type:** Integer (clamped to 1–16)
+
+**Default:** `4`
+
+**Description:** Maximum simultaneous outbound blockchain-sync batch sources.
+
+The ledger sync-status response reports the current batch source count as `activePeers`.
+
+Each peer has one outstanding `LIST` request and an independent progress timeout.
+Healthy peers continue when another peer stalls; rotation does not disconnect
+peers or sleep on the networking thread. Batches resume from the shared committed
+chain tip rather than a lagging peer's cursor. Persisted, hash-verified side
+branches retain their cursor so a multi-batch fork can reach its winning tip.
+
+This uses the existing Tritium `LIST`/`SYNC` wire format, not a new range protocol:
+concurrent batches can overlap and normal duplicate-block checks still apply.
+It provides redundant sources, not disjoint height-range downloads or a guarantee
+of aggregate bandwidth scaling. Use `syncpeers=1` to minimize duplicate traffic.
+Pre-Tritium peers (protocol below 3.0) do not consume sync slots; compatible older
+Tritium peers can serve ordinary batches. Client mode retains one sync source and
+its existing minimum protocol requirement.
+
+A peer making no accepted-block progress for 60 seconds releases its slot.
+Before reusing that connection, its old batch must finish with `LASTINDEX` and
+the 30-second cooldown must expire. Tip and batch-end subscriptions remain valid
+while queued replies drain, including after synchronization completes.
+Consensus validation, transaction durability, and disk commit ordering are unchanged.
+
+---
+
 ### `testnet`
 
 **Type:** Integer  

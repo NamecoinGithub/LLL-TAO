@@ -525,6 +525,9 @@ namespace LLP
          *  sync peer fires off a GET to a randomly-selected helper peer). **/
         TxResponseWindow m_txRespWindow;
 
+        /** LIST tails outlive transaction-authorization TTLs, including in client mode. **/
+        uint32_t m_nPendingRecoveryLists = 0;
+
         /** Disconnect is terminal for recovery admission, even before socket teardown. **/
         bool m_fRecoveryDisconnected = false;
 
@@ -532,6 +535,15 @@ namespace LLP
         std::recursive_mutex m_txRespWindowMutex;
 
         void ReleaseMissingTransactions();
+
+        /** Retire only this peer's batch; other peers continue downloading. **/
+        void PauseSync();
+
+        /** Finalize only at an advertised, committed network tip. **/
+        bool CompleteSync();
+
+        /** Includes retired batches whose untagged LASTINDEX has not drained. **/
+        bool HasSyncRequest() const;
 
 
     public:
@@ -733,7 +745,7 @@ namespace LLP
          *  @param[in] fSubscribe Flag to determine whether subscibing or unsubscribing
          *
          **/
-        void Subscribe(const uint16_t nFlags, bool fSubscribe = true);
+        bool Subscribe(const uint16_t nFlags, bool fSubscribe = true);
 
 
         /** Unsubscribe
@@ -795,6 +807,9 @@ namespace LLP
          *
          **/
         static bool Syncing();
+
+        /** Number of peers currently serving initial-sync batches. **/
+        static size_t SyncPeerCount();
 
 
         /** GetNode
@@ -866,7 +881,10 @@ namespace LLP
                                    const uint8_t nMsg, Args&&... args)
         {
             RECURSIVE(m_txRespWindowMutex);
-            if(m_fRecoveryDisconnected)
+            if(m_fRecoveryDisconnected || HasSyncRequest())
+                return false;
+            const bool fTrackList = eKind == TxResponseKind::LIST && nProtocolVersion >= MIN_TRITIUM_VERSION;
+            if(fTrackList && m_nPendingRecoveryLists >= MAX_PENDING_MISSING_TRANSACTIONS)
                 return false;
 
             const uint64_t nRequest = !config::fClient.load()
@@ -876,8 +894,19 @@ namespace LLP
 
             try
             {
+                /* Initial-sync admission must wait for an outstanding recovery
+                 * LIST even when its raw-transaction authorization expires. */
+                if(fTrackList && !Subscribe(SUBSCRIPTION::LASTINDEX & ~nSubscriptions.load()))
+                {
+                    RollbackTxResponseWindow(nRequest);
+                    return false;
+                }
                 if(PushMessage(nMsg, std::forward<Args>(args)...))
+                {
+                    if(fTrackList)
+                        ++m_nPendingRecoveryLists;
                     return true;
+                }
             }
             catch(...)
             {
@@ -1014,6 +1043,9 @@ namespace LLP
          *
          **/
         void Sync();
+
+        /** Whether this connection owns an outstanding initial-sync batch. **/
+        bool IsSyncPeer() const;
 
     };
 } // end namespace LLP
