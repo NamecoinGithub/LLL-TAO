@@ -708,10 +708,11 @@ namespace LLD
             return true;
         }
 
+        const uint32_t nTouchedParticipants = CountTouchedParticipants(nReleaseInstances);
         if(TAO::Ledger::SyncProfile::Enabled())
             TAO::Ledger::SyncProfile::RecordTxnParticipants(
                 CountParticipants(nReleaseInstances),
-                CountTouchedParticipants(nReleaseInstances));
+                nTouchedParticipants);
 
         if(fTxnRecoveryRequired.load())
         {
@@ -724,34 +725,43 @@ namespace LLD
          * is applied. A checkpoint failure has no durable global decision and is
          * therefore safe to abort in full. */
         bool fCheckpointsComplete = true;
+        const auto Checkpoint = [nTouchedParticipants](auto* pDatabase)
+        {
+            /* A wholly empty transaction has no recovery decision to record.
+             * Still validate ownership and run apply below to drain pending
+             * durability obligations. Mixed transactions need every marker. */
+            return nTouchedParticipants == 0
+                ? pDatabase->HasTransaction()
+                : pDatabase->TxnCheckpoint();
+        };
 
         /* Set a checkpoint for Logical DB. */
         if(Logical && (nReleaseInstances & INSTANCES::LOGICAL))
-            fCheckpointsComplete = Logical->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Logical) && fCheckpointsComplete;
 
         /* Set a checkpoint for contract DB. */
         if(Contract && (nReleaseInstances & INSTANCES::CONTRACT))
-            fCheckpointsComplete = Contract->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Contract) && fCheckpointsComplete;
 
         /* Set a checkpoint for register DB. */
         if(Register && (nReleaseInstances & INSTANCES::REGISTER))
-            fCheckpointsComplete = Register->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Register) && fCheckpointsComplete;
 
         /* Set a checkpoint for ledger DB. */
         if(Ledger && (nReleaseInstances & INSTANCES::LEDGER))
-            fCheckpointsComplete = Ledger->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Ledger) && fCheckpointsComplete;
 
         /* Set a checkpoint for client DB. */
         if(Client && (nReleaseInstances & INSTANCES::CLIENT))
-            fCheckpointsComplete = Client->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Client) && fCheckpointsComplete;
 
         /* Set a checkpoint for trust DB. */
         if(Trust && (nReleaseInstances & INSTANCES::TRUST))
-            fCheckpointsComplete = Trust->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Trust) && fCheckpointsComplete;
 
         /* Set a checkpoint for legacy DB. */
         if(Legacy && (nReleaseInstances & INSTANCES::LEGACY))
-            fCheckpointsComplete = Legacy->TxnCheckpoint() && fCheckpointsComplete;
+            fCheckpointsComplete = Checkpoint(Legacy) && fCheckpointsComplete;
 
         if(!fCheckpointsComplete)
         {
