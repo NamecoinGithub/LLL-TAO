@@ -396,6 +396,55 @@ TEST_CASE("Concurrent sync batches authorize each peer and continue at the share
     REQUIRE(helper.Receive().empty());
 }
 
+TEST_CASE("Sync batch continuation prioritizes deferred missing transactions",
+    "[llp][ledger][multi_peer_sync]")
+{
+    BatchSyncSettings settings;
+    RecoverySocketNode node;
+    BatchSyncSettings::Prepare(node);
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE_FALSE(node.Receive().empty());
+
+    const uint1024_t missing(0xCB0203);
+    REQUIRE(node.RequestMissingTransactions(missing));
+    REQUIRE(node.Receive().empty());
+
+    SECTION("Recovery GET is queued at the batch boundary")
+    {
+        node.reject = false;
+    }
+    SECTION("Rejected recovery GET retains priority until retry")
+    {
+        node.reject = true;
+    }
+
+    DataStream batchEnd(SER_NETWORK, LLP::MIN_PROTO_VERSION);
+    batchEnd << uint8_t(LLP::TritiumNode::TYPES::LASTINDEX)
+             << uint8_t(LLP::TritiumNode::TYPES::BLOCK) << uint1024_t(0xCB0204);
+    node.INCOMING = LLP::TritiumNode::NewMessage(LLP::TritiumNode::ACTION::NOTIFY, batchEnd);
+    REQUIRE(node.ProcessPacket());
+    REQUIRE_FALSE(node.IsSyncPeer());
+
+    if(node.reject)
+    {
+        REQUIRE(node.Receive().empty());
+        node.reject = false;
+        REQUIRE(node.RequestMissingTransactions());
+    }
+    REQUIRE(node.Receive() == RecoverySocketNode::ExpectedGet(missing));
+
+    node.Sync();
+    REQUIRE_FALSE(node.IsSyncPeer());
+    REQUIRE(node.Receive().empty());
+
+    node.CloseTxResponseWindowForBlock(missing);
+    REQUIRE_FALSE(node.RequestMissingTransactions());
+    node.Sync();
+    REQUIRE(node.IsSyncPeer());
+    REQUIRE(node.Receive() == BatchSyncSettings::ExpectedList());
+}
+
 TEST_CASE("Sync rotation keeps commit notifications and late batch boundaries valid",
     "[llp][ledger][multi_peer_sync]")
 {

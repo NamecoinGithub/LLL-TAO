@@ -2780,7 +2780,8 @@ namespace LLP
                  * Finalization and the next batch must use the fully parsed tip. */
                 if(fSyncCompletionCandidate && CompleteSync())
                     debug::log(0, NODE, "ACTION::NOTIFY: Synchronization COMPLETE at ", hashBestChain.SubString());
-                else if(fContinueSync)
+                /* Give retained missing-transaction work priority over the next batch. */
+                else if(fContinueSync && !RequestMissingTransactions())
                     Sync();
 
                 /* Run deferred BESTCHAIN recovery now that inventory GET
