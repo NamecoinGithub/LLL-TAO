@@ -543,6 +543,58 @@ TEST_CASE("LLD transaction coordinator serializes MINER and SANITIZE overlays",
 }
 
 
+TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transaction",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool fContenderWaiting = false;
+    std::atomic<bool> fContenderAcquired{false};
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+
+    LLD::SetTxnCoordinatorWaitHook([&]()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            fContenderWaiting = true;
+        }
+        condition.notify_one();
+    });
+
+    std::thread contender([&]()
+    {
+        const bool fAcquired =
+            LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        fContenderAcquired.store(fAcquired);
+        if(fAcquired)
+            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+    });
+
+    bool fSawContenderWaiting = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        fSawContenderWaiting = condition.wait_for(lock, std::chrono::seconds(2),
+            [&](){ return fContenderWaiting; });
+    }
+
+    const bool fAcquiredBeforeRelease = fContenderAcquired.load();
+    const bool fAborted = LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+
+    if(contender.joinable())
+        contender.join();
+    LLD::SetTxnCoordinatorWaitHook({});
+
+    REQUIRE(fAborted);
+    REQUIRE(fSawContenderWaiting);
+    REQUIRE_FALSE(fAcquiredBeforeRelease);
+    REQUIRE(fContenderAcquired.load());
+}
+
+
 TEST_CASE("LLD::HasOpenTransaction covers every MERKLE database",
           "[lld][txncommit][merkle]")
 {
