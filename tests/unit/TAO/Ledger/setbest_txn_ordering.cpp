@@ -408,6 +408,46 @@ TEST_CASE("LLD::TxnCommit returns true when all selected instances have active t
 }
 
 
+TEST_CASE("LedgerDB hash-keyed block reads reject mismatched record identity",
+          "[lld][ledger][integrity]")
+{
+    LedgerGuard guard;
+
+    TAO::Ledger::BlockState stored;
+    stored.nVersion = 4;
+    stored.nChannel = 2;
+    stored.nHeight = 7;
+    stored.nBits = 1;
+    stored.nNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    const uint1024_t hashExpected = stored.GetHash();
+    uint1024_t hashWrongKey = hashExpected;
+    ++hashWrongKey;
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashWrongKey));
+
+    struct BlockRecordDiskGuard
+    {
+        uint1024_t hash;
+
+        ~BlockRecordDiskGuard()
+        {
+            LLD::Ledger->EraseBlock(hash);
+        }
+    } diskGuard{hashWrongKey};
+
+    REQUIRE(LLD::Ledger->WriteBlock(hashWrongKey, stored));
+
+    TAO::Ledger::BlockState result;
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
+
+    TAO::Ledger::BlockState atomicInitial = stored;
+    memory::atomic<TAO::Ledger::BlockState> atomicResult;
+    atomicResult.store(atomicInitial);
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
+    REQUIRE(atomicResult.load().GetHash() == hashExpected);
+}
+
+
 TEST_CASE("LLD::TxnCommit applies every instance owned by the transaction",
           "[lld][txncommit]")
 {
