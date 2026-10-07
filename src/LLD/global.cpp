@@ -664,7 +664,7 @@ namespace LLD
             return false;
 
         const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-        if(fMemoryOnly != cContext.fMemoryOnly)
+        if(fMemoryOnly != cContext.fMemoryOnly || (fMemoryOnly && nFlags != cContext.nFlags))
             return debug::error(FUNCTION, "transaction mode does not match current owner");
 
         const uint16_t nReleaseInstances = (nInstances | cContext.nParticipants);
