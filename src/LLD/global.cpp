@@ -485,6 +485,7 @@ namespace LLD
 
         if(fTxnRecoveryRequired.load())
         {
+            ReleaseTransactionOwnership();
             debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
             return false;
         }
@@ -605,7 +606,7 @@ namespace LLD
             return false;
 
         const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-        if(fMemoryOnly != fTxnMemoryOnly)
+        if(fMemoryOnly != fTxnMemoryOnly || (fMemoryOnly && nFlags != nTxnOwnerFlags))
             return debug::error(FUNCTION, "transaction mode does not match current owner");
 
         const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
