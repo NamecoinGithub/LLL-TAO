@@ -903,7 +903,7 @@ namespace TAO
              * DEFERRED_LOCAL_STATE left over from an earlier, unrelated Connect()
              * call on this thread cannot be misread by a caller that checks it
              * after this call fails for a completely different reason. */
-            SetLastConnectClass(AdmissibilityClass::UNKNOWN);
+            ResetLastConnectState();
 
             /* Get the transaction's hash. */
             const uint512_t hash = GetHash();
@@ -969,7 +969,10 @@ namespace TAO
                     /* Make sure the previous transaction is on disk or mempool. */
                     TAO::Ledger::Transaction txPrev;
                     if(!LLD::Ledger->ReadTx(hashPrevTx, txPrev, nFlags))
+                    {
+                        TAO::Ledger::SetLastConnectMissingDependency();
                         return debug::error(FUNCTION, "prev transaction not on disk ", hashPrevTx.SubString());
+                    }
 
                     if(fSeqDiag)
                     {

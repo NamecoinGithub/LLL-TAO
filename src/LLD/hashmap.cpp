@@ -23,6 +23,7 @@ ________________________________________________________________________________
 #include <Util/include/hex.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <iomanip>
 
 #ifdef WIN32
@@ -178,13 +179,17 @@ namespace LLD
     /* Read a key index from the disk hashmaps. */
     void BinaryHashMap::Initialize()
     {
+        const bool fReadOnly = (nFlags & FLAGS::READONLY);
+        const auto nOpenMode = std::ios::in | std::ios::binary
+            | (fReadOnly ? std::ios::openmode(0) : std::ios::out);
+
         /* Create directories if they don't exist yet. */
-        if(!filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
+        if(!fReadOnly && !filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
             debug::log(0, FUNCTION, "Generated Path ", strBaseLocation);
 
         /* Build the hashmap indexes. */
         std::string index = debug::safe_printstr(strBaseLocation, "_hashmap.index");
-        if(!filesystem::exists(index))
+        if(!fReadOnly && !filesystem::exists(index))
         {
             /* Generate empty space for new file. */
             const static std::vector<uint8_t> vSpace(HASHMAP_TOTAL_BUCKETS * 4, 0);
@@ -218,7 +223,7 @@ namespace LLD
         }
 
         /* Read the hashmap indexes. */
-        else
+        else if(std::filesystem::exists(index))
         {
             /* Build a vector to read the disk index. */
             std::vector<uint8_t> vIndex(HASHMAP_TOTAL_BUCKETS * 2, 0);
@@ -226,6 +231,8 @@ namespace LLD
             /* Read the disk index bytes. */
             std::fstream stream(index, std::ios::in | std::ios::binary);
             stream.read((char*)&vIndex[0], vIndex.size());
+            if(fReadOnly && !stream)
+                throw debug::exception(FUNCTION, "cannot read disk index ", index);
             stream.close();
 
             /* Deserialize the values into memory index. */
@@ -243,7 +250,7 @@ namespace LLD
 
         /* Build the first hashmap index file if it doesn't exist. */
         std::string file = debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), 0u);
-        if(!filesystem::exists(file))
+        if(!fReadOnly && !filesystem::exists(file))
         {
             /* Build a vector with empty bytes to flush to disk. */
             std::vector<uint8_t> vSpace(static_cast<std::size_t>(HASHMAP_TOTAL_BUCKETS) * HASHMAP_KEY_ALLOCATION, 0);
@@ -277,10 +284,10 @@ namespace LLD
         }
 
         /* Create the stream index object. */
-        pindex = new std::fstream(index, std::ios::in | std::ios::out | std::ios::binary);
+        pindex = new std::fstream(index, nOpenMode);
 
         /* Load the stream object into the stream LRU cache. */
-        fileCache->Put(0, new std::fstream(file, std::ios::in | std::ios::out | std::ios::binary));
+        fileCache->Put(0, new std::fstream(file, nOpenMode));
     }
 
 
@@ -288,6 +295,10 @@ namespace LLD
     bool BinaryHashMap::Get(const std::vector<uint8_t>& vKey, SectorKey &cKey)
     {
         LOCK(KEY_MUTEX);
+
+        const bool fReadOnly = (nFlags & FLAGS::READONLY);
+        const auto nOpenMode = std::ios::in | std::ios::binary
+            | (fReadOnly ? std::ios::openmode(0) : std::ios::out);
 
         /* Get the assigned bucket for the hashmap. */
         uint32_t nBucket = GetBucket(vKey);
@@ -313,10 +324,12 @@ namespace LLD
                 /* Set the new stream pointer. */
                 std::string filename = debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i);
 
-                pstream = new std::fstream(filename, std::ios::in | std::ios::out | std::ios::binary);
+                pstream = new std::fstream(filename, nOpenMode);
                 if(!pstream->is_open())
                 {
                     delete pstream;
+                    if(fReadOnly && std::filesystem::exists(filename))
+                        throw debug::exception(FUNCTION, "cannot read disk hashmap ", filename);
                     continue;
                 }
 
@@ -326,13 +339,30 @@ namespace LLD
 
             /* Check that file is open. */
             if(!pstream->is_open())
-                pstream->open(debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i), std::ios::in | std::ios::out | std::ios::binary);
+            {
+                const std::string filename =
+                    debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i);
+                pstream->open(filename, nOpenMode);
+                if(!pstream->is_open())
+                {
+                    if(fReadOnly && std::filesystem::exists(filename))
+                        throw debug::exception(FUNCTION, "cannot read disk hashmap ", filename);
+                    continue;
+                }
+            }
 
             /* Seek to the hashmap index in file. */
+            pstream->clear();
             pstream->seekg(nFilePos, std::ios::beg);
 
             /* Read the bucket binary data from file stream */
             pstream->read((char*) &vBucket[0], vBucket.size());
+            if(!*pstream)
+            {
+                if(fReadOnly)
+                    throw debug::exception(FUNCTION, "cannot read disk hashmap bucket");
+                continue;
+            }
 
             /* Check if this bucket has the key */
             if(std::equal(vBucket.begin() + 13, vBucket.begin() + 13 + vKeyCompressed.size(), vKeyCompressed.begin()))
@@ -368,6 +398,9 @@ namespace LLD
     /* Write a key to the disk hashmaps. */
     bool BinaryHashMap::Put(const SectorKey& cKey)
     {
+        if(nFlags & FLAGS::READONLY)
+            return false;
+
         LOCK(KEY_MUTEX);
 
         /* Get the assigned bucket for the hashmap. */
@@ -593,6 +626,9 @@ namespace LLD
     /* Flush all buffers to disk if using ACID transaction. */
     void BinaryHashMap::Flush()
     {
+        if(nFlags & FLAGS::READONLY)
+            return;
+
         /* Check index file handle is open. */
         if(!pindex->is_open())
             pindex->open(debug::safe_printstr(strBaseLocation, "_hashmap.index"), std::ios::in | std::ios::out | std::ios::binary);
@@ -657,6 +693,9 @@ namespace LLD
      *  TODO: This should be optimized further. */
     bool BinaryHashMap::Erase(const std::vector<uint8_t> &vKey)
     {
+        if(nFlags & FLAGS::READONLY)
+            return false;
+
         LOCK(KEY_MUTEX);
 
         /* Get the assigned bucket for the hashmap. */

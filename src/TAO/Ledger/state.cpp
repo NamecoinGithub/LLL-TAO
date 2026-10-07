@@ -38,6 +38,7 @@ ________________________________________________________________________________
 #include <TAO/Register/include/verify.h>
 
 #include <TAO/Ledger/include/ambassador.h>
+#include <TAO/Ledger/include/admissibility.h>
 #include <TAO/Ledger/include/developer.h>
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/checkpoints.h>
@@ -991,28 +992,6 @@ namespace TAO
                      * SetBest() reorg path. */
                     TAO::Ledger::MarkLocalMinedBlockDisconnected(state, *this);
 
-                    /* Erase block if not connecting anything. */
-                    if(vConnect.empty())
-                    {
-                        /* Erase the blocks from disk if we are doing -forkblocks. */
-                        LLD::Ledger->EraseBlock(state.GetHash());
-
-                        /* Disconnect the transctions in reverse order to preserve sigchain ordering. */
-                        for(auto proof = state.vtx.rbegin(); proof != state.vtx.rend(); ++proof)
-                        {
-                            /* Get the transaction hash. */
-                            const uint512_t& hash = proof->second;
-
-                            /* Only work on tritium transactions for now. */
-                            if(proof->first == TRANSACTION::TRITIUM)
-                                LLD::Ledger->EraseTx(hash);
-                        }
-
-                        /* Erase our height indexes if we have enabled. */
-                        if(config::GetBoolArg("-indexheight", false))
-                            LLD::Ledger->EraseIndex(state.nHeight);
-                    }
-
                     /* Debug output if we are debugging reorgs */
                     if(fDebugReorg)
                     {
@@ -1040,6 +1019,28 @@ namespace TAO
                                 debug::log(0, ANSI_COLOR_BRIGHT_CYAN, "DISCONNECTING:", ANSI_COLOR_RESET, jRet.dump(4));
                             }
                         }
+                    }
+
+                    /* Erase block if not connecting anything, after reading transactions for diagnostics. */
+                    if(vConnect.empty())
+                    {
+                        /* Erase the blocks from disk if we are doing -forkblocks. */
+                        LLD::Ledger->EraseBlock(state.GetHash());
+
+                        /* Disconnect the transctions in reverse order to preserve sigchain ordering. */
+                        for(auto proof = state.vtx.rbegin(); proof != state.vtx.rend(); ++proof)
+                        {
+                            /* Get the transaction hash. */
+                            const uint512_t& hash = proof->second;
+
+                            /* Only work on tritium transactions for now. */
+                            if(proof->first == TRANSACTION::TRITIUM)
+                                LLD::Ledger->EraseTx(hash);
+                        }
+
+                        /* Erase our height indexes if we have enabled. */
+                        if(config::GetBoolArg("-indexheight", false))
+                            LLD::Ledger->EraseIndex(state.nHeight);
                     }
 
                     /* Resurrect transactions that were disconnected. */
@@ -1136,6 +1137,14 @@ namespace TAO
                             " while disconnecting ", vDisconnect.size(), " and connecting ", vConnect.size(),
                             " block(s) (", nReorgTotalTx, " transactions); other block/mining processing",
                             " was blocked for the duration");
+                }
+
+                /* Read the updated tip while failure can still roll back the transition. */
+                BlockState stateNewBest;
+                if(!LLD::Ledger->ReadBlock(hash, stateNewBest))
+                {
+                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    return debug::error(FUNCTION, "failed to read updated best chain state");
                 }
 
                 /* Stage the best-chain pointer with the disconnect/connect writes so the durable
@@ -1306,7 +1315,8 @@ namespace TAO
                 }
 
                 /* Set the best chain variables. */
-                ChainState::tStateBest          = *this; //XXX: we are not getting all the data from connect, consider using pointer
+                *this                          = stateNewBest;
+                ChainState::tStateBest          = stateNewBest;
                 ChainState::hashBestChain      = hash;
                 ChainState::nBestChainTrust    = nChainTrust;
                 ChainState::nBestHeight        = nHeight;
@@ -1442,6 +1452,8 @@ namespace TAO
         /** Connect a block state into chain. **/
         bool BlockState::Connect()
         {
+            ResetLastConnectState();
+
             /* Get a copy of our block hash. */
             const uint1024_t hashBlock = GetHash();
 
@@ -1479,7 +1491,10 @@ namespace TAO
                         /* Check for the last hash. */
                         uint512_t hashLast = 0;
                         if(!LLD::Ledger->ReadLast(tx.hashGenesis, hashLast))
+                        {
+                            SetLastConnectMissingDependency();
                             return debug::error(FUNCTION, "failed to read last on non-genesis");
+                        }
 
                         /* Check that the last transaction is correct. */
                         if(tx.hashPrevTx != hashLast)

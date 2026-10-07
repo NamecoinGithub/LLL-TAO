@@ -664,6 +664,18 @@ namespace TAO
             if(!LLD::Ledger->ReadBlock(hashPrevBlock, statePrev))
                 return debug::error(FUNCTION, "previous block state not found");
 
+            const uint1024_t hashPrevRead = statePrev.GetHash();
+            if(hashPrevRead != hashPrevBlock)
+            {
+                return debug::error(FUNCTION,
+                    "previous block identity mismatch block=", GetHash().SubString(),
+                    " prev_expected=", hashPrevBlock.SubString(),
+                    " prev_read=", hashPrevRead.SubString(),
+                    " block_height=", nHeight,
+                    " prev_height=", statePrev.nHeight,
+                    " channel=", uint32_t(GetChannel()));
+            }
+
             /* Check the Height of Block to Previous Block. */
             if(statePrev.nHeight + 1 != nHeight)
                 return debug::error(FUNCTION, "incorrect block height.");
@@ -675,9 +687,20 @@ namespace TAO
                 debug::log(2, "  target: ", LLC::CBigNum().SetCompact(nBits).getuint1024().SubString());
             }
 
+            const uint32_t nExpectedBits = GetNextTargetRequired(statePrev, GetChannel());
+
             /* Check that the nBits match the current Difficulty. **/
-            if(nBits != GetNextTargetRequired(statePrev, GetChannel()))
-                return debug::error(FUNCTION, "incorrect proof-of-work/proof-of-stake");
+            if(nBits != nExpectedBits)
+            {
+                return debug::error(FUNCTION,
+                    "incorrect proof-of-work/proof-of-stake block=", GetHash().SubString(),
+                    " prev=", hashPrevBlock.SubString(),
+                    " prev_height=", statePrev.nHeight,
+                    " block_height=", nHeight,
+                    " channel=", uint32_t(GetChannel()),
+                    " nBits=0x", std::hex, nBits,
+                    " expected=0x", nExpectedBits, std::dec);
+            }
 
             /* Check That Block timestamp is not before previous block. */
             if(GetBlockTime() <= statePrev.GetBlockTime())

@@ -85,6 +85,21 @@ namespace TAO
          *
          **/
         inline thread_local AdmissibilityClass g_nLastConnectClass = AdmissibilityClass::UNKNOWN;
+        inline thread_local bool g_fLastConnectMissingDependency = false;
+
+
+        /** ResetLastConnectState
+         *
+         *  Clears all thread-local Connect() side-channel state so stale
+         *  classifications or missing-dependency markers cannot leak across
+         *  unrelated calls on the same thread.
+         *
+         **/
+        inline void ResetLastConnectState()
+        {
+            g_nLastConnectClass = AdmissibilityClass::UNKNOWN;
+            g_fLastConnectMissingDependency = false;
+        }
 
 
         /** SetLastConnectClass
@@ -97,6 +112,20 @@ namespace TAO
         inline void SetLastConnectClass(const AdmissibilityClass nClass)
         {
             g_nLastConnectClass = nClass;
+        }
+
+
+        /** SetLastConnectMissingDependency
+         *
+         *  Marks the last Connect()/block-connect failure on this thread as
+         *  caused by a missing local predecessor or sigchain last-pointer
+         *  dependency, so higher-level recovery code can request the block's
+         *  transactions instead of treating the failure as permanently invalid.
+         *
+         **/
+        inline void SetLastConnectMissingDependency(const bool fMissing = true)
+        {
+            g_fLastConnectMissingDependency = fMissing;
         }
 
 
@@ -115,6 +144,20 @@ namespace TAO
             const AdmissibilityClass cls = g_nLastConnectClass;
             g_nLastConnectClass = AdmissibilityClass::UNKNOWN;
             return cls;
+        }
+
+
+        /** TakeLastConnectMissingDependency
+         *
+         *  Read and reset the thread-local missing-dependency flag set by the
+         *  last Connect()/block-connect failure on this thread.
+         *
+         **/
+        inline bool TakeLastConnectMissingDependency()
+        {
+            const bool fMissing = g_fLastConnectMissingDependency;
+            g_fLastConnectMissingDependency = false;
+            return fMissing;
         }
 
     } // namespace Ledger

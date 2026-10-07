@@ -61,6 +61,7 @@ Diagram templates for PR descriptions and comprehensive Mermaid architecture dia
 - **[audit/recovery-coordinator-upgrade.md](audit/recovery-coordinator-upgrade.md)** - A1/A1b peer-best + missing-tx LIST coordination (PR #690/#691)
 - **[audit/mempool-recovery-coupling.md](audit/mempool-recovery-coupling.md)** - Mempool classifier/DAG clocks vs chain fetch
 - **[audit/pr697-review-hardening.md](audit/pr697-review-hardening.md)** - Ordered checkpoint publication, descendant redelivery, and mempool transaction RAII
+- **[audit/pr697-production-regression-hotfix.md](audit/pr697-production-regression-hotfix.md)** - PR #697 production regression hotfix flow (immediate missing-tx trigger + no-progress backoff)
 
 ## Mining Diagrams
 
