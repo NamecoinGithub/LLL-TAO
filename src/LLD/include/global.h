@@ -64,6 +64,16 @@ namespace LLD
         };
     };
 
+    /** Outcome of the most recent transaction owned by the calling thread. */
+    enum class TXN_OUTCOME
+    {
+        NONE,
+        ABORTED,
+        COMMITTED,
+        RECOVERED,
+        RECOVERY_REQUIRED
+    };
+
 
     /** Initialize
      *
@@ -136,6 +146,9 @@ namespace LLD
      *
      */
     bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+
+    /** Report whether the most recent owned transaction committed or requires recovery. */
+    TXN_OUTCOME LastTxnOutcome();
 
 
     /** Abort a transaction automatically if its scope exits before it is consumed. */

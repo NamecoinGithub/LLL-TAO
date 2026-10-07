@@ -34,24 +34,49 @@ namespace LLD
     TrustDB*      Trust;
     LegacyDB*     Legacy;
 
-    /* A failed apply after every journal reached its durable commit marker must
-     * preserve those journals for startup recovery and stop further mutation. */
-    static std::atomic<bool> fTxnRecoveryRequired{false};
+    class DurableCommitCoordinator
+    {
+    public:
+        struct Context
+        {
+            bool fOwner{false};
+            bool fMemoryOnly{false};
+            uint8_t nFlags{0};
+            uint16_t nParticipants{0};
+            uint64_t nIdentity{0};
+            bool fDurableDecision{false};
+            TXN_OUTCOME nOutcome{TXN_OUTCOME::NONE};
+        };
 
+        bool Recover();
+        bool HasOpenTransaction(uint8_t nFlags, uint16_t nInstances);
+        bool Begin(uint8_t nFlags, uint16_t nInstances);
+        bool Abort(uint8_t nFlags, uint16_t nInstances);
+        bool Commit(uint8_t nFlags, uint16_t nInstances);
+        TXN_OUTCOME LastOutcome() const;
+        void ResetRecoveryRequired();
 
-    /* Serialize every transaction that uses shared in-memory transaction objects. */
-    static std::mutex TRANSACTION_COORDINATOR;
-    static thread_local bool fTxnOwner = false;
-    static thread_local bool fTxnMemoryOnly = false;
-    static thread_local uint8_t nTxnOwnerFlags = 0;
-    static thread_local uint16_t nTxnOwnerInstances = 0;
+    private:
+        void ReleaseMemoryTransactions(uint8_t nFlags, uint16_t nInstances);
+        bool ReleasePhysicalTransactions(uint16_t nInstances);
+        void ReleaseOwnership();
+
+        std::mutex cMutex;
+        std::atomic<bool> fRecoveryRequired{false};
+        uint64_t nNextIdentity{1};
+        static thread_local Context cContext;
+    };
+
+    thread_local DurableCommitCoordinator::Context DurableCommitCoordinator::cContext;
+    static DurableCommitCoordinator cTxnCoordinator;
 
     #ifdef UNIT_TESTS
     static std::function<void()> fnTxnCoordinatorWaitHook;
     #endif
 
 
-    static void ReleaseMemoryTransactions(const uint8_t nFlags, const uint16_t nInstances)
+    void DurableCommitCoordinator::ReleaseMemoryTransactions(
+        const uint8_t nFlags, const uint16_t nInstances)
     {
         if(Contract && (nInstances & INSTANCES::CONTRACT))
             Contract->MemoryRelease(nFlags);
@@ -64,7 +89,7 @@ namespace LLD
     }
 
 
-    static bool ReleasePhysicalTransactions(const uint16_t nInstances)
+    bool DurableCommitCoordinator::ReleasePhysicalTransactions(const uint16_t nInstances)
     {
         bool fReleased = true;
 
@@ -93,16 +118,18 @@ namespace LLD
     }
 
 
-    static void ReleaseTransactionOwnership()
+    void DurableCommitCoordinator::ReleaseOwnership()
     {
-        if(!fTxnOwner)
+        if(!cContext.fOwner)
             return;
 
-        fTxnOwner = false;
-        fTxnMemoryOnly = false;
-        nTxnOwnerFlags = 0;
-        nTxnOwnerInstances = 0;
-        TRANSACTION_COORDINATOR.unlock();
+        cContext.fOwner = false;
+        cContext.fMemoryOnly = false;
+        cContext.nFlags = 0;
+        cContext.nParticipants = 0;
+        cContext.nIdentity = 0;
+        cContext.fDurableDecision = false;
+        cMutex.unlock();
     }
 
 
@@ -255,13 +282,13 @@ namespace LLD
 
 
     /* Check the transactions for recovery. */
-    bool TxnRecovery()
+    bool DurableCommitCoordinator::Recover()
     {
         /* Flag to determine if there are any failures. */
         bool fRecovery = true;
 
         /* Check one participant without confusing an incomplete journal with an error. */
-        const auto CheckRecovery = [&fRecovery](auto* pDatabase)
+        const auto CheckRecovery = [this, &fRecovery](auto* pDatabase)
         {
             if(!pDatabase)
                 return true;
@@ -269,7 +296,8 @@ namespace LLD
             const RECOVERY nRecovery = pDatabase->TxnRecovery();
             if(nRecovery == RECOVERY::FAILED)
             {
-                fTxnRecoveryRequired.store(true);
+                fRecoveryRequired.store(true);
+                cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 return false;
             }
 
@@ -321,7 +349,8 @@ namespace LLD
 
                 if(!fRecovery)
                 {
-                    fTxnRecoveryRequired.store(true);
+                    fRecoveryRequired.store(true);
+                    cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                     return debug::error(FUNCTION,
                         "client transaction recovery failed; journals retained for restart");
                 }
@@ -330,7 +359,11 @@ namespace LLD
             /* Clear either the fully applied journals or an incomplete transaction
              * that never reached a durable decision on every participant. */
             if(!ReleasePhysicalTransactions(INSTANCES::MERKLE))
+            {
+                fRecoveryRequired.store(true);
+                cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 return debug::error(FUNCTION, "failed to durably release client transaction journals");
+            }
         }
 
         /* Regular mainnet mode recovery. */
@@ -383,7 +416,8 @@ namespace LLD
 
                 if(!fRecovery)
                 {
-                    fTxnRecoveryRequired.store(true);
+                    fRecoveryRequired.store(true);
+                    cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                     return debug::error(FUNCTION,
                         "consensus transaction recovery failed; journals retained for restart");
                 }
@@ -392,15 +426,25 @@ namespace LLD
             /* Clear either the fully applied journals or an incomplete transaction
              * that never reached a durable decision on every participant. */
             if(!ReleasePhysicalTransactions(INSTANCES::CONSENSUS))
+            {
+                fRecoveryRequired.store(true);
+                cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 return debug::error(FUNCTION, "failed to durably release consensus transaction journals");
+            }
         }
+
+        if(fRecovery || cContext.nOutcome == TXN_OUTCOME::RECOVERY_REQUIRED)
+            cContext.nOutcome = TXN_OUTCOME::RECOVERED;
+
+        fRecoveryRequired.store(false);
 
         return true;
     }
 
 
     /* Global handler for all LLD instances. */
-    bool HasOpenTransaction(const uint8_t nFlags, const uint16_t nInstances)
+    bool DurableCommitCoordinator::HasOpenTransaction(
+        const uint8_t nFlags, const uint16_t nInstances)
     {
         /* Memory-only flag modes do not use physical SectorDatabase transactions. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
@@ -408,7 +452,7 @@ namespace LLD
 
         /* An open transaction on another thread is not owned by this caller.
          * TxnBegin() will wait for it rather than joining or replacing it. */
-        if(!fTxnOwner)
+        if(!cContext.fOwner)
             return false;
 
         /* Check each database instance that would be opened by TxnBegin(nFlags, nInstances).
@@ -433,7 +477,7 @@ namespace LLD
 
 
     /* Global handler for all LLD instances. */
-    bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    bool DurableCommitCoordinator::Begin(const uint8_t nFlags, const uint16_t nInstances)
     {
         const bool fMemoryOnly =
             (nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE);
@@ -452,39 +496,43 @@ namespace LLD
             /* Existing callers intentionally flatten ownership through SetBest(),
              * which checks HasOpenTransaction() before beginning. Refuse any other
              * nested begin rather than deleting the active transaction. */
-            if(fTxnOwner)
+            if(cContext.fOwner)
             {
                 debug::error(FUNCTION, "nested transaction begin refused");
                 return false;
             }
 
             #ifdef UNIT_TESTS
-            if(!TRANSACTION_COORDINATOR.try_lock())
+            if(!cMutex.try_lock())
             {
                 if(fnTxnCoordinatorWaitHook)
                     fnTxnCoordinatorWaitHook();
 
-                TRANSACTION_COORDINATOR.lock();
+                cMutex.lock();
             }
             #else
-            TRANSACTION_COORDINATOR.lock();
+            cMutex.lock();
             #endif
 
-            if(fTxnRecoveryRequired.load())
+            if(fRecoveryRequired.load())
             {
-                TRANSACTION_COORDINATOR.unlock();
+                cMutex.unlock();
                 debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
                 return false;
             }
 
-            fTxnOwner = true;
-            fTxnMemoryOnly = fMemoryOnly;
-            nTxnOwnerFlags = nFlags;
-            nTxnOwnerInstances = nOwnedInstances;
+            cContext.fOwner = true;
+            cContext.fMemoryOnly = fMemoryOnly;
+            cContext.nFlags = nFlags;
+            cContext.nParticipants = nOwnedInstances;
+            cContext.nIdentity = nNextIdentity++;
+            cContext.fDurableDecision = false;
+            cContext.nOutcome = TXN_OUTCOME::NONE;
         }
 
-        if(fTxnRecoveryRequired.load())
+        if(fRecoveryRequired.load())
         {
+            ReleaseOwnership();
             debug::error(FUNCTION, "transaction recovery is required; refusing to begin");
             return false;
         }
@@ -551,64 +599,75 @@ namespace LLD
 
 
     /* Global handler for all LLD instances. */
-    bool TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
+    bool DurableCommitCoordinator::Abort(const uint8_t nFlags, const uint16_t nInstances)
     {
         /* A redundant outer abort after SetBest() consumed the transaction is a
          * safe no-op, and another thread must never release the owner's state. */
-        if(!fTxnOwner)
+        if(!cContext.fOwner)
             return true;
 
         const bool fMemoryOnly =
             (nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE);
-        if(fMemoryOnly != fTxnMemoryOnly || (fMemoryOnly && nFlags != nTxnOwnerFlags))
+        if(fMemoryOnly != cContext.fMemoryOnly || (fMemoryOnly && nFlags != cContext.nFlags))
         {
             debug::error(FUNCTION, "transaction mode does not match current owner");
             return false;
         }
 
-        const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
+        const uint16_t nReleaseInstances = (nInstances | cContext.nParticipants);
+
+        if(cContext.fDurableDecision || fRecoveryRequired.load())
+        {
+            ReleaseMemoryTransactions(nFlags, nReleaseInstances);
+            cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
+            fRecoveryRequired.store(true);
+            ReleaseOwnership();
+            return debug::error(FUNCTION,
+                "durable transaction decision exists; abort refused and recovery required");
+        }
+
         ReleaseMemoryTransactions(nFlags, nReleaseInstances);
 
         /* Handle memory commits if in memory mode. */
         if(fMemoryOnly)
         {
-            ReleaseTransactionOwnership();
+            cContext.nOutcome = TXN_OUTCOME::ABORTED;
+            ReleaseOwnership();
             return true;
         }
 
-        /* Once a fully checkpointed apply fails, its physical journals are the
-         * recovery source of truth and must never be truncated by a caller's
-         * ordinary failure cleanup. */
-        if(!fTxnRecoveryRequired.load() && !ReleasePhysicalTransactions(nReleaseInstances))
+        if(!ReleasePhysicalTransactions(nReleaseInstances))
         {
-            fTxnRecoveryRequired.store(true);
-            ReleaseTransactionOwnership();
+            fRecoveryRequired.store(true);
+            cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
+            ReleaseOwnership();
             ::Shutdown();
             return debug::error(FUNCTION,
                 "failed to durably release aborted transaction journals; shutdown requested");
         }
 
-        ReleaseTransactionOwnership();
+        cContext.nOutcome = TXN_OUTCOME::ABORTED;
+        ReleaseOwnership();
         return true;
     }
 
 
     /* Global handler for all LLD instances. */
-    bool TxnCommit(const uint8_t nFlags, const uint16_t nInstances)
+    bool DurableCommitCoordinator::Commit(const uint8_t nFlags, const uint16_t nInstances)
     {
         /* Special check if using MINER or SANITIZE flags — intentional short-circuit,
          * not a failure: callers use these flags to prevent accidental commits. */
         if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return TxnAbort(nFlags, nInstances);
+            return Abort(nFlags, nInstances);
 
-        if(!fTxnOwner)
+        if(!cContext.fOwner)
             return false;
 
         const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-        if(fMemoryOnly != fTxnMemoryOnly)
+        if(fMemoryOnly != cContext.fMemoryOnly)
             return debug::error(FUNCTION, "transaction mode does not match current owner");
 
-        const uint16_t nReleaseInstances = (nInstances | nTxnOwnerInstances);
+        const uint16_t nReleaseInstances = (nInstances | cContext.nParticipants);
 
         /* Memory-pool transactions have no physical journal. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
@@ -620,14 +679,16 @@ namespace LLD
             if(Ledger && (nReleaseInstances & INSTANCES::LEDGER))
                 Ledger->MemoryCommit();
 
-            ReleaseTransactionOwnership();
+            cContext.nOutcome = TXN_OUTCOME::COMMITTED;
+            ReleaseOwnership();
             return true;
         }
 
-        if(fTxnRecoveryRequired.load())
+        if(fRecoveryRequired.load())
         {
             ReleaseMemoryTransactions(nFlags, nReleaseInstances);
-            ReleaseTransactionOwnership();
+            cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
+            ReleaseOwnership();
             return debug::error(FUNCTION, "transaction recovery is required; refusing to commit");
         }
 
@@ -666,9 +727,11 @@ namespace LLD
 
         if(!fCheckpointsComplete)
         {
-            TxnAbort(nFlags, nReleaseInstances);
+            Abort(nFlags, nReleaseInstances);
             return debug::error(FUNCTION, "transaction checkpoint failed; all staged changes aborted");
         }
+
+        cContext.fDurableDecision = true;
 
         /* Apply participants in a deterministic order, with the database carrying
          * the authoritative best-chain pointer last. Stop on the first failure;
@@ -753,8 +816,9 @@ namespace LLD
              * or another transaction can build on the partial state. */
             ReleaseMemoryTransactions(nFlags, nReleaseInstances);
 
-            fTxnRecoveryRequired.store(true);
-            ReleaseTransactionOwnership();
+            fRecoveryRequired.store(true);
+            cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
+            ReleaseOwnership();
             ::Shutdown();
             return debug::error(FUNCTION,
                 "durable transaction apply failed; journals retained and shutdown requested");
@@ -771,17 +835,65 @@ namespace LLD
         /* Release the checkpoint markers after every participant succeeds. */
         if(!ReleasePhysicalTransactions(nReleaseInstances))
         {
-            fTxnRecoveryRequired.store(true);
-            ReleaseTransactionOwnership();
+            fRecoveryRequired.store(true);
+            cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
+            ReleaseOwnership();
             ::Shutdown();
             return debug::error(FUNCTION,
                 "failed to durably release transaction journals; shutdown requested");
         }
-        ReleaseTransactionOwnership();
+        cContext.nOutcome = TXN_OUTCOME::COMMITTED;
+        ReleaseOwnership();
 
         return fAllSucceeded;
     }
 
+    TXN_OUTCOME DurableCommitCoordinator::LastOutcome() const
+    {
+        return cContext.nOutcome;
+    }
+
+
+    void DurableCommitCoordinator::ResetRecoveryRequired()
+    {
+        fRecoveryRequired.store(false);
+    }
+
+
+    bool TxnRecovery()
+    {
+        return cTxnCoordinator.Recover();
+    }
+
+
+    bool HasOpenTransaction(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        return cTxnCoordinator.HasOpenTransaction(nFlags, nInstances);
+    }
+
+
+    bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        return cTxnCoordinator.Begin(nFlags, nInstances);
+    }
+
+
+    bool TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        return cTxnCoordinator.Abort(nFlags, nInstances);
+    }
+
+
+    bool TxnCommit(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        return cTxnCoordinator.Commit(nFlags, nInstances);
+    }
+
+
+    TXN_OUTCOME LastTxnOutcome()
+    {
+        return cTxnCoordinator.LastOutcome();
+    }
 
     TransactionGuard::TransactionGuard(const uint8_t nFlagsIn, const uint16_t nInstancesIn)
     : nFlags(nFlagsIn)
@@ -813,7 +925,7 @@ namespace LLD
 
     void ResetTxnRecoveryRequired()
     {
-        fTxnRecoveryRequired.store(false);
+        cTxnCoordinator.ResetRecoveryRequired();
     }
     #endif
 }

@@ -43,6 +43,7 @@ ________________________________________________________________________________
 /* Real-code test headers (Gap 2 tests below) */
 #include <LLD/include/global.h>
 #include <LLD/include/version.h>
+#include <LLD/durable.h>
 #include <LLD/types/contract.h>
 #include <LLD/types/register.h>
 #include <LLD/types/legacy.h>
@@ -66,6 +67,8 @@ ________________________________________________________________________________
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -336,6 +339,151 @@ namespace
         ssJournal << std::string("invalid");
         return ssJournal;
     }
+
+    DataStream MakeCommitJournal()
+    {
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("commit");
+        return ssJournal;
+    }
+
+
+    class FaultInjectingDurableIO : public LLD::DurableIO
+    {
+    public:
+        bool fShortNextWrite{false};
+        bool fFailNextFlush{false};
+        bool fFailNextTruncate{false};
+        bool fFailNextRead{false};
+        bool fFailNextSectorSync{false};
+        bool fSkipDirectorySync{false};
+        uint32_t nFileSyncFailures{0};
+        uint32_t nDirectorySyncFailures{0};
+        uint32_t nFileSyncCalls{0};
+        uint32_t nDirectorySyncCalls{0};
+
+        std::size_t Write(FILE* pStream, const void* pData, const std::size_t nSize) override
+        {
+            if(fShortNextWrite)
+            {
+                fShortNextWrite = false;
+                const std::size_t nShortSize = nSize > 0 ? nSize - 1 : 0;
+                return DurableIO::Write(pStream, pData, nShortSize);
+            }
+
+            return DurableIO::Write(pStream, pData, nSize);
+        }
+
+        std::size_t Write(std::ostream& cStream, const void* pData, const std::size_t nSize) override
+        {
+            if(fShortNextWrite)
+            {
+                fShortNextWrite = false;
+                const std::size_t nShortSize = nSize > 0 ? nSize - 1 : 0;
+                return DurableIO::Write(cStream, pData, nShortSize);
+            }
+
+            return DurableIO::Write(cStream, pData, nSize);
+        }
+
+        bool Flush(FILE* pStream) override
+        {
+            if(fFailNextFlush)
+            {
+                fFailNextFlush = false;
+                return false;
+            }
+
+            return DurableIO::Flush(pStream);
+        }
+
+        bool Flush(std::ostream& cStream) override
+        {
+            if(fFailNextFlush)
+            {
+                fFailNextFlush = false;
+                return false;
+            }
+
+            return DurableIO::Flush(cStream);
+        }
+
+        bool SyncFile(FILE* pStream) override
+        {
+            ++nFileSyncCalls;
+            if(nFileSyncFailures > 0)
+            {
+                --nFileSyncFailures;
+                return false;
+            }
+
+            return DurableIO::SyncFile(pStream);
+        }
+
+        bool SyncFile(const std::string& strPath) override
+        {
+            if(fFailNextSectorSync && strPath.find("_block.") != std::string::npos)
+            {
+                fFailNextSectorSync = false;
+                return false;
+            }
+
+            return DurableIO::SyncFile(strPath);
+        }
+
+        bool SyncDirectoryChain(const std::string& strDirectory) override
+        {
+            ++nDirectorySyncCalls;
+            if(nDirectorySyncFailures > 0)
+            {
+                --nDirectorySyncFailures;
+                return false;
+            }
+
+            return fSkipDirectorySync || DurableIO::SyncDirectoryChain(strDirectory);
+        }
+
+        bool Truncate(const std::string& strPath) override
+        {
+            if(fFailNextTruncate)
+            {
+                fFailNextTruncate = false;
+                return false;
+            }
+
+            return DurableIO::Truncate(strPath);
+        }
+
+        bool Read(const std::string& strPath, std::vector<uint8_t>& vData) override
+        {
+            if(fFailNextRead)
+            {
+                fFailNextRead = false;
+                return false;
+            }
+
+            return DurableIO::Read(strPath, vData);
+        }
+    };
+
+
+    struct DurableIOGuard
+    {
+        explicit DurableIOGuard(LLD::DurableIO& cIO)
+        {
+            LLD::DurableIO::SetForTesting(&cIO);
+        }
+
+        ~DurableIOGuard()
+        {
+            Reset();
+        }
+
+        void Reset()
+        {
+            LLD::DurableIO::SetForTesting(nullptr);
+        }
+    };
 
 
     uint64_t JournalSize(const std::string& strName)
@@ -1557,4 +1705,164 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial MERKLE apply
 
     LLD::Contract->Erase(contractKey);
     LLD::Register->Erase(registerKey);
+}
+
+
+TEST_CASE("DurableIO injects short writes and filesystem operation failures",
+          "[lld][durable]")
+{
+    FaultInjectingDurableIO cIO;
+    FILE* pStream = std::tmpfile();
+    REQUIRE(pStream != nullptr);
+
+    const std::vector<uint8_t> vData{0x01, 0x02, 0x03, 0x04};
+    cIO.fShortNextWrite = true;
+    REQUIRE(cIO.Write(pStream, vData.data(), vData.size()) == vData.size() - 1);
+
+    cIO.fFailNextFlush = true;
+    REQUIRE_FALSE(cIO.Flush(pStream));
+    std::fclose(pStream);
+
+    cIO.fFailNextTruncate = true;
+    REQUIRE_FALSE(cIO.Truncate("unused-durable-test-path"));
+
+    cIO.fFailNextRead = true;
+    std::vector<uint8_t> vRead;
+    REQUIRE_FALSE(cIO.Read("unused-durable-test-path", vRead));
+
+    cIO.nDirectorySyncFailures = 1;
+    REQUIRE_FALSE(cIO.SyncDirectoryChain("unused-durable-test-directory"));
+}
+
+
+TEST_CASE("DurabilityTracker retains failed sync obligations for retry",
+          "[lld][durable]")
+{
+    const std::string strPath =
+        debug::safe_printstr(config::GetDataDir(), "_durable_tracker_failure_test");
+    {
+        std::ofstream stream(strPath, std::ios::binary | std::ios::trunc);
+        REQUIRE(stream.is_open());
+        stream << "durability";
+    }
+
+    LLD::DurabilityTracker cTracker;
+    cTracker.MarkCreated(strPath);
+
+    FaultInjectingDurableIO cIO;
+    cIO.nFileSyncFailures = 1;
+    cIO.nDirectorySyncFailures = 1;
+    cIO.fSkipDirectorySync = true;
+
+    REQUIRE_FALSE(cTracker.Sync(cIO));
+    REQUIRE_FALSE(cTracker.Sync(cIO));
+    REQUIRE(cTracker.Sync(cIO));
+    REQUIRE(cIO.nFileSyncCalls == 2);
+    REQUIRE(cIO.nDirectorySyncCalls == 2);
+
+    REQUIRE(std::filesystem::remove(strPath));
+}
+
+
+TEST_CASE("LLD aborts staged changes when a participant checkpoint short-writes",
+          "[lld][durable][txncommit]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("durable-short-write-abort"), 1);
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(88)));
+
+    FaultInjectingDurableIO cIO;
+    cIO.fShortNextWrite = true;
+    DurableIOGuard ioGuard(cIO);
+    const bool fCommitted = LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS);
+    ioGuard.Reset();
+
+    REQUIRE_FALSE(fCommitted);
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::ABORTED);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE_FALSE(LLD::Ledger->Exists(key));
+}
+
+
+TEST_CASE("LLD replay is idempotent after a participant apply sync failure",
+          "[lld][durable][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("durable-replay-idempotent"), 1);
+    LLD::Contract->Erase(key);
+
+    REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(key, 91)));
+    REQUIRE(WriteRecoveryJournal("_REGISTER", MakeCommitJournal()));
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeCommitJournal()));
+    REQUIRE(WriteRecoveryJournal("_TRUST", MakeCommitJournal()));
+    REQUIRE(WriteRecoveryJournal("_LEGACY", MakeCommitJournal()));
+
+    FaultInjectingDurableIO cIO;
+    cIO.fFailNextSectorSync = true;
+    DurableIOGuard ioGuard(cIO);
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+    REQUIRE(JournalSize("_CONTRACT") > 0);
+    REQUIRE(JournalSize("_REGISTER") > 0);
+
+    ioGuard.Reset();
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERED);
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Contract->Read(key, nValue));
+    REQUIRE(nValue == 91);
+    REQUIRE(LLD::Contract->Erase(key));
+}
+
+
+TEST_CASE("LLD reports recovery-required rather than abort after partial journal cleanup",
+          "[lld][durable][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ShutdownGuard shutdownGuard;
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("durable-partial-cleanup"), 1);
+    LLD::Ledger->Erase(key);
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(92)));
+
+    FaultInjectingDurableIO cIO;
+    cIO.fFailNextTruncate = true;
+    DurableIOGuard ioGuard(cIO);
+    const bool fCommitted = LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS);
+    ioGuard.Reset();
+
+    REQUIRE_FALSE(fCommitted);
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+    REQUIRE(LLD::Ledger->Exists(key));
+    REQUIRE(JournalSize("_CONTRACT") > 0);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CONSENSUS));
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(JournalSize("_CONTRACT") == 0);
+    REQUIRE(LLD::Ledger->Exists(key));
+    REQUIRE(LLD::Ledger->Erase(key));
 }

@@ -18,6 +18,7 @@ ________________________________________________________________________________
 #include <LLD/keychain/keychain.h>
 #include <LLD/cache/template_lru.h>
 #include <LLD/include/enum.h>
+#include <LLD/durable.h>
 
 #include <cstdint>
 #include <string>
@@ -77,11 +78,8 @@ namespace LLD
         /** The keychain flags. **/
         uint8_t nFlags;
 
-        /** Files awaiting a successful durability sync. **/
-        std::set<std::string> setDirtyFiles;
-
-        /** Whether a new hashmap file requires directory metadata syncing. **/
-        bool fDirectoryDirty;
+        /** Files and directory entries awaiting durability sync. **/
+        DurabilityTracker cDurability;
 
 
         /* The key level locking hashmap. */

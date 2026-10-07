@@ -29,35 +29,8 @@ ________________________________________________________________________________
 #include <memory>
 #include <set>
 
-#ifdef WIN32
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace LLD
 {
-    namespace
-    {
-        bool SyncFile(const std::string& strPath)
-        {
-            FILE* stream = std::fopen(strPath.c_str(), "rb+");
-            if(!stream)
-                return false;
-
-            #ifdef WIN32
-            const bool fSynced = (_commit(_fileno(stream)) == 0);
-            #else
-            const bool fSynced = (fsync(fileno(stream)) == 0);
-            #endif
-
-            return (std::fclose(stream) == 0 && fSynced);
-        }
-
-    }
-
-
-
     /* The Database Constructor. To determine file location and the Bytes per Record. */
     template<class KeychainType, class CacheType>
     SectorDatabase<KeychainType, CacheType>::SectorDatabase(const std::string& strNameIn,
@@ -139,7 +112,10 @@ namespace LLD
     {
         /* Create directories if they don't exist yet. */
         if(nFlags & FLAGS::CREATE && !filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
+        {
+            cDurability.MarkDirectoryCreated(strBaseLocation);
             debug::log(0, FUNCTION, "Generated Path ", strBaseLocation);
+        }
 
         /* Find the most recent append file. */
         while(true)
@@ -158,8 +134,10 @@ namespace LLD
                 else
                 {
                     /* Create a new file if it doesn't exist. */
-                    std::ofstream cStream(strPath, std::ios::binary | std::ios::out | std::ios::trunc);
-                    cStream.close();
+                    if(!DurableIO::Current().Truncate(strPath))
+                        throw debug::exception(FUNCTION, "failed to create sector file");
+
+                    cDurability.MarkCreated(strPath);
                 }
 
                 break;
@@ -330,12 +308,15 @@ namespace LLD
             WriteCompactSize(*pstream, vData.size());
 
             /* Write the data record. */
-            if(!pstream->write((char*) &vData[0], vData.size()))
-                return debug::error(FUNCTION, "only ", pstream->gcount(), "/", vData.size(), " bytes written");
+            DurableIO& cIO = DurableIO::Current();
+            if(cIO.Write(*pstream, vData.data(), vData.size()) != vData.size())
+                return debug::error(FUNCTION, "failed to write sector file");
 
-            pstream->flush();
-            if(!*pstream)
+            if(!cIO.Flush(*pstream))
                 return debug::error(FUNCTION, "failed to flush sector file");
+
+            cDurability.MarkDirty(debug::safe_printstr(
+                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile));
 
             /* Records flushed indicator. */
             ++nRecordsFlushed;
@@ -372,12 +353,12 @@ namespace LLD
                     ++nCurrentFile;
                     nCurrentFileSize = 0;
 
-                    std::ofstream stream
-                    (
-                        debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile),
-                        std::ios::out | std::ios::binary | std::ios::trunc
-                    );
-                    stream.close();
+                    const std::string strPath = debug::safe_printstr(
+                        strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile);
+                    if(!DurableIO::Current().Truncate(strPath))
+                        return debug::error(FUNCTION, "failed to create sector file");
+
+                    cDurability.MarkCreated(strPath);
                 }
 
                 /* Find the file stream for LRU cache. */
@@ -407,12 +388,15 @@ namespace LLD
                 WriteCompactSize(*pstream, vData.size());
 
                 /* Write the data record. */
-                if(!pstream->write((char*) &vData[0], vData.size()))
-                    return debug::error(FUNCTION, "only ", pstream->gcount(), "/", vData.size(), " bytes written");
+                DurableIO& cIO = DurableIO::Current();
+                if(cIO.Write(*pstream, vData.data(), vData.size()) != vData.size())
+                    return debug::error(FUNCTION, "failed to write sector file");
 
-                pstream->flush();
-                if(!*pstream)
+                if(!cIO.Flush(*pstream))
                     return debug::error(FUNCTION, "failed to flush sector file");
+
+                cDurability.MarkDirty(debug::safe_printstr(
+                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile));
 
                 /* Get current size */
                 const uint64_t nSize =
@@ -527,11 +511,16 @@ namespace LLD
             ssData.resize(key.nSectorSize - GetSizeOfCompactSize(key.nSectorSize));
 
             /* Write the data record. */
-            if(!pstream->write((char*)ssData.data(), ssData.size()))
-                return debug::error(FUNCTION, "only ", pstream->gcount(), " bytes written");
+            DurableIO& cIO = DurableIO::Current();
+            if(cIO.Write(*pstream, ssData.data(), ssData.size()) != ssData.size())
+                return debug::error(FUNCTION, "failed to write sector file");
 
             /* Flush the rest of the write buffer in stream. */
-            pstream->flush();
+            if(!cIO.Flush(*pstream))
+                return debug::error(FUNCTION, "failed to flush sector file");
+
+            cDurability.MarkDirty(debug::safe_printstr(
+                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile));
 
             /* Verboe output. */
             if(config::nVerbose >= 4)
@@ -592,8 +581,12 @@ namespace LLD
                 nCurrentFileSize = 0;
 
                 /* Create a new file for next writes. */
-                std::fstream stream(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile), std::ios::out | std::ios::binary | std::ios::trunc);
-                stream.close();
+                const std::string strPath = debug::safe_printstr(
+                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile);
+                if(!DurableIO::Current().Truncate(strPath))
+                    debug::error(FUNCTION, "failed to create sector file");
+                else
+                    cDurability.MarkCreated(strPath);
             }
 
             /* Iterate through buffer to queue disk writes. */
@@ -706,37 +699,34 @@ namespace LLD
         /* Set commit message into journal. */
         pTransaction->ssJournal << std::string("commit");
 
+        DurableIO& cIO = DurableIO::Current();
+        const std::string strJournal =
+            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
+
         /* Create an append only stream. */
-        FILE* stream = std::fopen(
-            debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat").c_str(), "ab");
+        FILE* stream = cIO.Open(strJournal, "ab");
         if(!stream)
             return debug::error(FUNCTION, "failed to open journal file");
 
         /* Write to the file.  */
         const std::vector<uint8_t>& vBytes = pTransaction->ssJournal.Bytes();
-        if(std::fwrite(vBytes.data(), 1, vBytes.size(), stream) != vBytes.size()
-        || std::fflush(stream) != 0)
+        if(cIO.Write(stream, vBytes.data(), vBytes.size()) != vBytes.size()
+        || !cIO.Flush(stream))
         {
-            std::fclose(stream);
+            cIO.Close(stream);
             return debug::error(FUNCTION, "failed to flush journal file");
         }
 
-        #ifdef WIN32
-        const bool fSynced = (_commit(_fileno(stream)) == 0);
-        #else
-        const bool fSynced = (fsync(fileno(stream)) == 0);
-        #endif
-
-        if(!fSynced)
+        if(!cIO.SyncFile(stream))
         {
-            std::fclose(stream);
+            cIO.Close(stream);
             return debug::error(FUNCTION, "failed to sync journal file");
         }
 
-        if(std::fclose(stream) != 0)
+        if(!cIO.Close(stream))
             return debug::error(FUNCTION, "failed to close journal file");
 
-        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
+        if(!cIO.SyncDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
         return true;
@@ -759,20 +749,14 @@ namespace LLD
         /* Durably truncate the transaction journal. */
         const std::string strJournal =
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
-        FILE* stream = std::fopen(strJournal.c_str(), "wb");
-        if(!stream)
+        DurableIO& cIO = DurableIO::Current();
+        if(!cIO.Truncate(strJournal))
             return debug::error(FUNCTION, "failed to truncate journal file");
 
-        #ifdef WIN32
-        const bool fSynced = (_commit(_fileno(stream)) == 0);
-        #else
-        const bool fSynced = (fsync(fileno(stream)) == 0);
-        #endif
-
-        if(std::fclose(stream) != 0 || !fSynced)
+        if(!cIO.SyncFile(strJournal))
             return debug::error(FUNCTION, "failed to sync truncated journal file");
 
-        if(!config::SyncDataDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
+        if(!cIO.SyncDirectoryChain(debug::safe_printstr(config::GetDataDir(), strName, "/")))
             return debug::error(FUNCTION, "failed to sync journal directory chain");
 
         return true;
@@ -799,9 +783,6 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to erase from keychain");
         }
 
-        /* Track every sector file changed by this transaction. */
-        std::set<uint16_t> setSectorFiles;
-
         /* Commit the sector data. */
         for(const auto& item : pTransaction->mapTransactions)
         {
@@ -811,8 +792,6 @@ namespace LLD
             SectorKey cKey;
             if(!pSectorKeys->Get(item.first, cKey))
                 return debug::error(FUNCTION, "failed to read committed sector key");
-
-            setSectorFiles.insert(cKey.nSectorFile);
         }
 
         /* Commit keychain entries. */
@@ -846,17 +825,10 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to write indexing entry");
         }
 
-        /* Make the applied data and keychain durable before its journal can be released. */
-        for(const uint16_t nSectorFile : setSectorFiles)
-        {
-            const std::string strPath = debug::safe_printstr(
-                strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nSectorFile);
-            if(!SyncFile(strPath))
-                return debug::error(FUNCTION, "failed to sync sector file");
-        }
-
-        if(!setSectorFiles.empty() && !config::SyncDataDirectoryChain(strBaseLocation))
-            return debug::error(FUNCTION, "failed to sync sector directory chain");
+        /* Make all pending sector writes and their new directory entries durable
+         * before the transaction journal can be released. */
+        if(!cDurability.Sync(DurableIO::Current()))
+            return debug::error(FUNCTION, "failed to sync sector files");
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
@@ -896,37 +868,14 @@ namespace LLD
                    RECOVERY::FAILED;
         }
 
-        /* Open the journal for reading. */
-        std::ifstream stream(strJournal, std::ios::in | std::ios::binary | std::ios::ate);
-        if(!stream.is_open())
-            return debug::error(FUNCTION, "failed to open ", strName, " transaction journal"),
-                   RECOVERY::FAILED;
-
-        /* Get the Binary Size. */
-        const std::streampos nStreamSize = stream.tellg();
-        if(nStreamSize < 0
-        || static_cast<uint64_t>(nStreamSize) > std::numeric_limits<uint32_t>::max())
-            return debug::error(FUNCTION, "failed to read ", strName, " transaction journal size"),
-                   RECOVERY::FAILED;
-
-        /* Get the data buffer. */
-        const uint32_t nSize = static_cast<uint32_t>(nStreamSize);
-
-        /* Check journal size for 0. */
-        if(nSize == 0)
-            return RECOVERY::INCOMPLETE;
-
-        /* Create buffer to read into. */
-        std::vector<uint8_t> vBuffer(nSize, 0);
-
-        /* Read the journal file. */
-        stream.seekg (0, std::ios::beg);
-        stream.read((char*) &vBuffer[0], vBuffer.size());
-        if(!stream)
+        std::vector<uint8_t> vBuffer;
+        if(!DurableIO::Current().Read(strJournal, vBuffer))
             return debug::error(FUNCTION, "failed to read ", strName, " transaction journal"),
                    RECOVERY::FAILED;
 
-        stream.close();
+        const uint32_t nSize = static_cast<uint32_t>(vBuffer.size());
+        if(vBuffer.empty())
+            return RECOVERY::INCOMPLETE;
 
         debug::log(0, FUNCTION, strName, " transaction journal detected of ", nSize, " bytes");
 
