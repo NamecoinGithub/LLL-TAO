@@ -354,6 +354,8 @@ namespace
     {
     public:
         bool fShortNextWrite{false};
+        bool fFailNextStreamWrite{false};
+        bool fFailNextIndexWrite{false};
         bool fFailNextFlush{false};
         bool fFailNextTruncate{false};
         bool fFailNextRead{false};
@@ -381,6 +383,14 @@ namespace
 
         std::size_t Write(std::ostream& cStream, const void* pData, const std::size_t nSize) override
         {
+            if(fFailNextStreamWrite || (fFailNextIndexWrite && nSize == sizeof(uint16_t)))
+            {
+                fFailNextStreamWrite = false;
+                fFailNextIndexWrite = false;
+                cStream.setstate(std::ios::badbit);
+                return 0;
+            }
+
             if(fShortNextWrite)
             {
                 fShortNextWrite = false;
@@ -1973,7 +1983,7 @@ TEST_CASE("BinaryHashMap syncs standalone collision files on teardown",
 }
 
 
-TEST_CASE("LLD retries buffered rollover without losing records or advancing past a failed file",
+TEST_CASE("LLD retries buffered I/O without losing records or advancing past a failed file",
           "[lld][durable]")
 {
     const std::string strName = "_durable_rollover_test";
@@ -1981,23 +1991,46 @@ TEST_CASE("LLD retries buffered rollover without losing records or advancing pas
     std::filesystem::remove_all(strPath);
     FaultInjectingDurableIO cIO;
     DurableIOGuard ioGuard(cIO);
+    ShutdownGuard shutdownGuard;
+    bool fWriteSecond = true;
+    std::size_t nExpectedTruncates = 1;
     {
-        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::APPEND, 8);
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
         db.RequireRollover();
         cIO.vTruncatedFiles.clear();
-        cIO.fFailNextTruncate = true;
+        SECTION("failed rollover")
+        {
+            cIO.fFailNextTruncate = true;
+            nExpectedTruncates = 2;
+        }
+        SECTION("failed stream write")
+        {
+            cIO.fFailNextStreamWrite = true;
+        }
+        SECTION("failed hashmap index write")
+        {
+            cIO.fFailNextIndexWrite = true;
+            fWriteSecond = false;
+        }
         REQUIRE(db.Write(std::string("first"), uint32_t(1)));
-        REQUIRE(db.Write(std::string("second"), uint32_t(2)));
+        if(fWriteSecond)
+            REQUIRE(db.Write(std::string("second"), uint32_t(2)));
+        config::fShutdown.store(true);
     }
-    REQUIRE(cIO.vTruncatedFiles == std::vector<std::string>{
-        strPath + "/datachain/_block.00001", strPath + "/datachain/_block.00001"});
+    REQUIRE(cIO.vTruncatedFiles.size() == nExpectedTruncates);
+    for(const auto& strFile : cIO.vTruncatedFiles)
+        REQUIRE(strFile == strPath + "/datachain/_block.00001");
+    config::fShutdown.store(shutdownGuard.savedShutdown);
     {
         DurabilityTestDatabase db(strName, LLD::FLAGS::FORCE, 8);
         uint32_t nValue = 0;
         REQUIRE(db.Read(std::string("first"), nValue));
         REQUIRE(nValue == 1);
-        REQUIRE(db.Read(std::string("second"), nValue));
-        REQUIRE(nValue == 2);
+        if(fWriteSecond)
+        {
+            REQUIRE(db.Read(std::string("second"), nValue));
+            REQUIRE(nValue == 2);
+        }
     }
     REQUIRE(std::filesystem::remove_all(strPath) > 0);
 }

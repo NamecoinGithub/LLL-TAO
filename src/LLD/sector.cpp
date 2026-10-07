@@ -311,6 +311,7 @@ namespace LLD
                 pstream->open(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile), std::ios::in | std::ios::out | std::ios::binary);
 
             /* If it is a New Sector, Assign a Binary Position. */
+            pstream->clear();
             pstream->seekp(key.nSectorStart, std::ios::beg);
 
             /* Write the size of record. */
@@ -390,6 +391,7 @@ namespace LLD
                     pstream->open(debug::safe_printstr(strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile), std::ios::in | std::ios::out | std::ios::binary);
 
                 /* If it is a New Sector, Assign a Binary Position. */
+                pstream->clear();
                 pstream->seekp(nCurrentFileSize, std::ios::beg);
 
                 /* Write the size of record. */
@@ -559,11 +561,11 @@ namespace LLD
             return;
         }
 
-        /* Loop until shutdown. */
-        while(!config::fShutdown.load())
+        /* Drain acknowledged writes before shutdown, retrying storage failures. */
+        while(true)
         {
             /* Wait for buffer to empty before shutting down. */
-            if((fDestruct.load()) && nBufferBytes.load() == 0)
+            if((fDestruct.load() || config::fShutdown.load()) && nBufferBytes.load() == 0)
                 return;
 
             /* Check for data to be written. */

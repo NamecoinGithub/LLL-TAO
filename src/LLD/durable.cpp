@@ -183,8 +183,11 @@ namespace LLD
 
     void DurabilityTracker::TrackParentDirectories(const std::string& strPath)
     {
-        const std::filesystem::path cDataDirectory =
+        std::filesystem::path cDataDirectory =
             std::filesystem::path(config::GetDataDir()).lexically_normal();
+        if(cDataDirectory.has_relative_path() && cDataDirectory.filename().empty())
+            cDataDirectory = cDataDirectory.parent_path();
+
         std::filesystem::path cDirectory =
             std::filesystem::path(strPath).parent_path().lexically_normal();
 

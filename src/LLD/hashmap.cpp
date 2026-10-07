@@ -405,6 +405,7 @@ namespace LLD
                     pstream->open(debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i), std::ios::in | std::ios::out | std::ios::binary);
 
                 /* Seek to the hashmap index in file. */
+                pstream->clear();
                 pstream->seekg (nFilePos, std::ios::beg);
 
                 /* Read the bucket binary data from file stream */
@@ -445,6 +446,7 @@ namespace LLD
 
 
                     /* Handle the disk writing operations. */
+                    pstream->clear();
                     pstream->seekp (nFilePos, std::ios::beg);
                     DurableIO& cIO = DurableIO::Current();
                     if(cIO.Write(*pstream, ssKey.Bytes().data(), ssKey.size()) != ssKey.size()
@@ -539,6 +541,7 @@ namespace LLD
             pstream->open(file, std::ios::in | std::ios::out | std::ios::binary);
 
         /* Flush the key file to disk. */
+        pstream->clear();
         pstream->seekp (nFilePos, std::ios::beg);
         if(cIO.Write(*pstream, ssKey.Bytes().data(), ssKey.size()) != ssKey.size()
         || !cIO.Flush(*pstream))
@@ -551,10 +554,11 @@ namespace LLD
             pindex->open(debug::safe_printstr(strBaseLocation, "_hashmap.index"), std::ios::in | std::ios::out | std::ios::binary);
 
         /* Seek to the index position. */
+        pindex->clear();
         pindex->seekp((nBucket * 2), std::ios::beg);
 
         /* Write the index to disk. */
-        uint16_t nIndex = ++hashmap[nBucket];
+        uint16_t nIndex = hashmap[nBucket] + 1;
 
         /* Get the bucket data. */
         std::vector<uint8_t> vBucket((uint8_t*)&nIndex, (uint8_t*)&nIndex + 2);
@@ -564,6 +568,7 @@ namespace LLD
         || !cIO.Flush(*pindex))
             return debug::error(FUNCTION, "failed to flush hashmap index");
 
+        hashmap[nBucket] = nIndex;
         cDurability.MarkDirty(debug::safe_printstr(strBaseLocation, "_hashmap.index"));
 
         /* Debug Output of Sector Key Information. */
