@@ -123,6 +123,9 @@ namespace LLD
     /* Default Destructor */
     BinaryHashMap::~BinaryHashMap()
     {
+        if(!SyncTouchedFiles())
+            debug::error(FUNCTION, "failed to sync keychain files during shutdown");
+
         if(fileCache)
             delete fileCache;
 
@@ -263,6 +266,9 @@ namespace LLD
             /* Debug output showing generating of the hashmap file. */
             debug::log(0, FUNCTION, "Generated Disk Hash Map 0 of ", vSpace.size(), " bytes");
         }
+
+        if(!cDurability.Sync(cIO))
+            throw debug::exception(FUNCTION, "failed to sync initialized keychain storage");
 
         /* Create the stream index object. */
         pindex = new std::fstream(index, std::ios::in | std::ios::out | std::ios::binary);

@@ -44,6 +44,8 @@ ________________________________________________________________________________
 #include <LLD/include/global.h>
 #include <LLD/include/version.h>
 #include <LLD/durable.h>
+#include <LLD/cache/binary_lru.h>
+#include <LLD/keychain/hashmap.h>
 #include <LLD/types/contract.h>
 #include <LLD/types/register.h>
 #include <LLD/types/legacy.h>
@@ -361,6 +363,9 @@ namespace
         uint32_t nDirectorySyncFailures{0};
         uint32_t nFileSyncCalls{0};
         uint32_t nDirectorySyncCalls{0};
+        std::vector<std::string> vSyncedFiles;
+        std::vector<std::string> vTruncatedFiles;
+        std::function<void()> onSectorSync;
 
         std::size_t Write(FILE* pStream, const void* pData, const std::size_t nSize) override
         {
@@ -422,6 +427,10 @@ namespace
 
         bool SyncFile(const std::string& strPath) override
         {
+            vSyncedFiles.push_back(strPath);
+            if(onSectorSync && strPath.find("_block.") != std::string::npos)
+                onSectorSync();
+
             if(fFailNextSectorSync && strPath.find("_block.") != std::string::npos)
             {
                 fFailNextSectorSync = false;
@@ -445,6 +454,7 @@ namespace
 
         bool Truncate(const std::string& strPath) override
         {
+            vTruncatedFiles.push_back(strPath);
             if(fFailNextTruncate)
             {
                 fFailNextTruncate = false;
@@ -463,6 +473,33 @@ namespace
             }
 
             return DurableIO::Read(strPath, vData);
+        }
+    };
+
+
+    class DurabilityTestDatabase
+        : public LLD::SectorDatabase<LLD::BinaryHashMap, LLD::BinaryLRU>
+    {
+    public:
+        using SectorDatabase::SectorDatabase;
+
+        void RequireRollover()
+        {
+            WRITE_LOCK(SECTOR_MUTEX);
+            nCurrentFileSize = LLD::MAX_SECTOR_FILE_SIZE + 1;
+        }
+
+        bool SectorMutexIsLocked()
+        {
+            bool fLocked = false;
+            std::thread probe([&]
+            {
+                fLocked = !SECTOR_MUTEX.try_lock();
+                if(!fLocked)
+                    SECTOR_MUTEX.unlock();
+            });
+            probe.join();
+            return fLocked;
         }
     };
 
@@ -1853,6 +1890,138 @@ TEST_CASE("DurabilityTracker retains failed sync obligations for retry",
     REQUIRE(cIO.nDirectorySyncCalls == 2);
 
     REQUIRE(std::filesystem::remove(strPath));
+}
+
+
+TEST_CASE("LLD makes startup storage durable without a transaction",
+          "[lld][durable]")
+{
+    const std::string strName = "_durable_startup_test";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 8);
+        REQUIRE(cIO.vSyncedFiles == std::vector<std::string>{
+            strPath + "/keychain/_hashmap.00000",
+            strPath + "/keychain/_hashmap.index",
+            strPath + "/datachain/_block.00000"});
+        REQUIRE(cIO.nDirectorySyncCalls > 0);
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("LLD syncs standalone sector and keychain writes on teardown",
+          "[lld][durable]")
+{
+    const std::string strName = "_durable_teardown_test";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    bool fExpectKeychainSync = true;
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 8);
+        REQUIRE(db.Write(std::string("key"), uint32_t(1)));
+        cIO.vSyncedFiles.clear();
+        SECTION("new record") {}
+        SECTION("in-place update")
+        {
+            db.TxnBegin();
+            REQUIRE(db.TxnCommit());
+            cIO.vSyncedFiles.clear();
+            REQUIRE(db.Write(std::string("key"), uint32_t(2)));
+            fExpectKeychainSync = false;
+        }
+        SECTION("erased record")
+        {
+            db.TxnBegin();
+            REQUIRE(db.TxnCommit());
+            cIO.vSyncedFiles.clear();
+            REQUIRE(db.Erase(std::string("key")));
+        }
+    }
+    REQUIRE_FALSE(cIO.vSyncedFiles.empty());
+    REQUIRE(cIO.vSyncedFiles.front() == strPath + "/datachain/_block.00000");
+    if(fExpectKeychainSync)
+        REQUIRE(std::find(cIO.vSyncedFiles.begin(), cIO.vSyncedFiles.end(),
+            strPath + "/keychain/_hashmap.00000") != cIO.vSyncedFiles.end());
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("BinaryHashMap syncs standalone collision files on teardown",
+          "[lld][durable]")
+{
+    const std::string strPath = config::GetDataDir() + "_durable_hashmap_test";
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    {
+        LLD::BinaryHashMap keys(strPath + "/", LLD::FLAGS::CREATE | LLD::FLAGS::APPEND, 1);
+        cIO.vSyncedFiles.clear();
+        cIO.nDirectorySyncCalls = 0;
+        REQUIRE(keys.Put(LLD::SectorKey(LLD::STATE::READY, {1}, 0, 0, 0)));
+        REQUIRE(keys.Put(LLD::SectorKey(LLD::STATE::READY, {2}, 0, 0, 0)));
+    }
+    REQUIRE(cIO.vSyncedFiles == std::vector<std::string>{
+        strPath + "/_hashmap.00000", strPath + "/_hashmap.00001", strPath + "/_hashmap.index"});
+    REQUIRE(cIO.nDirectorySyncCalls > 0);
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("LLD retries buffered rollover without losing records or advancing past a failed file",
+          "[lld][durable]")
+{
+    const std::string strName = "_durable_rollover_test";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::APPEND, 8);
+        db.RequireRollover();
+        cIO.vTruncatedFiles.clear();
+        cIO.fFailNextTruncate = true;
+        REQUIRE(db.Write(std::string("first"), uint32_t(1)));
+        REQUIRE(db.Write(std::string("second"), uint32_t(2)));
+    }
+    REQUIRE(cIO.vTruncatedFiles == std::vector<std::string>{
+        strPath + "/datachain/_block.00001", strPath + "/datachain/_block.00001"});
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::FORCE, 8);
+        uint32_t nValue = 0;
+        REQUIRE(db.Read(std::string("first"), nValue));
+        REQUIRE(nValue == 1);
+        REQUIRE(db.Read(std::string("second"), nValue));
+        REQUIRE(nValue == 2);
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("LLD holds the sector write mutex while syncing a transaction",
+          "[lld][durable]")
+{
+    const std::string strName = "_durable_sync_lock_test";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        bool fLocked = false;
+        cIO.onSectorSync = [&] { fLocked = db.SectorMutexIsLocked(); };
+        db.TxnBegin();
+        REQUIRE(db.Write(std::string("key"), uint32_t(1)));
+        REQUIRE(db.TxnCommit());
+        cIO.onSectorSync = nullptr;
+        REQUIRE(fLocked);
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
 }
 
 

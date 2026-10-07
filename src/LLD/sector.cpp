@@ -92,6 +92,12 @@ namespace LLD
         if(MeterThread.joinable())
             MeterThread.join();
 
+        {
+            WRITE_LOCK(SECTOR_MUTEX);
+            if(!cDurability.Sync(DurableIO::Current()))
+                debug::error(FUNCTION, "failed to sync sector files during shutdown");
+        }
+
         if(pTransaction)
             delete pTransaction;
 
@@ -149,6 +155,9 @@ namespace LLD
             /* Increment the Current File */
             ++nCurrentFile;
         }
+
+        if(!cDurability.Sync(DurableIO::Current()))
+            throw debug::exception(FUNCTION, "failed to sync initialized sector storage");
 
         pTransaction = nullptr;
         fInitialized = true;
@@ -350,15 +359,14 @@ namespace LLD
                 {
                     debug::log(4, FUNCTION, "allocating new sector file ", nCurrentFile + 1);
 
-                    ++nCurrentFile;
-                    nCurrentFileSize = 0;
-
                     const std::string strPath = debug::safe_printstr(
-                        strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile);
+                        strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile + 1);
                     if(!DurableIO::Current().Truncate(strPath))
                         return debug::error(FUNCTION, "failed to create sector file");
 
                     cDurability.MarkCreated(strPath);
+                    ++nCurrentFile;
+                    nCurrentFileSize = 0;
                 }
 
                 /* Find the file stream for LRU cache. */
@@ -571,32 +579,26 @@ namespace LLD
                 nBufferBytes = 0;
             }
 
-            /* Create a new file if the sector file size is over file size limits. */
-            if(nCurrentFileSize > MAX_SECTOR_FILE_SIZE)
-            {
-                debug::log(0, FUNCTION, "allocating new sector file ", nCurrentFile + 1);
-
-                /* Iterate the current file and reset current file sie. */
-                ++nCurrentFile;
-                nCurrentFileSize = 0;
-
-                /* Create a new file for next writes. */
-                const std::string strPath = debug::safe_printstr(
-                    strBaseLocation, "_block.", std::setfill('0'), std::setw(5), nCurrentFile);
-                if(!DurableIO::Current().Truncate(strPath))
-                    debug::error(FUNCTION, "failed to create sector file");
-                else
-                    cDurability.MarkCreated(strPath);
-            }
-
             /* Iterate through buffer to queue disk writes. */
-            for(const auto& vObj : vIndexes)
+            for(auto it = vIndexes.begin(); it != vIndexes.end(); ++it)
             {
                 /* Force write data. */
-                Force(vObj.first, vObj.second);
+                if(!Force(it->first, it->second))
+                {
+                    /* Keep failed and unprocessed records ahead of newer writes. */
+                    {
+                        LOCK(BUFFER_MUTEX);
+                        vDiskBuffer.insert(vDiskBuffer.begin(), it, vIndexes.end());
+                        for(; it != vIndexes.end(); ++it)
+                            nBufferBytes += static_cast<uint32_t>(it->first.size() + it->second.size());
+                    }
+
+                    runtime::sleep(100);
+                    break;
+                }
 
                 /* Set no longer reserved in cache pool. */
-                cachePool->Reserve(vObj.first, false);
+                cachePool->Reserve(it->first, false);
             }
 
             /* Notify the condition. */
@@ -827,8 +829,11 @@ namespace LLD
 
         /* Make all pending sector writes and their new directory entries durable
          * before the transaction journal can be released. */
-        if(!cDurability.Sync(DurableIO::Current()))
-            return debug::error(FUNCTION, "failed to sync sector files");
+        {
+            WRITE_LOCK(SECTOR_MUTEX);
+            if(!cDurability.Sync(DurableIO::Current()))
+                return debug::error(FUNCTION, "failed to sync sector files");
+        }
 
         if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain files");
