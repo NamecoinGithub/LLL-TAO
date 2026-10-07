@@ -25,14 +25,6 @@ ________________________________________________________________________________
 #include <cstdio>
 #include <iomanip>
 
-#ifdef WIN32
-#include <io.h>
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
 namespace LLD
 {
 
@@ -47,8 +39,7 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (32)
     , HASHMAP_KEY_ALLOCATION (static_cast<uint16_t>(HASHMAP_MAX_KEY_SIZE + 13))
     , nFlags                 (nFlagsIn)
-    , setDirtyFiles          ( )
-    , fDirectoryDirty        (false)
+    , cDurability            ( )
     , RECORD_MUTEX           (1024)
     {
         Initialize();
@@ -66,8 +57,7 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (map.HASHMAP_MAX_KEY_SIZE)
     , HASHMAP_KEY_ALLOCATION (map.HASHMAP_KEY_ALLOCATION)
     , nFlags                 (map.nFlags)
-    , setDirtyFiles          ( )
-    , fDirectoryDirty        (false)
+    , cDurability            ( )
     , RECORD_MUTEX           (map.RECORD_MUTEX.size())
     {
         Initialize();
@@ -85,8 +75,7 @@ namespace LLD
     , HASHMAP_MAX_KEY_SIZE   (std::move(map.HASHMAP_MAX_KEY_SIZE))
     , HASHMAP_KEY_ALLOCATION (std::move(map.HASHMAP_KEY_ALLOCATION))
     , nFlags                 (std::move(map.nFlags))
-    , setDirtyFiles          (std::move(map.setDirtyFiles))
-    , fDirectoryDirty        (map.fDirectoryDirty)
+    , cDurability            (std::move(map.cDurability))
     , RECORD_MUTEX           (map.RECORD_MUTEX.size())
     {
         Initialize();
@@ -104,8 +93,7 @@ namespace LLD
         HASHMAP_MAX_KEY_SIZE   = map.HASHMAP_MAX_KEY_SIZE;
         HASHMAP_KEY_ALLOCATION = map.HASHMAP_KEY_ALLOCATION;
         nFlags                 = map.nFlags;
-        setDirtyFiles.clear();
-        fDirectoryDirty        = false;
+        cDurability            = DurabilityTracker();
 
         Initialize();
 
@@ -124,8 +112,7 @@ namespace LLD
         HASHMAP_MAX_KEY_SIZE   = std::move(map.HASHMAP_MAX_KEY_SIZE);
         HASHMAP_KEY_ALLOCATION = std::move(map.HASHMAP_KEY_ALLOCATION);
         nFlags                 = std::move(map.nFlags);
-        setDirtyFiles          = std::move(map.setDirtyFiles);
-        fDirectoryDirty        = map.fDirectoryDirty;
+        cDurability            = std::move(map.cDurability);
 
         Initialize();
 
@@ -136,6 +123,9 @@ namespace LLD
     /* Default Destructor */
     BinaryHashMap::~BinaryHashMap()
     {
+        if(!SyncTouchedFiles())
+            debug::error(FUNCTION, "failed to sync keychain files during shutdown");
+
         if(fileCache)
             delete fileCache;
 
@@ -178,9 +168,14 @@ namespace LLD
     /* Read a key index from the disk hashmaps. */
     void BinaryHashMap::Initialize()
     {
+        DurableIO& cIO = DurableIO::Current();
+
         /* Create directories if they don't exist yet. */
         if(!filesystem::exists(strBaseLocation) && filesystem::create_directories(strBaseLocation))
+        {
+            cDurability.MarkDirectoryCreated(strBaseLocation);
             debug::log(0, FUNCTION, "Generated Path ", strBaseLocation);
+        }
 
         /* Build the hashmap indexes. */
         std::string index = debug::safe_printstr(strBaseLocation, "_hashmap.index");
@@ -194,9 +189,8 @@ namespace LLD
             if(!stream)
                 throw debug::exception(FUNCTION, "failed to create disk index");
 
-            stream.write((char*)&vSpace[0], vSpace.size());
-            stream.flush();
-            if(!stream)
+            if(cIO.Write(stream, vSpace.data(), vSpace.size()) != vSpace.size()
+            || !cIO.Flush(stream))
             {
                 stream.close();
                 filesystem::remove(index);
@@ -210,8 +204,7 @@ namespace LLD
                 throw debug::exception(FUNCTION, "failed to close disk index");
             }
 
-            setDirtyFiles.insert(index);
-            fDirectoryDirty = true;
+            cDurability.MarkCreated(index);
 
             /* Debug output showing generation of disk index. */
             debug::log(0, FUNCTION, "Generated Disk Index of ", vSpace.size(), " bytes");
@@ -253,9 +246,8 @@ namespace LLD
             if(!stream)
                 throw debug::exception(FUNCTION, "failed to create disk hashmap");
 
-            stream.write((char*)&vSpace[0], vSpace.size());
-            stream.flush();
-            if(!stream)
+            if(cIO.Write(stream, vSpace.data(), vSpace.size()) != vSpace.size()
+            || !cIO.Flush(stream))
             {
                 stream.close();
                 filesystem::remove(file);
@@ -269,12 +261,14 @@ namespace LLD
                 throw debug::exception(FUNCTION, "failed to close disk hashmap");
             }
 
-            setDirtyFiles.insert(file);
-            fDirectoryDirty = true;
+            cDurability.MarkCreated(file);
 
             /* Debug output showing generating of the hashmap file. */
             debug::log(0, FUNCTION, "Generated Disk Hash Map 0 of ", vSpace.size(), " bytes");
         }
+
+        if(!cDurability.Sync(cIO))
+            throw debug::exception(FUNCTION, "failed to sync initialized keychain storage");
 
         /* Create the stream index object. */
         pindex = new std::fstream(index, std::ios::in | std::ios::out | std::ios::binary);
@@ -411,6 +405,7 @@ namespace LLD
                     pstream->open(debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i), std::ios::in | std::ios::out | std::ios::binary);
 
                 /* Seek to the hashmap index in file. */
+                pstream->clear();
                 pstream->seekg (nFilePos, std::ios::beg);
 
                 /* Read the bucket binary data from file stream */
@@ -451,13 +446,14 @@ namespace LLD
 
 
                     /* Handle the disk writing operations. */
+                    pstream->clear();
                     pstream->seekp (nFilePos, std::ios::beg);
-                    pstream->write((char*)&ssKey.Bytes()[0], ssKey.size());
-                    pstream->flush();
-                    if(!*pstream)
+                    DurableIO& cIO = DurableIO::Current();
+                    if(cIO.Write(*pstream, ssKey.Bytes().data(), ssKey.size()) != ssKey.size()
+                    || !cIO.Flush(*pstream))
                         return debug::error(FUNCTION, "failed to flush hashmap file");
 
-                    setDirtyFiles.insert(debug::safe_printstr(
+                    cDurability.MarkDirty(debug::safe_printstr(
                         strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i));
 
                     /* Debug Output of Sector Key Information. */
@@ -481,6 +477,7 @@ namespace LLD
         std::string file = debug::safe_printstr(strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), hashmap[nBucket]);
         const int64_t nExpectedSize =
             static_cast<int64_t>(HASHMAP_TOTAL_BUCKETS) * HASHMAP_KEY_ALLOCATION;
+        DurableIO& cIO = DurableIO::Current();
         if(filesystem::exists(file) && filesystem::size(file) != nExpectedSize
         && !filesystem::remove(file))
             return debug::error(FUNCTION, "failed to remove partial hashmap file");
@@ -495,11 +492,11 @@ namespace LLD
             if(!stream)
                 return debug::error(FUNCTION, strerror(errno));
 
-            for(uint32_t i = 0; i < HASHMAP_TOTAL_BUCKETS; ++i)
-                stream.write((char*)&vSpace[0], vSpace.size());
+            bool fWritten = true;
+            for(uint32_t i = 0; i < HASHMAP_TOTAL_BUCKETS && fWritten; ++i)
+                fWritten = cIO.Write(stream, vSpace.data(), vSpace.size()) == vSpace.size();
 
-            stream.flush();
-            if(!stream)
+            if(!fWritten || !cIO.Flush(stream))
             {
                 stream.close();
                 filesystem::remove(file);
@@ -513,7 +510,7 @@ namespace LLD
                 return debug::error(FUNCTION, "failed to close hashmap file");
             }
 
-            fDirectoryDirty = true;
+            cDurability.MarkCreated(file);
         }
 
         /* Read the State and Size of Sector Header. */
@@ -544,34 +541,35 @@ namespace LLD
             pstream->open(file, std::ios::in | std::ios::out | std::ios::binary);
 
         /* Flush the key file to disk. */
+        pstream->clear();
         pstream->seekp (nFilePos, std::ios::beg);
-        pstream->write((char*)&ssKey.Bytes()[0], ssKey.size());
-        pstream->flush();
-        if(!*pstream)
+        if(cIO.Write(*pstream, ssKey.Bytes().data(), ssKey.size()) != ssKey.size()
+        || !cIO.Flush(*pstream))
             return debug::error(FUNCTION, "failed to flush hashmap file");
 
-        setDirtyFiles.insert(file);
+        cDurability.MarkDirty(file);
 
         /* Check index file handle is open. */
         if(!pindex->is_open())
             pindex->open(debug::safe_printstr(strBaseLocation, "_hashmap.index"), std::ios::in | std::ios::out | std::ios::binary);
 
         /* Seek to the index position. */
+        pindex->clear();
         pindex->seekp((nBucket * 2), std::ios::beg);
 
         /* Write the index to disk. */
-        uint16_t nIndex = ++hashmap[nBucket];
+        uint16_t nIndex = hashmap[nBucket] + 1;
 
         /* Get the bucket data. */
         std::vector<uint8_t> vBucket((uint8_t*)&nIndex, (uint8_t*)&nIndex + 2);
 
         /* Write the index into hashmap. */
-        pindex->write((char*)&vBucket[0], vBucket.size());
-        pindex->flush();
-        if(!*pindex)
+        if(cIO.Write(*pindex, vBucket.data(), vBucket.size()) != vBucket.size()
+        || !cIO.Flush(*pindex))
             return debug::error(FUNCTION, "failed to flush hashmap index");
 
-        setDirtyFiles.insert(debug::safe_printstr(strBaseLocation, "_hashmap.index"));
+        hashmap[nBucket] = nIndex;
+        cDurability.MarkDirty(debug::safe_printstr(strBaseLocation, "_hashmap.index"));
 
         /* Debug Output of Sector Key Information. */
         if(config::nVerbose >= 4)
@@ -598,14 +596,14 @@ namespace LLD
             pindex->open(debug::safe_printstr(strBaseLocation, "_hashmap.index"), std::ios::in | std::ios::out | std::ios::binary);
 
         /* Flush the index files. */
-        pindex->flush();
+        DurableIO::Current().Flush(*pindex);
 
         /* Iterate the linked list until end. */
         TemplateNode<uint16_t, std::fstream*>* pnode = fileCache->pfirst;
         while(pnode && pnode->pnext)
         {
             /* Flush to disk. */
-            pnode->Data->flush();
+            DurableIO::Current().Flush(*pnode->Data);
 
             /* Set to next. */
             pnode = pnode->pnext;
@@ -625,31 +623,7 @@ namespace LLD
     {
         LOCK(KEY_MUTEX);
 
-        for(const auto& strPath : setDirtyFiles)
-        {
-            FILE* stream = std::fopen(strPath.c_str(), "rb+");
-            if(!stream)
-                return false;
-
-            #ifdef WIN32
-            const bool fSynced = (_commit(_fileno(stream)) == 0);
-            #else
-            const bool fSynced = (fsync(fileno(stream)) == 0);
-            #endif
-
-            if(std::fclose(stream) != 0 || !fSynced)
-                return false;
-        }
-
-        if(fDirectoryDirty || !setDirtyFiles.empty())
-        {
-            if(!config::SyncDataDirectoryChain(strBaseLocation))
-                return false;
-        }
-
-        setDirtyFiles.clear();
-        fDirectoryDirty = false;
-        return true;
+        return cDurability.Sync(DurableIO::Current());
     }
 
 
@@ -724,12 +698,12 @@ namespace LLD
 
                 /* Write an empty bucket over the erased key. */
                 std::vector<uint8_t> vEmpty(HASHMAP_KEY_ALLOCATION, 0);
-                pstream->write((char*) &vEmpty[0], vEmpty.size());
-                pstream->flush();
-                if(!*pstream)
+                DurableIO& cIO = DurableIO::Current();
+                if(cIO.Write(*pstream, vEmpty.data(), vEmpty.size()) != vEmpty.size()
+                || !cIO.Flush(*pstream))
                     return debug::error(FUNCTION, "failed to flush hashmap erase");
 
-                setDirtyFiles.insert(debug::safe_printstr(
+                cDurability.MarkDirty(debug::safe_printstr(
                     strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i));
 
                 /* Debug Output of Sector Key Information. */
@@ -808,8 +782,13 @@ namespace LLD
 
                 /* Read the bucket binary data from file stream */
                 std::vector<uint8_t> vReady(STATE::READY);
-                pstream->write((char*) &vReady[0], vReady.size());
-                pstream->flush();
+                DurableIO& cIO = DurableIO::Current();
+                if(cIO.Write(*pstream, vReady.data(), vReady.size()) != vReady.size()
+                || !cIO.Flush(*pstream))
+                    return debug::error(FUNCTION, "failed to flush hashmap restore");
+
+                cDurability.MarkDirty(debug::safe_printstr(
+                    strBaseLocation, "_hashmap.", std::setfill('0'), std::setw(5), i));
 
                 /* Debug Output of Sector Key Information. */
                 if(config::nVerbose >= 4)

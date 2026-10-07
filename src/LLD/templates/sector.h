@@ -18,6 +18,7 @@ ________________________________________________________________________________
 
 #include <LLD/include/enum.h>
 #include <LLD/include/version.h>
+#include <LLD/durable.h>
 #include <LLD/templates/key.h>
 #include <LLD/templates/transaction.h>
 
@@ -112,6 +113,9 @@ namespace LLD
 
         /* Sector Keys Database. */
         KeychainType* pSectorKeys;
+
+        /* Files and directory entries awaiting durability sync. */
+        DurabilityTracker cDurability;
 
 
         /* Cache Pool */
