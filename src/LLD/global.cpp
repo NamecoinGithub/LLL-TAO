@@ -210,7 +210,14 @@ namespace LLD
             if(!pDatabase)
                 continue;
 
-            for(const uint64_t nSequence : pDatabase->TxnPendingSequences())
+            std::vector<uint64_t> vPending;
+            if(!pDatabase->TxnPendingSequences(vPending))
+            {
+                FailRecovery("failed to list parked transaction journals");
+                return false;
+            }
+
+            for(const uint64_t nSequence : vPending)
                 setSequences.insert(nSequence);
         }
 
@@ -250,10 +257,15 @@ namespace LLD
             if(nRecovery == RECOVERY::COMPLETE)
                 vComplete.push_back(pDatabase);
 
+            std::vector<uint64_t> vPending;
+            if(!pDatabase->TxnPendingSequences(vPending))
+            {
+                FailRecovery("failed to list parked transaction journals");
+                return false;
+            }
+
             const bool fHasLatestPending = nLatestSequence > 0
-                && std::find(pDatabase->TxnPendingSequences().begin(),
-                             pDatabase->TxnPendingSequences().end(),
-                             nLatestSequence) != pDatabase->TxnPendingSequences().end();
+                && std::find(vPending.begin(), vPending.end(), nLatestSequence) != vPending.end();
 
             /* A missing journal.dat is a completed parked commit only when this
              * participant has the group's latest pending sequence. A non-empty

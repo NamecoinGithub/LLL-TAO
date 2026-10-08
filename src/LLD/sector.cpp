@@ -1056,21 +1056,31 @@ namespace LLD
 
 
     template<class KeychainType, class CacheType>
-    std::vector<uint64_t> SectorDatabase<KeychainType, CacheType>::TxnPendingSequences() const
+    bool SectorDatabase<KeychainType, CacheType>::TxnPendingSequences(std::vector<uint64_t>& vSequences) const
     {
-        std::vector<uint64_t> vSequences;
+        vSequences.clear();
+
         std::error_code ec;
         const std::string strDirectory = JournalDirectory();
-        if(!std::filesystem::exists(strDirectory, ec) || ec)
-            return vSequences;
+        std::filesystem::directory_iterator itEntries(strDirectory, ec);
+        /* Absent directory is the normal empty case. Any other open or
+         * increment error must not look like "no parked journals". */
+        if(ec == std::errc::no_such_file_or_directory)
+            return true;
+        if(ec)
+            return debug::error(FUNCTION, strName, " failed to list parked journals");
 
-        for(const std::filesystem::directory_entry& cEntry :
-            std::filesystem::directory_iterator(strDirectory, ec))
+        const std::filesystem::directory_iterator itEnd;
+        while(itEntries != itEnd)
         {
+            const std::string strFile = itEntries->path().filename().string();
+            itEntries.increment(ec);
             if(ec)
-                break;
+            {
+                vSequences.clear();
+                return debug::error(FUNCTION, strName, " failed to list parked journals");
+            }
 
-            const std::string strFile = cEntry.path().filename().string();
             static const std::string strPrefix = "journal.";
             static const std::string strSuffix = ".pending";
             if(strFile.size() <= strPrefix.size() + strSuffix.size())
@@ -1092,7 +1102,7 @@ namespace LLD
 
         std::sort(vSequences.begin(), vSequences.end());
         vSequences.erase(std::unique(vSequences.begin(), vSequences.end()), vSequences.end());
-        return vSequences;
+        return true;
     }
 
 
@@ -1167,8 +1177,14 @@ namespace LLD
 
         const std::string strPending = PendingJournalPath(nSequence);
         std::error_code ec;
-        if(!std::filesystem::is_regular_file(strPending, ec))
-            return !ec || ec == std::errc::no_such_file_or_directory;
+        const std::filesystem::file_status cStatus = std::filesystem::status(strPending, ec);
+        /* Success only when the path is absent. A directory or other existing
+         * non-regular entry still has a sequence name and must not be skipped. */
+        if(cStatus.type() == std::filesystem::file_type::not_found
+        || ec == std::errc::no_such_file_or_directory)
+            return true;
+        if(ec || cStatus.type() != std::filesystem::file_type::regular)
+            return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
 
         std::vector<uint8_t> vBuffer;
         if(!DurableIO::Current().Read(strPending, vBuffer))

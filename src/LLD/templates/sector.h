@@ -869,8 +869,18 @@ namespace LLD
         uint64_t TxnJournalBytes() const;
 
 
-        /** Parked journal sequence numbers, in ascending order. */
-        std::vector<uint64_t> TxnPendingSequences() const;
+        /** Parked journal sequence numbers, in ascending order.
+         *
+         *  An empty vector is a missing or empty journal directory. Enumeration
+         *  failure is reported separately so recovery does not treat an I/O
+         *  error as "no parked journals".
+         *
+         *  @param[out] vSequences Cleared and filled on success.
+         *
+         *  @return False if the journal directory cannot be listed.
+         *
+         **/
+        bool TxnPendingSequences(std::vector<uint64_t>& vSequences) const;
 
 
         /** Rename journal.dat to a pending journal and sync its directory. */
@@ -885,7 +895,8 @@ namespace LLD
         bool TxnSyncDeferred();
 
 
-        /** Replay one parked journal if this database has it. Missing is success. */
+        /** Replay one parked journal if this database has it.
+         *  A missing file is success. An existing non-regular path is failure. */
         bool TxnReplayPending(uint64_t nSequence);
 
     private:
