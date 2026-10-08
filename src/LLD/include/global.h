@@ -162,7 +162,9 @@ namespace LLD
      *  @param[in] nSyncCommitBlocks  Data/keychain fsyncs are coalesced until this
      *             many commits in the same CONSENSUS or MERKLE recovery group,
      *             SYNC_COMMIT_BYTES of that group's parked journals, or shutdown.
-     *             The other group's batch is not counted and is not reset.
+     *             The other group's commits are not counted toward this threshold.
+     *             A barrier is newer than every parked journal, so it syncs both
+     *             groups and discards every parked sequence in global order.
      *             Values below 2 sync on this commit. Default is
      *             SYNC_COMMIT_BLOCKS_DEFAULT.
      *

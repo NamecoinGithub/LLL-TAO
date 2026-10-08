@@ -19,9 +19,11 @@ ________________________________________________________________________________
 #include <Util/include/signals.h>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace LLD
@@ -72,15 +74,15 @@ namespace LLD
         bool ReleasePhysicalTransactions(uint16_t nInstances);
         void ReleaseOwnership();
         bool ParkGroup(uint16_t nInstances, uint64_t nSequence);
-        bool DiscardGroup(uint16_t nInstances);
         bool DiscardSequences(uint16_t nInstances, const std::vector<uint64_t>& vSequences);
-        bool CollectPendingSequences(PhysicalDB* pDatabase, std::set<uint64_t>& setSequences);
-        bool RecoverPendingSequences(uint16_t nInstances,
-                                     const std::vector<PhysicalDB*>& vParticipants,
-                                     const std::set<uint64_t>& setSequences);
         bool RecoverGroup(uint16_t nInstances,
                           const std::vector<PhysicalDB*>& vParticipants,
                           const std::vector<PhysicalDB*>* pvSequenceSources = nullptr);
+        bool SyncGroup(uint16_t nInstances);
+        bool RetireParkedJournals();
+        bool LoadPending(const std::vector<PhysicalDB*>& vDatabases,
+                         std::map<PhysicalDB*, std::set<uint64_t>>& mapPending);
+        bool RecoverOrdered();
         bool QuiesceGroup(uint16_t nInstances);
         void FailRecovery(const std::string& strError);
         void RequireRecovery();
@@ -90,9 +92,12 @@ namespace LLD
         std::atomic<bool> fRecoveryRequired{false};
         std::atomic<bool> fDiscardPendingJournals{false};
         /* CONSENSUS and MERKLE share Contract and Register, but each group has
-         * its own DeferredBatch. A flush resets and discards only that group's
-         * commits, bytes, and sequences, so the other group's barrier and parked
-         * journals, including copies on the shared databases, stay in place. */
+         * its own DeferredBatch so one group's commits do not count toward the
+         * other's threshold. A data barrier is newer than every parked journal,
+         * so it syncs both groups and discards every parked sequence in global
+         * order. Leaving an earlier other-group journal would replay it over
+         * the barrier. A newer journal cannot exist yet: the coordinator lock
+         * admits only one commit at a time. */
         struct DeferredBatch
         {
             uint32_t nCommits{0};
@@ -198,29 +203,6 @@ namespace LLD
     }
 
 
-    bool DurableCommitCoordinator::DiscardGroup(const uint16_t nInstances)
-    {
-        bool fDiscarded = true;
-
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
-            fDiscarded = Logical->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            fDiscarded = Contract->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            fDiscarded = Register->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            fDiscarded = Ledger->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Client && (nInstances & INSTANCES::CLIENT))
-            fDiscarded = Client->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Trust && (nInstances & INSTANCES::TRUST))
-            fDiscarded = Trust->TxnDiscardPendingJournals(true) && fDiscarded;
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
-            fDiscarded = Legacy->TxnDiscardPendingJournals(true) && fDiscarded;
-
-        return fDiscarded;
-    }
-
-
     bool DurableCommitCoordinator::DiscardSequences(const uint16_t nInstances,
                                                     const std::vector<uint64_t>& vSequences)
     {
@@ -296,61 +278,281 @@ namespace LLD
     }
 
 
-    bool DurableCommitCoordinator::CollectPendingSequences(PhysicalDB* pDatabase,
-                                                            std::set<uint64_t>& setSequences)
+    bool DurableCommitCoordinator::SyncGroup(const uint16_t nInstances)
     {
-        if(!pDatabase)
-            return true;
+        bool fSynced = true;
 
-        std::vector<uint64_t> vPending;
-        if(!pDatabase->TxnPendingSequences(vPending))
+        const auto Sync = [&fSynced](PhysicalDB* pDatabase, const uint16_t nBit)
+        {
+            if(pDatabase && (nInstances & nBit))
+                fSynced = pDatabase->TxnSyncDeferred() && fSynced;
+        };
+
+        Sync(Logical, INSTANCES::LOGICAL);
+        Sync(Contract, INSTANCES::CONTRACT);
+        Sync(Register, INSTANCES::REGISTER);
+        Sync(Ledger, INSTANCES::LEDGER);
+        Sync(Client, INSTANCES::CLIENT);
+        Sync(Trust, INSTANCES::TRUST);
+        Sync(Legacy, INSTANCES::LEGACY);
+        return fSynced;
+    }
+
+
+    /* Every parked sequence is older than the commit that reached a data
+     * barrier. Sync the groups that still have journals, then delete the
+     * lowest sequence first so a crash cannot replay an earlier journal over
+     * an already-durable later one. */
+    bool DurableCommitCoordinator::RetireParkedJournals()
+    {
+        if(!cDeferredConsensus.vSequences.empty() && !SyncGroup(INSTANCES::CONSENSUS))
             return false;
 
-        setSequences.insert(vPending.begin(), vPending.end());
+        if(!cDeferredMerkle.vSequences.empty() && !SyncGroup(INSTANCES::MERKLE))
+            return false;
+
+        std::vector<std::pair<uint64_t, uint16_t>> vOrdered;
+        vOrdered.reserve(cDeferredConsensus.vSequences.size() + cDeferredMerkle.vSequences.size());
+        for(const uint64_t nSequence : cDeferredConsensus.vSequences)
+            vOrdered.emplace_back(nSequence, static_cast<uint16_t>(INSTANCES::CONSENSUS));
+        for(const uint64_t nSequence : cDeferredMerkle.vSequences)
+            vOrdered.emplace_back(nSequence, static_cast<uint16_t>(INSTANCES::MERKLE));
+
+        std::sort(vOrdered.begin(), vOrdered.end());
+        for(const auto& cItem : vOrdered)
+        {
+            if(!DiscardSequences(cItem.second, std::vector<uint64_t>{cItem.first}))
+                return false;
+        }
+
+        cDeferredConsensus = {};
+        cDeferredMerkle = {};
         return true;
     }
 
 
-    /* Replay one recovery group's parked sequences, including journals those
-     * sequences left on databases shared with the other group. Discard only
-     * those sequences so the other group's crash records stay replayable. */
-    bool DurableCommitCoordinator::RecoverPendingSequences(
-        const uint16_t nInstances,
-        const std::vector<PhysicalDB*>& vParticipants,
-        const std::set<uint64_t>& setSequences)
+    bool DurableCommitCoordinator::LoadPending(
+        const std::vector<PhysicalDB*>& vDatabases,
+        std::map<PhysicalDB*, std::set<uint64_t>>& mapPending)
     {
-        if(setSequences.empty())
-            return true;
+        for(PhysicalDB* pDatabase : vDatabases)
+        {
+            if(!pDatabase || mapPending.count(pDatabase))
+                continue;
 
+            std::vector<uint64_t> vPending;
+            if(!pDatabase->TxnPendingSequences(vPending))
+            {
+                FailRecovery("failed to list parked transaction journals");
+                return false;
+            }
+
+            mapPending.emplace(pDatabase, std::set<uint64_t>(vPending.begin(), vPending.end()));
+        }
+
+        return true;
+    }
+
+
+    /* Full-node recovery. Sequence numbers are global, so a MERKLE journal can
+     * be older or newer than a CONSENSUS journal. Replaying one group first can
+     * restore an older shared Contract/Register value over a newer one. */
+    bool DurableCommitCoordinator::RecoverOrdered()
+    {
+        const std::vector<PhysicalDB*> vMerkle = {Logical, Contract, Register, Client};
+        const std::vector<PhysicalDB*> vConsensus = {Contract, Register, Trust, Legacy, Ledger};
+
+        std::map<PhysicalDB*, std::set<uint64_t>> mapPending;
+        if(!LoadPending(vMerkle, mapPending) || !LoadPending(vConsensus, mapPending))
+            return false;
+
+        const auto HasSequence = [&mapPending](PhysicalDB* pDatabase, const uint64_t nSequence)
+        {
+            const auto itDatabase = mapPending.find(pDatabase);
+            return pDatabase && itDatabase != mapPending.end()
+                && itDatabase->second.count(nSequence) != 0;
+        };
+
+        std::set<uint64_t> setSequences;
+        for(const auto& cPending : mapPending)
+            setSequences.insert(cPending.second.begin(), cPending.second.end());
+
+        const bool fMerkleJournal =
+            (Logical && Logical->TxnHasRecoverableJournal())
+            || (Client && Client->TxnHasRecoverableJournal());
+        const bool fConsensusJournal =
+            (Ledger && Ledger->TxnHasRecoverableJournal())
+            || (Trust && Trust->TxnHasRecoverableJournal())
+            || (Legacy && Legacy->TxnHasRecoverableJournal());
+
+        std::map<uint64_t, uint16_t> mapOwner;
         for(const uint64_t nSequence : setSequences)
         {
+            const bool fMerkleCopy = HasSequence(Logical, nSequence) || HasSequence(Client, nSequence);
+            const bool fConsensusCopy = HasSequence(Ledger, nSequence)
+                || HasSequence(Trust, nSequence) || HasSequence(Legacy, nSequence);
+
+            if(fMerkleCopy && fConsensusCopy)
+            {
+                FailRecovery("parked sequence belongs to both recovery groups");
+                return false;
+            }
+
+            if(fMerkleCopy)
+                mapOwner.emplace(nSequence, static_cast<uint16_t>(INSTANCES::MERKLE));
+            else if(fConsensusCopy)
+                mapOwner.emplace(nSequence, static_cast<uint16_t>(INSTANCES::CONSENSUS));
+            else if(HasSequence(Contract, nSequence) || HasSequence(Register, nSequence))
+            {
+                /* ParkGroup() can rename Contract/Register and then fail before
+                 * Logical is renamed, or the reverse when Logical is renamed
+                 * after those copies. A Logical/Client journal.dat identifies
+                 * that partial group. Guessing CONSENSUS would truncate the
+                 * unparked MERKLE journal and replay the shared files as a
+                 * different group. */
+                if(fMerkleJournal == fConsensusJournal)
+                    continue;
+
+                mapOwner.emplace(nSequence, static_cast<uint16_t>(
+                    fMerkleJournal ? INSTANCES::MERKLE : INSTANCES::CONSENSUS));
+            }
+        }
+
+        uint64_t nMerkleMax = 0;
+        uint64_t nConsensusMax = 0;
+        for(const auto& cOwner : mapOwner)
+        {
+            if(cOwner.second == INSTANCES::MERKLE)
+                nMerkleMax = std::max(nMerkleMax, cOwner.first);
+            else
+                nConsensusMax = std::max(nConsensusMax, cOwner.first);
+        }
+
+        /* An unowned or partial sequence blocks this sequence and every higher
+         * one. Lower complete sequences may already have been synced. */
+        bool fBlocked = false;
+        for(const uint64_t nSequence : setSequences)
+        {
+            if(fBlocked || !mapOwner.count(nSequence))
+            {
+                fBlocked = true;
+                break;
+            }
+
+            const uint16_t nGroup = mapOwner[nSequence];
+            const std::vector<PhysicalDB*>& vParticipants =
+                nGroup == INSTANCES::MERKLE ? vMerkle : vConsensus;
+            const uint64_t nGroupMax = nGroup == INSTANCES::MERKLE ? nMerkleMax : nConsensusMax;
+
+            std::vector<PhysicalDB*> vMissing;
+            bool fForeignPending = false;
             for(PhysicalDB* pDatabase : vParticipants)
             {
-                if(pDatabase && !pDatabase->TxnReplayPending(nSequence))
+                if(!pDatabase)
+                    continue;
+
+                if(!HasSequence(pDatabase, nSequence))
+                    vMissing.push_back(pDatabase);
+                else if(pDatabase->TxnJournalBytes() > 0)
+                    fForeignPending = true;
+            }
+
+            const bool fComplete = vMissing.empty();
+            /* journal.dat on a missing participant is this sequence only when the
+             * other group has no unparked journal. Otherwise that file is the
+             * other group's newer commit, and this incomplete sequence stays. */
+            const bool fOtherJournal = nGroup == INSTANCES::MERKLE
+                ? fConsensusJournal : fMerkleJournal;
+            bool fJournalUnit = !fComplete && !fForeignPending && !fOtherJournal
+                && nSequence == nGroupMax;
+            if(fJournalUnit)
+            {
+                for(PhysicalDB* pDatabase : vMissing)
+                {
+                    const auto itPending = mapPending.find(pDatabase);
+                    if(itPending != mapPending.end() && !itPending->second.empty()
+                    && *itPending->second.rbegin() > nSequence)
+                    {
+                        fJournalUnit = false;
+                        break;
+                    }
+
+                    const RECOVERY nRecovery = pDatabase->TxnRecovery();
+                    if(nRecovery == RECOVERY::FAILED)
+                    {
+                        FailRecovery("failed to recover transaction journal");
+                        return false;
+                    }
+
+                    if(nRecovery != RECOVERY::COMPLETE)
+                    {
+                        fJournalUnit = false;
+                        break;
+                    }
+                }
+            }
+
+            if(!fComplete && !fJournalUnit)
+            {
+                fBlocked = true;
+                break;
+            }
+
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(!pDatabase)
+                    continue;
+
+                const bool fMissing = std::find(vMissing.begin(), vMissing.end(), pDatabase) != vMissing.end();
+                if(fMissing)
+                {
+                    if(pDatabase->TxnRecovery() != RECOVERY::COMPLETE || !pDatabase->TxnCommit(false))
+                    {
+                        FailRecovery("failed to recover unparked transaction journal");
+                        return false;
+                    }
+                }
+                else if(!pDatabase->TxnReplayPending(nSequence))
                 {
                     FailRecovery("failed to replay parked transaction journal");
                     return false;
                 }
             }
-        }
 
-        for(PhysicalDB* pDatabase : vParticipants)
-        {
-            if(pDatabase && !pDatabase->TxnSyncDeferred())
+            if(!SyncGroup(nGroup))
             {
                 FailRecovery("failed to sync replayed transaction data; parked journals retained");
                 return false;
             }
+
+            if(!DiscardSequences(nGroup, std::vector<uint64_t>{nSequence}))
+            {
+                FailRecovery("failed to discard parked journals after data sync");
+                return false;
+            }
         }
 
-        const std::vector<uint64_t> vSequences(setSequences.begin(), setSequences.end());
-        if(!DiscardSequences(nInstances, vSequences))
+        if(fBlocked)
         {
-            FailRecovery("failed to discard parked journals after data sync");
+            FailRecovery("incomplete parked sequence retained; partial group was not discarded");
             return false;
         }
 
-        return true;
+        /* journal.dat that was not consumed as a partial park is the newest
+         * commit. Apply that group only after every parked sequence. Both
+         * exclusive sides having a journal cannot be ordered, so keep them.
+         * With no MERKLE journal, CONSENSUS keeps the historical apply order,
+         * including a partial apply that must retain every journal. */
+        if(fMerkleJournal && fConsensusJournal)
+        {
+            FailRecovery("both recovery groups have an unparked journal");
+            return false;
+        }
+
+        if(fMerkleJournal)
+            return RecoverGroup(INSTANCES::MERKLE, vMerkle);
+
+        return RecoverGroup(INSTANCES::CONSENSUS, vConsensus);
     }
 
 
@@ -382,22 +584,143 @@ namespace LLD
                 setSequences.insert(nSequence);
         }
 
-        /* Older parked commits replay before the current journal.dat group.
-         * Replay is idempotent, so a crash after data sync but before discard
-         * rolls forward again instead of losing the decision. */
+        /* A parked sequence is one commit. ParkGroup() can rename only a subset
+         * before a crash, so replaying whichever copies exist and then deleting
+         * them drops the participants that never got the file. Replay and discard
+         * a sequence only when every participant has it, or when the missing
+         * copies are still the unparked journal.dat of that same newest sequence. */
+        const uint64_t nLatestSequence = setSequences.empty() ? 0 : *setSequences.rbegin();
+        std::set<uint64_t> setRecovered;
+        bool fIncompleteSequence = false;
+
         for(const uint64_t nSequence : setSequences)
         {
+            std::vector<PhysicalDB*> vMissing;
             for(PhysicalDB* pDatabase : vParticipants)
             {
-                if(pDatabase && !pDatabase->TxnReplayPending(nSequence))
+                if(!pDatabase)
+                    continue;
+
+                std::vector<uint64_t> vPending;
+                if(!pDatabase->TxnPendingSequences(vPending))
+                {
+                    FailRecovery("failed to list parked transaction journals");
+                    return false;
+                }
+
+                if(std::find(vPending.begin(), vPending.end(), nSequence) == vPending.end())
+                    vMissing.push_back(pDatabase);
+            }
+
+            if(vMissing.empty())
+            {
+                for(PhysicalDB* pDatabase : vParticipants)
+                {
+                    if(pDatabase && !pDatabase->TxnReplayPending(nSequence))
+                    {
+                        FailRecovery("failed to replay parked transaction journal");
+                        return false;
+                    }
+                }
+
+                setRecovered.insert(nSequence);
+                continue;
+            }
+
+            /* journal.dat can only be this sequence when it is the newest parked
+             * commit and the missing participant has no newer pending file. A
+             * parked participant must not also still have journal.dat, or the
+             * two records may be different commits. */
+            bool fJournalUnit = nSequence == nLatestSequence;
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(!pDatabase || !fJournalUnit)
+                    continue;
+
+                const bool fMissing = std::find(vMissing.begin(), vMissing.end(), pDatabase) != vMissing.end();
+                std::vector<uint64_t> vPending;
+                if(!pDatabase->TxnPendingSequences(vPending))
+                {
+                    FailRecovery("failed to list parked transaction journals");
+                    return false;
+                }
+
+                if(!fMissing)
+                {
+                    if(pDatabase->TxnJournalBytes() > 0)
+                        fJournalUnit = false;
+                    continue;
+                }
+
+                if(!vPending.empty() && *std::max_element(vPending.begin(), vPending.end()) > nSequence)
+                    fJournalUnit = false;
+
+                const RECOVERY nRecovery = pDatabase->TxnRecovery();
+                if(nRecovery == RECOVERY::FAILED)
+                {
+                    FailRecovery("failed to recover transaction journal");
+                    return false;
+                }
+
+                if(nRecovery != RECOVERY::COMPLETE)
+                    fJournalUnit = false;
+            }
+
+            if(!fJournalUnit)
+            {
+                fIncompleteSequence = true;
+                break;
+            }
+
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(!pDatabase)
+                    continue;
+
+                const bool fMissing = std::find(vMissing.begin(), vMissing.end(), pDatabase) != vMissing.end();
+                if(fMissing)
+                {
+                    if(pDatabase->TxnRecovery() != RECOVERY::COMPLETE || !pDatabase->TxnCommit(false))
+                    {
+                        FailRecovery("failed to recover unparked transaction journal");
+                        return false;
+                    }
+                }
+                else if(!pDatabase->TxnReplayPending(nSequence))
                 {
                     FailRecovery("failed to replay parked transaction journal");
                     return false;
                 }
             }
+
+            setRecovered.insert(nSequence);
         }
 
-        const uint64_t nLatestSequence = setSequences.empty() ? 0 : *setSequences.rbegin();
+        if(!setRecovered.empty())
+        {
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(pDatabase && !pDatabase->TxnSyncDeferred())
+                {
+                    FailRecovery("failed to sync replayed transaction data; parked journals retained");
+                    return false;
+                }
+            }
+
+            const std::vector<uint64_t> vRecovered(setRecovered.begin(), setRecovered.end());
+            if(!DiscardSequences(nInstances, vRecovered))
+            {
+                FailRecovery("failed to discard parked journals after data sync");
+                return false;
+            }
+        }
+
+        if(fIncompleteSequence)
+        {
+            FailRecovery("incomplete parked sequence retained; partial group was not discarded");
+            return false;
+        }
+
         bool fAllSatisfied = true;
         std::vector<PhysicalDB*> vComplete;
         vComplete.reserve(vParticipants.size());
@@ -451,32 +774,11 @@ namespace LLD
             }
         }
 
-        if(!setSequences.empty())
-        {
-            for(PhysicalDB* pDatabase : vParticipants)
-            {
-                if(pDatabase && !pDatabase->TxnSyncDeferred())
-                {
-                    FailRecovery("failed to sync replayed transaction data; parked journals retained");
-                    return false;
-                }
-            }
-
-            const std::vector<uint64_t> vSequences(setSequences.begin(), setSequences.end());
-            const bool fDiscarded = pvSequenceSources
-                ? DiscardSequences(nInstances, vSequences)
-                : DiscardGroup(nInstances);
-            if(!fDiscarded)
-            {
-                FailRecovery("failed to discard parked journals after data sync");
-                return false;
-            }
-        }
-
         /* Absent journals are the normal startup path. Truncate only when a
          * commit was applied, a parked journal was discarded, or an incomplete
-         * journal.dat still has bytes. */
-        bool fNeedsRelease = !vComplete.empty() || !setSequences.empty();
+         * journal.dat still has bytes. Recovered sequences were already
+         * discarded above; do not discard a sequence this group does not own. */
+        bool fNeedsRelease = !vComplete.empty() || !setRecovered.empty();
         if(!fAllSatisfied)
         {
             for(PhysicalDB* pDatabase : vParticipants)
@@ -667,52 +969,16 @@ namespace LLD
         {
             nInstances = INSTANCES::MERKLE;
             vParticipants = {Contract, Register, Logical, Client};
-        }
-        else
-        {
-            /* Lookup paths open MERKLE transactions on a full node. Pending
-             * journals are not the only crash record: a checkpoint that synced
-             * but did not reach TxnParkJournal() leaves journal.dat and no
-             * sequence. Logical and Client are the databases that prove that
-             * journal belongs to MERKLE. Recover the group, including that
-             * journal.dat, before CONSENSUS can truncate the shared
-             * Contract/Register copies without applying them. Discard only
-             * sequences found on Logical/Client so CONSENSUS parked journals
-             * on the shared databases stay replayable. */
-            const bool fMerkleJournal =
-                (Logical && Logical->TxnHasRecoverableJournal())
-                || (Client && Client->TxnHasRecoverableJournal());
-
-            std::set<uint64_t> setMerkleSequences;
-            if(!CollectPendingSequences(Logical, setMerkleSequences)
-            || !CollectPendingSequences(Client, setMerkleSequences))
-            {
-                FailRecovery("failed to list parked transaction journals");
+            if(!RecoverGroup(nInstances, vParticipants))
                 return false;
-            }
-
-            if(fMerkleJournal)
-            {
-                const std::vector<PhysicalDB*> vSequenceSources = {Logical, Client};
-                if(!RecoverGroup(INSTANCES::MERKLE,
-                                 {Logical, Contract, Register, Client},
-                                 &vSequenceSources))
-                    return false;
-            }
-            else if(!RecoverPendingSequences(INSTANCES::MERKLE,
-                                             {Logical, Contract, Register, Client},
-                                             setMerkleSequences))
-                return false;
-
-            DeferredFor(INSTANCES::MERKLE) = {};
-            vParticipants = {Contract, Register, Trust, Legacy, Ledger};
         }
-
-        if(!RecoverGroup(nInstances, vParticipants))
+        else if(!RecoverOrdered())
             return false;
 
-        /* Recovery synced and discarded this group's parked journals. Drop the
-         * in-memory batch so the next commit does not inherit a stale barrier. */
+        /* Recovery synced and discarded parked journals. Drop both batches so
+         * the next commit does not inherit a stale barrier. A full node may
+         * have recovered CONSENSUS and MERKLE together. */
+        DeferredFor(INSTANCES::MERKLE) = {};
         DeferredFor(nInstances) = {};
 
         cContext.nOutcome = TXN_OUTCOME::RECOVERED;
@@ -1148,10 +1414,13 @@ namespace LLD
 
         if(fFlush)
         {
-            /* Data is synced for this group. Drop only its parked journals so the
-             * other group's sequences on shared databases remain replayable.
-             * A discard failure keeps both records. */
-            if(!cBatch.vSequences.empty() && !DiscardSequences(nReleaseInstances, cBatch.vSequences))
+            /* This commit is newer than every parked sequence. Sync and discard
+             * both groups, lowest sequence first, so recovery cannot replay an
+             * earlier journal over this barrier. A discard failure keeps the
+             * journals that are still on disk. RetireParkedJournals() clears
+             * the batch, so remember the count for the barrier log. */
+            const uint32_t nBarrierCommits = cBatch.nCommits;
+            if(!RetireParkedJournals())
             {
                 RequireRecovery();
                 cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
@@ -1171,11 +1440,9 @@ namespace LLD
                     "failed to durably release transaction journals; shutdown requested");
             }
 
-            if(cBatch.nCommits > 0)
+            if(nBarrierCommits > 0)
                 debug::log(0, FUNCTION, "data durability barrier after ",
-                    cBatch.nCommits + 1, " commits");
-
-            cBatch = {};
+                    nBarrierCommits + 1, " commits");
         }
         else
         {
@@ -1251,28 +1518,17 @@ namespace LLD
     bool DurableCommitCoordinator::ShutdownGroupBarrier()
     {
         /* Recovery failure must keep every parked journal, including ones this
-         * process did not create. A successful barrier quiesces the whole group
-         * before deleting only that group's sequences. */
+         * process did not create. Sync both groups before deleting any sequence,
+         * and delete the lowest sequence first. Discarding a later group first
+         * would let an earlier journal replay over data that shutdown already
+         * synced. */
         if(!MayDiscardPendingJournals())
             return false;
 
-        bool fOk = true;
+        if(!QuiesceGroup(INSTANCES::MERKLE) || !QuiesceGroup(INSTANCES::CONSENSUS))
+            return false;
 
-        if(!QuiesceGroup(INSTANCES::MERKLE))
-            fOk = false;
-        else if(!DiscardSequences(INSTANCES::MERKLE, cDeferredMerkle.vSequences))
-            fOk = false;
-        else
-            cDeferredMerkle = {};
-
-        if(!QuiesceGroup(INSTANCES::CONSENSUS))
-            fOk = false;
-        else if(!DiscardSequences(INSTANCES::CONSENSUS, cDeferredConsensus.vSequences))
-            fOk = false;
-        else
-            cDeferredConsensus = {};
-
-        return fOk;
+        return RetireParkedJournals();
     }
 
 

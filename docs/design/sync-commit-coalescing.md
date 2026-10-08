@@ -33,10 +33,13 @@ of these is true:
 - deferred commits in that recovery group plus this one reach `nSyncCommitBlocks`
 - that group's parked journal bytes plus this commit reach `SYNC_COMMIT_BYTES`
 
-CONSENSUS and MERKLE do not share those counters. A MERKLE flush cannot reset a
-CONSENSUS batch or delete its parked journals, including journals on the
-Contract and Register databases both groups use. The other group still flushes
-on its own 32-commit or 8 MiB barrier.
+CONSENSUS and MERKLE do not share those counters. A MERKLE commit does not
+count toward the CONSENSUS threshold. A data barrier is newer than every parked
+journal, because the coordinator lock admits one commit at a time. The barrier
+therefore syncs both groups and deletes every parked sequence, lowest sequence
+first. Leaving an earlier other-group journal would replay it over the barrier.
+Until a barrier, each group's journals stay in place, including copies on the
+shared Contract and Register databases.
 
 `BlockState::SetBest()` still publishes genesis, checkpoints, and ChainState
 only after `TxnCommit()` returns. That order is unchanged. A deferred return
@@ -97,13 +100,14 @@ On a flush:
 1. Apply with `TxnCommit(true)`, which fsyncs sector files and every keychain
    file the durability tracker still has marked dirty, including earlier
    deferred applies.
-2. If this recovery group parked journals, delete those sequences and fsync
-   the directory. The other group's sequences stay.
+2. Sync the other recovery group if it still has parked journals. Delete every
+   parked sequence, lowest sequence first, and fsync the directory. Every
+   parked journal is older than this barrier.
 3. Truncate `journal.dat` as before.
 
 Shutdown takes the flush path when `fShutdown` is set. Process exit
-quiesces every participant in a recovery group before it discards that
-group's parked journals. Contract and Register are destroyed first and can
+quiesces both recovery groups before it discards any parked sequence, lowest
+sequence first. Contract and Register are destroyed first and can
 hold both groups' sequences, so a per-database destructor must not delete a
 sequence until the coordinator has synced the whole group that owns it.
 A failed replay, failed data sync, or `RECOVERY_REQUIRED` outcome leaves the
@@ -111,14 +115,17 @@ parked journals in place.
 
 ## Recovery
 
-Startup replays `journal.*.pending` in sequence order before it inspects
-`journal.dat`. A client recovers the MERKLE group. A full node recovers that
-group as well whenever Logical or Client has parked journals or a current
-`journal.dat`, then recovers CONSENSUS. A checkpoint that synced but was not
-yet renamed has no pending sequence; leaving it for CONSENSUS would truncate
-the shared Contract and Register copies without applying them. Shared
-Contract and Register sequences owned by the other group are not discarded.
-Replay is idempotent.
+Startup replays `journal.*.pending` in global sequence order before it inspects
+an unparked `journal.dat`. Sequence numbers are shared by CONSENSUS and MERKLE,
+so a full node does not replay one group and then the other. A client recovers
+the MERKLE group. A parked sequence is replayed and discarded only when every
+participant has that file, or when the missing copies are still that newest
+sequence's unparked `journal.dat`. A partial rename is kept as a unit. A
+sequence that exists only on Contract or Register is a partial MERKLE park when
+Logical or Client still has `journal.dat`, and a partial CONSENSUS park when
+only those exclusive journals do. It is not given to the other group.
+`journal.dat` that was not part of that partial park is the newest commit and
+is applied after every parked sequence. Replay is idempotent.
 
 A participant is satisfied when `journal.dat` is a complete commit, or when
 `journal.dat` is missing or empty and the participant has the group's latest
@@ -128,8 +135,11 @@ If the group is satisfied, complete `journal.dat` participants are applied and
 fsynced. Pending-only dirtiness is fsynced. Parked journals are deleted only
 after that fsync. Then `journal.dat` is released.
 
-If the group is not satisfied, older parked journals are synced and discarded,
-and the incomplete `journal.dat` is truncated without being applied.
+If a sequence is missing from any participant and is not the unparked
+`journal.dat` of that same commit, that sequence and every higher one stay on
+disk. Recovery fails instead of applying the subset and deleting it. An
+incomplete `journal.dat` that never reached `"commit"` is still truncated when
+the group has no partial parked sequence left to preserve.
 
 ## What this does not do
 

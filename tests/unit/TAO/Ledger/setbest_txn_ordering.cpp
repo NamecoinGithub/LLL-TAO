@@ -72,6 +72,7 @@ ________________________________________________________________________________
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -300,6 +301,27 @@ namespace
             && std::fflush(stream) == 0;
 
         return (std::fclose(stream) == 0 && fWrote);
+    }
+
+
+    /* Write one canonical parked journal for a recovery sequence. */
+    bool WritePendingJournal(const std::string& strName,
+                             const uint64_t nSequence,
+                             const DataStream& ssJournal)
+    {
+        const std::string strPath = debug::safe_printstr(
+            config::GetDataDir(), strName, "/journal.",
+            std::setfill('0'), std::setw(8), nSequence, ".pending");
+
+        FILE* stream = std::fopen(strPath.c_str(), "wb");
+        if(!stream)
+            return false;
+
+        const std::vector<uint8_t>& vBytes = ssJournal.Bytes();
+        const bool fWrote =
+            std::fwrite(vBytes.data(), 1, vBytes.size(), stream) == vBytes.size()
+            && std::fflush(stream) == 0;
+        return std::fclose(stream) == 0 && fWrote;
     }
 
 
@@ -2561,7 +2583,8 @@ TEST_CASE("deferred commit barriers are tracked per recovery group",
     REQUIRE(HasPendingJournal("_CONTRACT"));
     REQUIRE(PendingJournalCount("_CONTRACT") == 1);
 
-    /* A deferred MERKLE commit must not consume the CONSENSUS 2-commit barrier. */
+    /* A deferred MERKLE commit must not consume the CONSENSUS 2-commit barrier
+     * before either group flushes. Both journals stay until a barrier. */
     REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::MERKLE));
     REQUIRE(LLD::Logical->Write(merkleKey, uint32_t(2)));
     REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, nBarrier));
@@ -2572,34 +2595,43 @@ TEST_CASE("deferred commit barriers are tracked per recovery group",
     REQUIRE(PendingJournalCount("_CONTRACT") == 2);
     REQUIRE(PendingJournalCount("_REGISTER") == 2);
 
-    /* An immediate MERKLE barrier flushes MERKLE only. It must not reset the
-     * CONSENSUS counter or discard CONSENSUS journals on shared databases. */
+    /* This MERKLE barrier is newer than the parked CONSENSUS sequence. It must
+     * sync that older group and drop its journals; leaving them would let
+     * recovery replay the older Register/Contract values over this barrier. */
     REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::MERKLE));
     REQUIRE(LLD::Logical->Write(merkleKey, uint32_t(3)));
     REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, 1));
     REQUIRE_FALSE(HasPendingJournal("_API"));
-    REQUIRE(HasPendingJournal("_LEDGER"));
-    REQUIRE(HasPendingJournal("_TRUST"));
-    REQUIRE(HasPendingJournal("_LEGACY"));
-    REQUIRE(PendingJournalCount("_CONTRACT") == 1);
-    REQUIRE(PendingJournalCount("_REGISTER") == 1);
-
-    /* CONSENSUS still has one deferred commit, so this commit is its barrier. */
-    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
-    REQUIRE(LLD::Ledger->Write(consensusKey, uint32_t(4)));
-    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, nBarrier));
     REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
     REQUIRE_FALSE(HasPendingJournal("_TRUST"));
     REQUIRE_FALSE(HasPendingJournal("_LEGACY"));
     REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
     REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
-    REQUIRE_FALSE(HasPendingJournal("_API"));
 
     uint32_t nValue = 0;
     REQUIRE(LLD::Ledger->Read(consensusKey, nValue));
-    REQUIRE(nValue == 4);
+    REQUIRE(nValue == 1);
     REQUIRE(LLD::Logical->Read(merkleKey, nValue));
     REQUIRE(nValue == 3);
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(LLD::Ledger->Read(consensusKey, nValue));
+    REQUIRE(nValue == 1);
+
+    /* The retired CONSENSUS batch no longer counts, so one deferred commit parks
+     * again and the next CONSENSUS commit is the barrier. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(consensusKey, uint32_t(4)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, nBarrier));
+    REQUIRE(HasPendingJournal("_LEDGER"));
+    REQUIRE_FALSE(HasPendingJournal("_API"));
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(consensusKey, uint32_t(5)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, nBarrier));
+    REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
+    REQUIRE(LLD::Ledger->Read(consensusKey, nValue));
+    REQUIRE(nValue == 5);
 }
 
 
@@ -2769,4 +2801,195 @@ TEST_CASE("LLD shutdown discards parked journals only after the recovery group s
     REQUIRE(nValue == 1);
     REQUIRE(LLD::Logical->Read(merkleKey, nValue));
     REQUIRE(nValue == 2);
+}
+
+
+TEST_CASE("LLD::TxnRecovery keeps an incomplete parked sequence as a unit",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    REQUIRE_FALSE(config::fClient.load());
+    LLD::ResetTxnRecoveryRequired();
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("partial-park-ledger"), 1);
+    const DataStream ssJournal = MakeWriteJournal(key, 41);
+    const std::string strLedgerPending =
+        debug::safe_printstr(config::GetDataDir(), "_LEDGER/journal.00000005.pending");
+    const std::string strContractPending =
+        debug::safe_printstr(config::GetDataDir(), "_CONTRACT/journal.00000005.pending");
+
+    struct Cleanup
+    {
+        std::pair<std::string, uint32_t> key;
+        std::string strLedgerPending;
+        std::string strContractPending;
+
+        ~Cleanup()
+        {
+            std::error_code ec;
+            std::filesystem::remove(strLedgerPending, ec);
+            std::filesystem::remove(strContractPending, ec);
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+            if(LLD::Ledger)
+                LLD::Ledger->Erase(key);
+        }
+    } cleanup{key, strLedgerPending, strContractPending};
+
+    LLD::Ledger->Erase(key);
+    REQUIRE(WritePendingJournal("_LEDGER", 5, ssJournal));
+    REQUIRE(WritePendingJournal("_CONTRACT", 5, ssJournal));
+    REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+    REQUIRE(std::filesystem::exists(strLedgerPending));
+    REQUIRE(std::filesystem::exists(strContractPending));
+    REQUIRE_FALSE(LLD::Ledger->Exists(key));
+}
+
+
+TEST_CASE("LLD::TxnRecovery applies a partially parked MERKLE group before CONSENSUS",
+          "[lld][txncommit][recovery][merkle]")
+{
+    LogicalGuard logicalGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+
+    REQUIRE_FALSE(config::fClient.load());
+    LLD::ResetTxnRecoveryRequired();
+
+    const std::pair<std::string, uint32_t> logicalKey =
+        std::make_pair(std::string("partial-merkle-logical"), 1);
+    const std::pair<std::string, uint32_t> registerKey =
+        std::make_pair(std::string("partial-merkle-register"), 1);
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("partial-merkle-contract"), 1);
+
+    struct Cleanup
+    {
+        std::pair<std::string, uint32_t> logicalKey;
+        std::pair<std::string, uint32_t> registerKey;
+        std::pair<std::string, uint32_t> contractKey;
+
+        ~Cleanup()
+        {
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+            if(LLD::Logical)
+                LLD::Logical->Erase(logicalKey);
+            if(LLD::Register)
+                LLD::Register->Erase(registerKey);
+            if(LLD::Contract)
+                LLD::Contract->Erase(contractKey);
+        }
+    } cleanup{logicalKey, registerKey, contractKey};
+
+    LLD::Logical->Erase(logicalKey);
+    LLD::Register->Erase(registerKey);
+    LLD::Contract->Erase(contractKey);
+
+    /* Logical's rename failed. Contract and Register were renamed afterward.
+     * The shared sequence must stay MERKLE and Logical's journal must be applied,
+     * not truncated by the CONSENSUS release. */
+    REQUIRE(WriteRecoveryJournal("_API", MakeWriteJournal(logicalKey, 63)));
+    REQUIRE(WritePendingJournal("_CONTRACT", 4, MakeWriteJournal(contractKey, 61)));
+    REQUIRE(WritePendingJournal("_REGISTER", 4, MakeWriteJournal(registerKey, 62)));
+    REQUIRE_FALSE(HasPendingJournal("_API"));
+    REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERED);
+    REQUIRE(LLD::Logical->Exists(logicalKey));
+    REQUIRE(LLD::Contract->Exists(contractKey));
+    REQUIRE(LLD::Register->Exists(registerKey));
+    REQUIRE(JournalSize("_API") == 0);
+    REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
+    REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+}
+
+
+TEST_CASE("LLD::TxnRecovery replays CONSENSUS and MERKLE journals in global sequence order",
+          "[lld][txncommit][recovery]")
+{
+    LogicalGuard logicalGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+
+    REQUIRE_FALSE(config::fClient.load());
+    LLD::ResetTxnRecoveryRequired();
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("cross-group-sequence-order"), 1);
+
+    const auto WriteGroup = [](const uint64_t nSequence, const bool fMerkle, const uint32_t nValue)
+    {
+        const DataStream ssJournal = MakeWriteJournal(
+            std::make_pair(std::string("cross-group-sequence-order"), 1), nValue);
+        if(fMerkle)
+        {
+            return WritePendingJournal("_API", nSequence, ssJournal)
+                && WritePendingJournal("_CONTRACT", nSequence, ssJournal)
+                && WritePendingJournal("_REGISTER", nSequence, ssJournal);
+        }
+
+        return WritePendingJournal("_CONTRACT", nSequence, ssJournal)
+            && WritePendingJournal("_REGISTER", nSequence, ssJournal)
+            && WritePendingJournal("_LEDGER", nSequence, ssJournal)
+            && WritePendingJournal("_TRUST", nSequence, ssJournal)
+            && WritePendingJournal("_LEGACY", nSequence, ssJournal);
+    };
+
+    struct Cleanup
+    {
+        std::pair<std::string, uint32_t> key;
+
+        ~Cleanup()
+        {
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+            if(LLD::Register)
+                LLD::Register->Erase(key);
+        }
+    } cleanup{key};
+
+    LLD::Register->Erase(key);
+
+    SECTION("later CONSENSUS sequence wins over an earlier MERKLE sequence")
+    {
+        REQUIRE(WriteGroup(2, true, 2));
+        REQUIRE(WriteGroup(3, false, 3));
+        REQUIRE(LLD::TxnRecovery());
+        uint32_t nValue = 0;
+        REQUIRE(LLD::Register->Read(key, nValue));
+        REQUIRE(nValue == 3);
+        REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+        REQUIRE_FALSE(HasPendingJournal("_API"));
+        REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    }
+
+    SECTION("later MERKLE sequence wins over an earlier CONSENSUS sequence")
+    {
+        REQUIRE(WriteGroup(2, false, 2));
+        REQUIRE(WriteGroup(3, true, 3));
+        REQUIRE(LLD::TxnRecovery());
+        uint32_t nValue = 0;
+        REQUIRE(LLD::Register->Read(key, nValue));
+        REQUIRE(nValue == 3);
+        REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+        REQUIRE_FALSE(HasPendingJournal("_API"));
+        REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    }
 }
