@@ -30,8 +30,13 @@ of these is true:
 
 - `nSyncCommitBlocks < 2`
 - `config::fShutdown` is set
-- deferred commits plus this one reach `nSyncCommitBlocks`
-- parked journal bytes plus this commit reach `SYNC_COMMIT_BYTES`
+- deferred commits in that recovery group plus this one reach `nSyncCommitBlocks`
+- that group's parked journal bytes plus this commit reach `SYNC_COMMIT_BYTES`
+
+CONSENSUS and MERKLE do not share those counters. A MERKLE flush cannot reset a
+CONSENSUS batch or delete its parked journals, including journals on the
+Contract and Register databases both groups use. The other group still flushes
+on its own 32-commit or 8 MiB barrier.
 
 `BlockState::SetBest()` still publishes genesis, checkpoints, and ChainState
 only after `TxnCommit()` returns. That order is unchanged. A deferred return
@@ -92,7 +97,8 @@ On a flush:
 1. Apply with `TxnCommit(true)`, which fsyncs sector files and every keychain
    file the durability tracker still has marked dirty, including earlier
    deferred applies.
-2. If any journals were parked, delete them and fsync the directory.
+2. If this recovery group parked journals, delete those sequences and fsync
+   the directory. The other group's sequences stay.
 3. Truncate `journal.dat` as before.
 
 Shutdown takes the flush path when `fShutdown` is set. Process exit also

@@ -1260,6 +1260,43 @@ namespace LLD
 
 
     template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::TxnDiscardPendingSequences(
+        const std::vector<uint64_t>& vSequences)
+    {
+        LOCK(TRANSACTION_MUTEX);
+
+        /* The coordinator calls this only after the owning group's data sync.
+         * Other groups' sequences are not in vSequences and must remain. */
+        if(vSequences.empty())
+            return true;
+
+        bool fRemoved = false;
+        for(const uint64_t nSequence : vSequences)
+        {
+            const std::string strPending = PendingJournalPath(nSequence);
+            std::error_code ec;
+            const std::filesystem::file_status cStatus = std::filesystem::status(strPending, ec);
+            if(cStatus.type() == std::filesystem::file_type::not_found
+            || ec == std::errc::no_such_file_or_directory)
+                continue;
+            if(ec || cStatus.type() != std::filesystem::file_type::regular)
+                return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
+
+            std::error_code ecRemove;
+            if(!std::filesystem::remove(strPending, ecRemove) || ecRemove)
+                return debug::error(FUNCTION, strName, " failed to discard parked journal");
+
+            fRemoved = true;
+        }
+
+        if(fRemoved && !DurableIO::Current().SyncDirectoryChain(JournalDirectory()))
+            return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
+
+        return true;
+    }
+
+
+    template<class KeychainType, class CacheType>
     bool SectorDatabase<KeychainType, CacheType>::TxnSyncDeferred()
     {
         LOCK(TRANSACTION_MUTEX);

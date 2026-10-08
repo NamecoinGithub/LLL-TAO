@@ -160,7 +160,9 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      *  @param[in] nSyncCommitBlocks  Data/keychain fsyncs are coalesced until this
-     *             many commits, SYNC_COMMIT_BYTES of parked journals, or shutdown.
+     *             many commits in the same CONSENSUS or MERKLE recovery group,
+     *             SYNC_COMMIT_BYTES of that group's parked journals, or shutdown.
+     *             The other group's batch is not counted and is not reset.
      *             Values below 2 sync on this commit. Default is
      *             SYNC_COMMIT_BLOCKS_DEFAULT.
      *

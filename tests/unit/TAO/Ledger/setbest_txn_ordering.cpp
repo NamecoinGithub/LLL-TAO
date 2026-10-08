@@ -570,6 +570,31 @@ namespace
     }
 
 
+    uint32_t PendingJournalCount(const std::string& strName)
+    {
+        const std::string strDirectory =
+            debug::safe_printstr(config::GetDataDir(), strName);
+        std::error_code ec;
+        if(!std::filesystem::exists(strDirectory, ec) || ec)
+            return 0;
+
+        uint32_t nCount = 0;
+        for(const std::filesystem::directory_entry& cEntry :
+            std::filesystem::directory_iterator(strDirectory, ec))
+        {
+            if(ec)
+                return nCount;
+
+            const std::string strFile = cEntry.path().filename().string();
+            if(strFile.rfind("journal.", 0) == 0 && strFile.size() >= 17
+            && strFile.compare(strFile.size() - 8, 8, ".pending") == 0)
+                ++nCount;
+        }
+
+        return nCount;
+    }
+
+
     uint64_t JournalSize(const std::string& strName)
     {
         const std::string strPath =
@@ -2479,4 +2504,100 @@ TEST_CASE("parked journal names must be canonical unsigned sequences",
         REQUIRE_FALSE(std::filesystem::exists(strPath + "/journal.00000007.pending"));
     }
     REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("deferred commit barriers are tracked per recovery group",
+          "[lld][txncommit][durable]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    LogicalGuard logicalGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+    LLD::ResetTxnRecoveryRequired();
+    /* Drop batches left by earlier tests so this threshold starts at zero. */
+    REQUIRE(LLD::TxnRecovery());
+    if(LLD::TxnBegin(0, LLD::INSTANCES::MERKLE))
+        REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, 1));
+
+    const std::pair<std::string, uint32_t> consensusKey =
+        std::make_pair(std::string("sync-commit-consensus-group"), 1);
+    const std::pair<std::string, uint32_t> merkleKey =
+        std::make_pair(std::string("sync-commit-merkle-group"), 1);
+    LLD::Ledger->Erase(consensusKey);
+    LLD::Logical->Erase(merkleKey);
+
+    struct PendingRecoveryGuard
+    {
+        std::pair<std::string, uint32_t> consensusKey;
+        std::pair<std::string, uint32_t> merkleKey;
+
+        ~PendingRecoveryGuard()
+        {
+            /* Replay whichever group this test parked, then clear the latch.
+             * A later MERKLE barrier drops journals recovery does not own. */
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+            if(LLD::Logical && LLD::TxnBegin(0, LLD::INSTANCES::MERKLE))
+                LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, 1);
+
+            if(LLD::Ledger)
+                LLD::Ledger->Erase(consensusKey);
+            if(LLD::Logical)
+                LLD::Logical->Erase(merkleKey);
+        }
+    } cleanup{consensusKey, merkleKey};
+
+    const uint32_t nBarrier = 2;
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(consensusKey, uint32_t(1)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, nBarrier));
+    REQUIRE(HasPendingJournal("_LEDGER"));
+    REQUIRE(HasPendingJournal("_CONTRACT"));
+    REQUIRE(PendingJournalCount("_CONTRACT") == 1);
+
+    /* A deferred MERKLE commit must not consume the CONSENSUS 2-commit barrier. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::MERKLE));
+    REQUIRE(LLD::Logical->Write(merkleKey, uint32_t(2)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, nBarrier));
+    REQUIRE(HasPendingJournal("_LEDGER"));
+    REQUIRE(HasPendingJournal("_TRUST"));
+    REQUIRE(HasPendingJournal("_LEGACY"));
+    REQUIRE(HasPendingJournal("_API"));
+    REQUIRE(PendingJournalCount("_CONTRACT") == 2);
+    REQUIRE(PendingJournalCount("_REGISTER") == 2);
+
+    /* An immediate MERKLE barrier flushes MERKLE only. It must not reset the
+     * CONSENSUS counter or discard CONSENSUS journals on shared databases. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::MERKLE));
+    REQUIRE(LLD::Logical->Write(merkleKey, uint32_t(3)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::MERKLE, 1));
+    REQUIRE_FALSE(HasPendingJournal("_API"));
+    REQUIRE(HasPendingJournal("_LEDGER"));
+    REQUIRE(HasPendingJournal("_TRUST"));
+    REQUIRE(HasPendingJournal("_LEGACY"));
+    REQUIRE(PendingJournalCount("_CONTRACT") == 1);
+    REQUIRE(PendingJournalCount("_REGISTER") == 1);
+
+    /* CONSENSUS still has one deferred commit, so this commit is its barrier. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(consensusKey, uint32_t(4)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, nBarrier));
+    REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    REQUIRE_FALSE(HasPendingJournal("_TRUST"));
+    REQUIRE_FALSE(HasPendingJournal("_LEGACY"));
+    REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
+    REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+    REQUIRE_FALSE(HasPendingJournal("_API"));
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(consensusKey, nValue));
+    REQUIRE(nValue == 4);
+    REQUIRE(LLD::Logical->Read(merkleKey, nValue));
+    REQUIRE(nValue == 3);
 }

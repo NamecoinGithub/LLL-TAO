@@ -899,6 +899,18 @@ namespace LLD
         bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
 
 
+        /** Delete one recovery group's parked sequences after that group's data sync.
+         *
+         *  A missing sequence is already gone and is success. An existing
+         *  non-regular path fails and is left in place. Sequences not listed
+         *  are kept, so the other recovery group can still replay them.
+         *
+         *  @param[in] vSequences  Canonical pending sequences owned by the group
+         *             whose data barrier just succeeded.
+         */
+        bool TxnDiscardPendingSequences(const std::vector<uint64_t>& vSequences);
+
+
         /** Fsync sector and keychain files still tracked from deferred applies. */
         bool TxnSyncDeferred();
 

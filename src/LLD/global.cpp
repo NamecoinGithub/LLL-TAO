@@ -71,6 +71,7 @@ namespace LLD
         void ReleaseOwnership();
         bool ParkGroup(uint16_t nInstances, uint64_t nSequence);
         bool DiscardGroup(uint16_t nInstances);
+        bool DiscardSequences(uint16_t nInstances, const std::vector<uint64_t>& vSequences);
         bool RecoverGroup(uint16_t nInstances, const std::vector<PhysicalDB*>& vParticipants);
         void FailRecovery(const std::string& strError);
         void RequireRecovery();
@@ -79,9 +80,21 @@ namespace LLD
         std::mutex cMutex;
         std::atomic<bool> fRecoveryRequired{false};
         std::atomic<bool> fDiscardPendingJournals{false};
+        /* CONSENSUS and MERKLE share Contract and Register, but each group has
+         * its own parked journals. A shared counter lets one group's flush reset
+         * the barrier while the other group's journals and dirty data remain. */
+        struct DeferredBatch
+        {
+            uint32_t nCommits{0};
+            uint64_t nJournalBytes{0};
+            std::vector<uint64_t> vSequences;
+        };
+
+        DeferredBatch& DeferredFor(uint16_t nInstances);
+
         uint64_t nNextIdentity{1};
-        uint32_t nDeferredCommits{0};
-        uint64_t nDeferredJournalBytes{0};
+        DeferredBatch cDeferredConsensus;
+        DeferredBatch cDeferredMerkle;
         uint64_t nNextParkSequence{1};
         static thread_local Context cContext;
     };
@@ -195,6 +208,48 @@ namespace LLD
             fDiscarded = Legacy->TxnDiscardPendingJournals(true) && fDiscarded;
 
         return fDiscarded;
+    }
+
+
+    bool DurableCommitCoordinator::DiscardSequences(const uint16_t nInstances,
+                                                    const std::vector<uint64_t>& vSequences)
+    {
+        if(vSequences.empty())
+            return true;
+
+        bool fDiscarded = true;
+
+        if(Logical && (nInstances & INSTANCES::LOGICAL))
+            fDiscarded = Logical->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Contract && (nInstances & INSTANCES::CONTRACT))
+            fDiscarded = Contract->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Register && (nInstances & INSTANCES::REGISTER))
+            fDiscarded = Register->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Ledger && (nInstances & INSTANCES::LEDGER))
+            fDiscarded = Ledger->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Client && (nInstances & INSTANCES::CLIENT))
+            fDiscarded = Client->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Trust && (nInstances & INSTANCES::TRUST))
+            fDiscarded = Trust->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        if(Legacy && (nInstances & INSTANCES::LEGACY))
+            fDiscarded = Legacy->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+
+        return fDiscarded;
+    }
+
+
+    DurableCommitCoordinator::DeferredBatch&
+    DurableCommitCoordinator::DeferredFor(const uint16_t nInstances)
+    {
+        /* Match Begin(): CLIENT or LOGICAL selects MERKLE even when the mask
+         * also names shared databases. CONSENSUS-only bits select the other
+         * batch. Shared-only masks follow the client/full-node recovery group. */
+        if(nInstances & (INSTANCES::CLIENT | INSTANCES::LOGICAL))
+            return cDeferredMerkle;
+        if(nInstances & (INSTANCES::LEDGER | INSTANCES::TRUST | INSTANCES::LEGACY))
+            return cDeferredConsensus;
+
+        return config::fClient.load() ? cDeferredMerkle : cDeferredConsensus;
     }
 
 
@@ -535,6 +590,10 @@ namespace LLD
         if(!RecoverGroup(nInstances, vParticipants))
             return false;
 
+        /* Recovery synced and discarded this group's parked journals. Drop the
+         * in-memory batch so the next commit does not inherit a stale barrier. */
+        DeferredFor(nInstances) = {};
+
         cContext.nOutcome = TXN_OUTCOME::RECOVERED;
         fRecoveryRequired.store(false);
         AllowPendingJournalDiscard();
@@ -852,12 +911,18 @@ namespace LLD
         AccountJournal(Trust, INSTANCES::TRUST);
         AccountJournal(Legacy, INSTANCES::LEGACY);
 
-        /* Flush when the caller asked for a per-commit barrier, the node is
-         * shutting down, or the parked batch reached its block or byte limit. */
+        /* Each recovery group has its own 32-commit and 8 MiB barrier. Counting
+         * the other group's parked journals here would let this flush reset both
+         * batches while leaving that group's journals and dirty data behind.
+         * The begun group, not extra bits OR'd into this call, owns the batch. */
+        const uint16_t nGroup = cContext.nParticipants != 0
+            ? cContext.nParticipants
+            : nReleaseInstances;
+        DeferredBatch& cBatch = DeferredFor(nGroup);
         const bool fFlush = !fDeferDirtySync
             || config::fShutdown.load()
-            || (nDeferredCommits + 1 >= nSyncCommitBlocks)
-            || (nDeferredJournalBytes + nThisBytes >= SYNC_COMMIT_BYTES);
+            || (cBatch.nCommits + 1 >= nSyncCommitBlocks)
+            || (cBatch.nJournalBytes + nThisBytes >= SYNC_COMMIT_BYTES);
 
         /* Apply participants in a deterministic order, with the database carrying
          * the authoritative best-chain pointer last. Stop on the first failure;
@@ -962,9 +1027,10 @@ namespace LLD
 
         if(fFlush)
         {
-            /* Data is synced. Drop older parked journals before releasing this
-             * commit's journal.dat. A discard failure keeps both records. */
-            if(nDeferredCommits > 0 && !DiscardGroup(nReleaseInstances))
+            /* Data is synced for this group. Drop only its parked journals so the
+             * other group's sequences on shared databases remain replayable.
+             * A discard failure keeps both records. */
+            if(!cBatch.vSequences.empty() && !DiscardSequences(nReleaseInstances, cBatch.vSequences))
             {
                 RequireRecovery();
                 cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
@@ -984,12 +1050,11 @@ namespace LLD
                     "failed to durably release transaction journals; shutdown requested");
             }
 
-            if(nDeferredCommits > 0)
+            if(cBatch.nCommits > 0)
                 debug::log(0, FUNCTION, "data durability barrier after ",
-                    nDeferredCommits + 1, " commits");
+                    cBatch.nCommits + 1, " commits");
 
-            nDeferredCommits = 0;
-            nDeferredJournalBytes = 0;
+            cBatch = {};
         }
         else
         {
@@ -1004,8 +1069,9 @@ namespace LLD
                     "failed to park transaction journals; shutdown requested");
             }
 
-            ++nDeferredCommits;
-            nDeferredJournalBytes += nThisBytes;
+            cBatch.vSequences.push_back(nSequence);
+            ++cBatch.nCommits;
+            cBatch.nJournalBytes += nThisBytes;
             debug::log(2, FUNCTION, "deferred data sync; parked journals at sequence ", nSequence);
         }
 
