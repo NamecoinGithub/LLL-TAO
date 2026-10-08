@@ -15,6 +15,7 @@ ________________________________________________________________________________
 
 #include <Util/include/config.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <limits>
@@ -217,12 +218,52 @@ namespace LLD
             it = setDirtyFiles.erase(it);
         }
 
-        for(auto it = setUnsyncedDirectories.begin(); it != setUnsyncedDirectories.end();)
+        const auto IsAncestorOrSame = [](const std::string& strAncestor, const std::string& strDescendant)
         {
-            if(!cIO.SyncDirectoryChain(*it))
+            const std::filesystem::path cAncestor =
+                std::filesystem::path(strAncestor).lexically_normal();
+            const std::filesystem::path cDescendant =
+                std::filesystem::path(strDescendant).lexically_normal();
+
+            auto itAncestor = cAncestor.begin();
+            auto itDescendant = cDescendant.begin();
+            for(; itAncestor != cAncestor.end() && itDescendant != cDescendant.end();
+                ++itAncestor, ++itDescendant)
+            {
+                if(*itAncestor != *itDescendant)
+                    return false;
+            }
+
+            return itAncestor == cAncestor.end();
+        };
+
+        std::vector<std::string> vLeafDirectories;
+        for(const std::string& strDirectory : setUnsyncedDirectories)
+        {
+            const bool fHasDescendant = std::any_of(
+                setUnsyncedDirectories.begin(), setUnsyncedDirectories.end(),
+                [&IsAncestorOrSame, &strDirectory](const std::string& strCandidate)
+                {
+                    return strCandidate != strDirectory
+                        && IsAncestorOrSame(strDirectory, strCandidate);
+                });
+
+            if(!fHasDescendant)
+                vLeafDirectories.push_back(strDirectory);
+        }
+
+        for(const std::string& strLeaf : vLeafDirectories)
+        {
+            if(!cIO.SyncDirectoryChain(strLeaf))
                 return false;
 
-            it = setUnsyncedDirectories.erase(it);
+            for(auto it = setUnsyncedDirectories.begin(); it != setUnsyncedDirectories.end();)
+            {
+                if(IsAncestorOrSame(*it, strLeaf))
+                    it = setUnsyncedDirectories.erase(it);
+                else
+                    ++it;
+            }
         }
 
         setNewEntries.clear();

@@ -1903,6 +1903,31 @@ TEST_CASE("DurabilityTracker retains failed sync obligations for retry",
 }
 
 
+TEST_CASE("DurabilityTracker syncs each directory chain once",
+          "[lld][durable]")
+{
+    const std::string strDirectory =
+        debug::safe_printstr(config::GetDataDir(), "_durable_tracker_chain_test");
+    const std::string strPath = strDirectory + "/db/datachain/dirty";
+    std::filesystem::create_directories(std::filesystem::path(strPath).parent_path());
+    {
+        std::ofstream stream(strPath, std::ios::binary | std::ios::trunc);
+        REQUIRE(stream.is_open());
+        stream << "durability";
+    }
+
+    LLD::DurabilityTracker cTracker;
+    cTracker.MarkCreated(strPath);
+
+    FaultInjectingDurableIO cIO;
+    cIO.fSkipDirectorySync = true;
+    REQUIRE(cTracker.Sync(cIO));
+    REQUIRE(cIO.nDirectorySyncCalls == 1);
+
+    REQUIRE(std::filesystem::remove_all(strDirectory) > 0);
+}
+
+
 TEST_CASE("LLD makes startup storage durable without a transaction",
           "[lld][durable]")
 {
