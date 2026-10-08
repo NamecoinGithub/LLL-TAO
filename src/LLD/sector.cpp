@@ -285,9 +285,6 @@ namespace LLD
         if(nSize != key.nSectorSize)
             return false;
 
-        /* Write the data into the memory cache. */
-        cachePool->Put(key, vKey, vData, false);
-
         {
             SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
             WRITE_LOCK(SECTOR_MUTEX);
@@ -329,6 +326,9 @@ namespace LLD
 
             cDurability.MarkDirty(debug::safe_printstr(
                 strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile));
+
+            /* Update the memory cache after the sector write succeeds. */
+            cachePool->Put(key, vKey, vData, false);
 
             /* Records flushed indicator. */
             ++nRecordsFlushed;
