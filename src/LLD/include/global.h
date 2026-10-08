@@ -138,14 +138,38 @@ namespace LLD
     bool TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
+    /** Committed blocks whose sector and keychain fsync may be deferred.
+     *  Passing 1 restores a data barrier on every commit. This is a function
+     *  argument, not a nexus.conf option. */
+    static constexpr uint32_t SYNC_COMMIT_BLOCKS = 32;
+
+    /** Parked journal bytes that force a data barrier. Not a configuration option. */
+    static constexpr uint64_t SYNC_COMMIT_BYTES = 8ull * 1024ull * 1024ull;
+
+    /* Unit tests keep the historical per-commit barrier unless they opt in.
+     * The node binary defaults to SYNC_COMMIT_BLOCKS. */
+    #ifdef UNIT_TESTS
+    static constexpr uint32_t SYNC_COMMIT_BLOCKS_DEFAULT = 1;
+    #else
+    static constexpr uint32_t SYNC_COMMIT_BLOCKS_DEFAULT = SYNC_COMMIT_BLOCKS;
+    #endif
+
+
     /** Txn Commit
      *
      *  Global handler for all LLD instances.
      *
+     *  @param[in] nSyncCommitBlocks  Data/keychain fsyncs are coalesced until this
+     *             many commits, SYNC_COMMIT_BYTES of parked journals, or shutdown.
+     *             Values below 2 sync on this commit. Default is
+     *             SYNC_COMMIT_BLOCKS_DEFAULT.
+     *
      *  @return True if every selected checkpoint and per-DB commit succeeded.
      *
      */
-    bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnCommit(const uint8_t nFlags = 0,
+                   const uint16_t nInstances = INSTANCES::CONSENSUS,
+                   const uint32_t nSyncCommitBlocks = SYNC_COMMIT_BLOCKS_DEFAULT);
 
     /** Report whether the most recent owned transaction committed or requires recovery. */
     TXN_OUTCOME LastTxnOutcome();

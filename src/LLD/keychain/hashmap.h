@@ -190,6 +190,10 @@ namespace LLD
         bool SyncTouchedFiles();
 
 
+        /** Sync newly created keychain files without fsyncing update-dirty files. **/
+        bool SyncCreatedFiles();
+
+
         /** Restore
          *
          *  Restore an erased key from keychain.

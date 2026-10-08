@@ -546,6 +546,30 @@ namespace
     };
 
 
+    bool HasPendingJournal(const std::string& strName)
+    {
+        const std::string strDirectory =
+            debug::safe_printstr(config::GetDataDir(), strName);
+        std::error_code ec;
+        if(!std::filesystem::exists(strDirectory, ec) || ec)
+            return false;
+
+        for(const std::filesystem::directory_entry& cEntry :
+            std::filesystem::directory_iterator(strDirectory, ec))
+        {
+            if(ec)
+                return false;
+
+            const std::string strFile = cEntry.path().filename().string();
+            if(strFile.rfind("journal.", 0) == 0 && strFile.size() >= 17
+            && strFile.compare(strFile.size() - 8, 8, ".pending") == 0)
+                return true;
+        }
+
+        return false;
+    }
+
+
     uint64_t JournalSize(const std::string& strName)
     {
         const std::string strPath =

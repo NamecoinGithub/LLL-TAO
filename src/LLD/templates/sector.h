@@ -36,6 +36,7 @@ ________________________________________________________________________________
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
+#include <vector>
 
 namespace LLD
 {
@@ -827,8 +828,11 @@ namespace LLD
          *
          *  Write the transaction commitment message.
          *
+         *  @param[in] fDeferDirtySync  When true, sync only newly created keychain
+         *             files. Update-dirty files stay tracked until a later barrier.
+         *
          **/
-        bool TxnCheckpoint();
+        bool TxnCheckpoint(bool fDeferDirtySync = false);
 
 
         /** TxnRelease
@@ -843,10 +847,14 @@ namespace LLD
          *
          *  Commit data from transaction object.
          *
+         *  @param[in] fSyncData  When false, apply the transaction but leave sector
+         *             and keychain fsyncs for a later barrier. The journal remains
+         *             the crash-recovery record until that barrier succeeds.
+         *
          *  @return True, if commit is successful, false otherwise.
          *
          **/
-        bool TxnCommit();
+        bool TxnCommit(bool fSyncData = true);
 
 
         /** TxnRecovery
@@ -855,6 +863,40 @@ namespace LLD
          *
          **/
         RECOVERY TxnRecovery();
+
+
+        /** Bytes currently stored in journal.dat, or 0 if it is absent. */
+        uint64_t TxnJournalBytes() const;
+
+
+        /** Parked journal sequence numbers, in ascending order. */
+        std::vector<uint64_t> TxnPendingSequences() const;
+
+
+        /** Rename journal.dat to a pending journal and sync its directory. */
+        bool TxnParkJournal(uint64_t nSequence);
+
+
+        /** Delete parked journals only after their data sync has succeeded. */
+        bool TxnDiscardPendingJournals();
+
+
+        /** Fsync sector and keychain files still tracked from deferred applies. */
+        bool TxnSyncDeferred();
+
+
+        /** Replay one parked journal if this database has it. Missing is success. */
+        bool TxnReplayPending(uint64_t nSequence);
+
+    private:
+        std::string JournalDirectory() const;
+        std::string JournalPath() const;
+        std::string PendingJournalPath(uint64_t nSequence) const;
+        bool ApplyTransaction(SectorTransaction& tx);
+        bool SyncDeferredLocked();
+        bool ParseJournal(const std::vector<uint8_t>& vBuffer,
+                          SectorTransaction& tx,
+                          bool& fCommit) const;
 
     };
 }
