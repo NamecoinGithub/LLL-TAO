@@ -887,8 +887,13 @@ namespace LLD
         bool TxnParkJournal(uint64_t nSequence);
 
 
-        /** Delete parked journals only after their data sync has succeeded. */
-        bool TxnDiscardPendingJournals();
+        /** Delete parked journals only after their data sync has succeeded.
+         *
+         *  @param[in] fAfterDataSync  True only for the coordinator barrier that
+         *             already fsynced every participant. Shutdown passes false and
+         *             refuses while recovery is required or has not succeeded.
+         */
+        bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
 
 
         /** Fsync sector and keychain files still tracked from deferred applies. */

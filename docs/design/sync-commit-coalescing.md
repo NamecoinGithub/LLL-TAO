@@ -95,7 +95,9 @@ On a flush:
 
 Shutdown takes the flush path when `fShutdown` is set. Process exit also
 fsyncs sector and keychain files in the database destructor and discards
-parked journals only after both syncs succeed.
+parked journals only after both syncs succeed and startup recovery succeeded.
+A failed replay, failed data sync, or `RECOVERY_REQUIRED` outcome leaves the
+parked journals in place.
 
 ## Recovery
 

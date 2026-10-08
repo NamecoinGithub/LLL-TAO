@@ -60,6 +60,8 @@ namespace LLD
         bool Commit(uint8_t nFlags, uint16_t nInstances, uint32_t nSyncCommitBlocks);
         TXN_OUTCOME LastOutcome() const;
         void ResetRecoveryRequired();
+        void RetainPendingJournals();
+        bool MayDiscardPendingJournals() const;
 
     private:
         using PhysicalDB = SectorDatabase<BinaryHashMap, BinaryLRU>;
@@ -71,9 +73,12 @@ namespace LLD
         bool DiscardGroup(uint16_t nInstances);
         bool RecoverGroup(uint16_t nInstances, const std::vector<PhysicalDB*>& vParticipants);
         void FailRecovery(const std::string& strError);
+        void RequireRecovery();
+        void AllowPendingJournalDiscard();
 
         std::mutex cMutex;
         std::atomic<bool> fRecoveryRequired{false};
+        std::atomic<bool> fDiscardPendingJournals{false};
         uint64_t nNextIdentity{1};
         uint32_t nDeferredCommits{0};
         uint64_t nDeferredJournalBytes{0};
@@ -175,27 +180,52 @@ namespace LLD
         bool fDiscarded = true;
 
         if(Logical && (nInstances & INSTANCES::LOGICAL))
-            fDiscarded = Logical->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Logical->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Contract && (nInstances & INSTANCES::CONTRACT))
-            fDiscarded = Contract->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Contract->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Register && (nInstances & INSTANCES::REGISTER))
-            fDiscarded = Register->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Register->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Ledger && (nInstances & INSTANCES::LEDGER))
-            fDiscarded = Ledger->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Ledger->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Client && (nInstances & INSTANCES::CLIENT))
-            fDiscarded = Client->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Client->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Trust && (nInstances & INSTANCES::TRUST))
-            fDiscarded = Trust->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Trust->TxnDiscardPendingJournals(true) && fDiscarded;
         if(Legacy && (nInstances & INSTANCES::LEGACY))
-            fDiscarded = Legacy->TxnDiscardPendingJournals() && fDiscarded;
+            fDiscarded = Legacy->TxnDiscardPendingJournals(true) && fDiscarded;
 
         return fDiscarded;
     }
 
 
-    void DurableCommitCoordinator::FailRecovery(const std::string& strError)
+    void DurableCommitCoordinator::RequireRecovery()
     {
         fRecoveryRequired.store(true);
+        fDiscardPendingJournals.store(false);
+    }
+
+
+    void DurableCommitCoordinator::RetainPendingJournals()
+    {
+        fDiscardPendingJournals.store(false);
+    }
+
+
+    void DurableCommitCoordinator::AllowPendingJournalDiscard()
+    {
+        fDiscardPendingJournals.store(true);
+    }
+
+
+    bool DurableCommitCoordinator::MayDiscardPendingJournals() const
+    {
+        return fDiscardPendingJournals.load();
+    }
+
+
+    void DurableCommitCoordinator::FailRecovery(const std::string& strError)
+    {
+        RequireRecovery();
         cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
         debug::error(FUNCTION, strError);
     }
@@ -338,6 +368,10 @@ namespace LLD
     bool Initialize()
     {
         debug::log(0, FUNCTION, "Initializing LLD");
+
+        /* Construction can fail before recovery runs. Keep any parked journals
+         * until Recover() reports success. */
+        cTxnCoordinator.RetainPendingJournals();
 
         try
         {
@@ -503,6 +537,7 @@ namespace LLD
 
         cContext.nOutcome = TXN_OUTCOME::RECOVERED;
         fRecoveryRequired.store(false);
+        AllowPendingJournalDiscard();
         return true;
     }
 
@@ -685,7 +720,7 @@ namespace LLD
         {
             ReleaseMemoryTransactions(nFlags, nReleaseInstances);
             cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
-            fRecoveryRequired.store(true);
+            RequireRecovery();
             ReleaseOwnership();
             return debug::error(FUNCTION,
                 "durable transaction decision exists; abort refused and recovery required");
@@ -703,7 +738,7 @@ namespace LLD
 
         if(!ReleasePhysicalTransactions(nReleaseInstances))
         {
-            fRecoveryRequired.store(true);
+            RequireRecovery();
             cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
             ReleaseOwnership();
             ::Shutdown();
@@ -907,7 +942,7 @@ namespace LLD
              * or another transaction can build on the partial state. */
             ReleaseMemoryTransactions(nFlags, nReleaseInstances);
 
-            fRecoveryRequired.store(true);
+            RequireRecovery();
             cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
             ReleaseOwnership();
             ::Shutdown();
@@ -931,7 +966,7 @@ namespace LLD
              * commit's journal.dat. A discard failure keeps both records. */
             if(nDeferredCommits > 0 && !DiscardGroup(nReleaseInstances))
             {
-                fRecoveryRequired.store(true);
+                RequireRecovery();
                 cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 ReleaseOwnership();
                 ::Shutdown();
@@ -941,7 +976,7 @@ namespace LLD
 
             if(!ReleasePhysicalTransactions(nReleaseInstances))
             {
-                fRecoveryRequired.store(true);
+                RequireRecovery();
                 cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 ReleaseOwnership();
                 ::Shutdown();
@@ -961,7 +996,7 @@ namespace LLD
             const uint64_t nSequence = nNextParkSequence++;
             if(!ParkGroup(nReleaseInstances, nSequence))
             {
-                fRecoveryRequired.store(true);
+                RequireRecovery();
                 cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
                 ReleaseOwnership();
                 ::Shutdown();
@@ -989,6 +1024,13 @@ namespace LLD
     void DurableCommitCoordinator::ResetRecoveryRequired()
     {
         fRecoveryRequired.store(false);
+        AllowPendingJournalDiscard();
+    }
+
+
+    bool MayDiscardPendingJournals()
+    {
+        return cTxnCoordinator.MayDiscardPendingJournals();
     }
 
 

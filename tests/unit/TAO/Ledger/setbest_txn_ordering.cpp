@@ -2332,3 +2332,82 @@ TEST_CASE("LLD parks journals until the sync-commit barrier",
     REQUIRE_FALSE(HasPendingJournal("_LEGACY"));
     REQUIRE(JournalSize("_LEDGER") == 0);
 }
+
+
+TEST_CASE("LLD shutdown retains parked journals when recovery fails",
+          "[lld][durable][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+
+    const std::string strContractPending =
+        debug::safe_printstr(config::GetDataDir(), "_CONTRACT/journal.00000042.pending");
+    const std::string strName = "_recovery_shutdown_journal";
+    const std::string strPath = config::GetDataDir() + strName;
+    const std::string strPending = strPath + "/journal.00000042.pending";
+
+    struct Cleanup
+    {
+        const std::string& strContractPending;
+        const std::string& strPath;
+
+        ~Cleanup()
+        {
+            std::error_code ec;
+            std::filesystem::remove(strContractPending, ec);
+            std::filesystem::remove_all(strPath, ec);
+            /* Replay any unrelated parked journals this failed recovery stopped
+             * before discarding, then clear the latch for later tests. */
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+        }
+    } cleanup{strContractPending, strPath};
+
+    /* A successful startup grants shutdown permission to drop parked journals.
+     * The same destructor must refuse after failed replay. */
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::MayDiscardPendingJournals());
+
+    std::filesystem::remove_all(strPath);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        {
+            std::ofstream cPending(strPending, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPending.is_open());
+            cPending << "not-a-journal";
+            REQUIRE(cPending.good());
+        }
+    }
+    REQUIRE_FALSE(std::filesystem::exists(strPending));
+
+    {
+        std::ofstream cPending(strContractPending, std::ios::binary | std::ios::trunc);
+        REQUIRE(cPending.is_open());
+        cPending << "not-a-journal";
+        REQUIRE(cPending.good());
+    }
+
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+    REQUIRE_FALSE(LLD::MayDiscardPendingJournals());
+    REQUIRE(std::filesystem::exists(strContractPending));
+    REQUIRE_FALSE(LLD::Contract->TxnDiscardPendingJournals());
+    REQUIRE(std::filesystem::exists(strContractPending));
+
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        {
+            std::ofstream cPending(strPending, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPending.is_open());
+            cPending << "not-a-journal";
+            REQUIRE(cPending.good());
+        }
+
+        REQUIRE_FALSE(db.TxnDiscardPendingJournals());
+        REQUIRE(std::filesystem::exists(strPending));
+    }
+    REQUIRE(std::filesystem::exists(strPending));
+}

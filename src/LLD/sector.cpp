@@ -12,6 +12,7 @@
 ____________________________________________________________________________________________*/
 
 #include <LLD/templates/sector.h>
+#include <LLD/include/global.h>
 
 #include <LLD/cache/binary_lfu.h>
 #include <LLD/cache/binary_lru.h>
@@ -125,8 +126,11 @@ namespace LLD
         }
 
         /* Parked journals are the crash record for deferred applies. Drop them
-         * only after both sector and keychain syncs have succeeded. */
-        if(fSectorSynced && fKeysSynced && !TxnDiscardPendingJournals())
+         * only after recovery succeeded and both sector and keychain syncs
+         * succeeded. RECOVERY_REQUIRED, failed replay, and failed data sync
+         * must leave them for the next startup. */
+        if(MayDiscardPendingJournals() && fSectorSynced && fKeysSynced
+        && !TxnDiscardPendingJournals())
             debug::error(FUNCTION, "failed to discard parked journals during shutdown");
     }
 
@@ -1126,9 +1130,15 @@ namespace LLD
 
 
     template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnDiscardPendingJournals()
+    bool SectorDatabase<KeychainType, CacheType>::TxnDiscardPendingJournals(const bool fAfterDataSync)
     {
         LOCK(TRANSACTION_MUTEX);
+
+        /* The coordinator may discard only after its data sync. Every other
+         * caller, including database shutdown, must keep the crash record when
+         * recovery failed or has not succeeded. */
+        if(!fAfterDataSync && !MayDiscardPendingJournals())
+            return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
 
         std::error_code ec;
         const std::string strDirectory = JournalDirectory();
@@ -1140,6 +1150,9 @@ namespace LLD
         {
             if(ec)
                 return debug::error(FUNCTION, strName, " failed to list parked journals");
+
+            if(!fAfterDataSync && !MayDiscardPendingJournals())
+                return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
 
             const std::string strFile = cEntry.path().filename().string();
             if(strFile.rfind("journal.", 0) != 0 || strFile.size() < 17

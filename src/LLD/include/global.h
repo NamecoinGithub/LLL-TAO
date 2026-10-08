@@ -175,6 +175,12 @@ namespace LLD
     TXN_OUTCOME LastTxnOutcome();
 
 
+    /** Shutdown may delete parked journals only after recovery succeeded and no
+     *  later failure reported RECOVERY_REQUIRED. Replay and data-sync failures
+     *  clear this so the journals remain for the next startup. */
+    bool MayDiscardPendingJournals();
+
+
     /** Abort a transaction automatically if its scope exits before it is consumed. */
     class TransactionGuard
     {
