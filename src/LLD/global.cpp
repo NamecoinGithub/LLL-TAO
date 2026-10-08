@@ -282,7 +282,7 @@ namespace LLD
     {
         bool fSynced = true;
 
-        const auto Sync = [&fSynced](PhysicalDB* pDatabase, const uint16_t nBit)
+        const auto Sync = [&fSynced, nInstances](PhysicalDB* pDatabase, const uint16_t nBit)
         {
             if(pDatabase && (nInstances & nBit))
                 fSynced = pDatabase->TxnSyncDeferred() && fSynced;
@@ -453,7 +453,9 @@ namespace LLD
 
                 if(!HasSequence(pDatabase, nSequence))
                     vMissing.push_back(pDatabase);
-                else if(pDatabase->TxnJournalBytes() > 0)
+                /* TxnJournalBytes() is zero for a directory or symlink. That
+                 * entry is still a crash record and must block partial replay. */
+                else if(pDatabase->TxnHasRecoverableJournal())
                     fForeignPending = true;
             }
 
@@ -525,6 +527,21 @@ namespace LLD
                 return false;
             }
 
+            /* journal.dat on a missing participant was applied as this sequence.
+             * Release it after the data sync, before a later sequence or
+             * RecoverGroup's complete-journal pass can apply it again. */
+            if(!fComplete)
+            {
+                for(PhysicalDB* pDatabase : vMissing)
+                {
+                    if(!pDatabase->TxnRelease())
+                    {
+                        FailRecovery("failed to release consumed transaction journal");
+                        return false;
+                    }
+                }
+            }
+
             if(!DiscardSequences(nGroup, std::vector<uint64_t>{nSequence}))
             {
                 FailRecovery("failed to discard parked journals after data sync");
@@ -591,6 +608,7 @@ namespace LLD
          * copies are still the unparked journal.dat of that same newest sequence. */
         const uint64_t nLatestSequence = setSequences.empty() ? 0 : *setSequences.rbegin();
         std::set<uint64_t> setRecovered;
+        std::set<PhysicalDB*> setConsumedJournals;
         bool fIncompleteSequence = false;
 
         for(const uint64_t nSequence : setSequences)
@@ -647,7 +665,9 @@ namespace LLD
 
                 if(!fMissing)
                 {
-                    if(pDatabase->TxnJournalBytes() > 0)
+                    /* A non-regular journal.dat is not an empty file. It must
+                     * not be treated as the missing participant's journal. */
+                    if(pDatabase->TxnHasRecoverableJournal())
                         fJournalUnit = false;
                     continue;
                 }
@@ -685,6 +705,8 @@ namespace LLD
                         FailRecovery("failed to recover unparked transaction journal");
                         return false;
                     }
+
+                    setConsumedJournals.insert(pDatabase);
                 }
                 else if(!pDatabase->TxnReplayPending(nSequence))
                 {
@@ -703,6 +725,17 @@ namespace LLD
                 if(pDatabase && !pDatabase->TxnSyncDeferred())
                 {
                     FailRecovery("failed to sync replayed transaction data; parked journals retained");
+                    return false;
+                }
+            }
+
+            /* These journal.dat files were the partial park. Release them before
+             * the complete-journal pass below, which would apply them again. */
+            for(PhysicalDB* pDatabase : setConsumedJournals)
+            {
+                if(!pDatabase->TxnRelease())
+                {
+                    FailRecovery("failed to release consumed transaction journal");
                     return false;
                 }
             }
@@ -1525,10 +1558,22 @@ namespace LLD
         if(!MayDiscardPendingJournals())
             return false;
 
+        /* A failed barrier must clear the discard latch before destructors run.
+         * Otherwise an exclusive participant can delete an untracked sequence
+         * after only its local sync, while the group has not synced. */
         if(!QuiesceGroup(INSTANCES::MERKLE) || !QuiesceGroup(INSTANCES::CONSENSUS))
+        {
+            RetainPendingJournals();
             return false;
+        }
 
-        return RetireParkedJournals();
+        if(!RetireParkedJournals())
+        {
+            RetainPendingJournals();
+            return false;
+        }
+
+        return true;
     }
 
 

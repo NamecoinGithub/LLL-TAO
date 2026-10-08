@@ -110,8 +110,11 @@ quiesces both recovery groups before it discards any parked sequence, lowest
 sequence first. Contract and Register are destroyed first and can
 hold both groups' sequences, so a per-database destructor must not delete a
 sequence until the coordinator has synced the whole group that owns it.
-A failed replay, failed data sync, or `RECOVERY_REQUIRED` outcome leaves the
-parked journals in place.
+If that quiesce or retire fails, the discard latch is cleared before
+destructors run. A failed replay, failed data sync, or `RECOVERY_REQUIRED`
+outcome leaves the parked journals in place. A directory or symlink named as
+a journal is not a regular crash record and is retained rather than deleted
+or followed.
 
 ## Recovery
 
@@ -125,7 +128,10 @@ sequence that exists only on Contract or Register is a partial MERKLE park when
 Logical or Client still has `journal.dat`, and a partial CONSENSUS park when
 only those exclusive journals do. It is not given to the other group.
 `journal.dat` that was not part of that partial park is the newest commit and
-is applied after every parked sequence. Replay is idempotent.
+is applied after every parked sequence. A `journal.dat` consumed as a partial
+park is released after that sequence's data sync, before a later sequence or
+the complete-journal pass can apply it again. A non-regular `journal.dat`,
+including a symlink, blocks that partial-park path.
 
 A participant is satisfied when `journal.dat` is a complete commit, or when
 `journal.dat` is missing or empty and the participant has the group's latest

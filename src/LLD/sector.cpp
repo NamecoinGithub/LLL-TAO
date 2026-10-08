@@ -872,7 +872,9 @@ namespace LLD
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
 
         std::error_code ec;
-        const std::filesystem::file_status nStatus = std::filesystem::status(strJournal, ec);
+        /* Do not follow links. A dangling journal.dat is a crash record, and a
+         * link to a regular file is not a payload inside this directory. */
+        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(strJournal, ec);
         if(ec)
         {
             if(ec == std::errc::no_such_file_or_directory)
@@ -1149,12 +1151,13 @@ namespace LLD
     {
         std::error_code ec;
         const std::string strJournal = JournalPath();
-        const std::filesystem::file_status nStatus = std::filesystem::status(strJournal, ec);
+        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(strJournal, ec);
         if(ec == std::errc::no_such_file_or_directory)
             return false;
 
-        /* An unreadable or non-regular journal is a recovery failure. Treating
-         * it as absent would let the other group truncate a shared copy. */
+        /* An unreadable, symlink, or other non-regular journal is a recovery
+         * failure. Treating it as absent would let the other group truncate a
+         * shared copy, or would apply a payload outside this directory. */
         if(ec || !std::filesystem::exists(nStatus))
             return static_cast<bool>(ec);
 
@@ -1276,6 +1279,13 @@ namespace LLD
             if(!ParsePendingSequence(strFile, nSequence))
                 return debug::error(FUNCTION, strName, " parked journal name is not a canonical sequence");
 
+            /* A directory or symlink with a pending name is a malformed crash
+             * record. Do not queue it for removal; retain it for inspection. */
+            std::error_code ecStatus;
+            const std::filesystem::file_status cStatus = cEntry.symlink_status(ecStatus);
+            if(ecStatus || cStatus.type() != std::filesystem::file_type::regular)
+                return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
+
             vDiscard.push_back(cEntry.path());
         }
 
@@ -1323,7 +1333,7 @@ namespace LLD
         {
             const std::string strPending = PendingJournalPath(nSequence);
             std::error_code ec;
-            const std::filesystem::file_status cStatus = std::filesystem::status(strPending, ec);
+            const std::filesystem::file_status cStatus = std::filesystem::symlink_status(strPending, ec);
             if(cStatus.type() == std::filesystem::file_type::not_found
             || ec == std::errc::no_such_file_or_directory)
                 continue;
@@ -1360,9 +1370,9 @@ namespace LLD
 
         const std::string strPending = PendingJournalPath(nSequence);
         std::error_code ec;
-        const std::filesystem::file_status cStatus = std::filesystem::status(strPending, ec);
-        /* Success only when the path is absent. A directory or other existing
-         * non-regular entry still has a sequence name and must not be skipped. */
+        const std::filesystem::file_status cStatus = std::filesystem::symlink_status(strPending, ec);
+        /* Success only when the path is absent. A directory, symlink, or other
+         * existing non-regular entry must not be skipped or followed. */
         if(cStatus.type() == std::filesystem::file_type::not_found
         || ec == std::errc::no_such_file_or_directory)
             return true;

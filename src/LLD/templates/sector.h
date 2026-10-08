@@ -873,7 +873,8 @@ namespace LLD
         /** True when journal.dat is a non-empty or non-regular crash record.
          *
          *  A missing file and an empty regular file are the released state.
-         *  An existing non-regular entry is a recovery failure, not absence.
+         *  An existing non-regular entry, including a symlink, is a recovery
+         *  failure, not absence. The check does not follow links.
          */
         bool TxnHasRecoverableJournal() const;
 
@@ -914,6 +915,8 @@ namespace LLD
          *             Per-database shutdown passes false. A sequence owned by a
          *             group, or an untracked sequence on a shared database, is
          *             kept until that group barrier has quiesced every participant.
+         *             An existing non-regular pending entry, including a symlink
+         *             or directory, is retained and fails the discard.
          */
         bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
 
