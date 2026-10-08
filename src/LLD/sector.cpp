@@ -39,6 +39,7 @@ namespace LLD
     : CONDITION_MUTEX()
     , CONDITION()
     , SECTOR_MUTEX()
+    , SECTOR_DURABILITY_MUTEX()
     , BUFFER_MUTEX()
     , TRANSACTION_MUTEX()
     , strBaseLocation(config::GetDataDir() + strNameIn + "/datachain/")
@@ -93,7 +94,7 @@ namespace LLD
             MeterThread.join();
 
         {
-            WRITE_LOCK(SECTOR_MUTEX);
+            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
             if(!cDurability.Sync(DurableIO::Current()))
                 debug::error(FUNCTION, "failed to sync sector files during shutdown");
         }
@@ -288,6 +289,7 @@ namespace LLD
         cachePool->Put(key, vKey, vData, false);
 
         {
+            SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
             WRITE_LOCK(SECTOR_MUTEX);
 
             /* Find the file stream for LRU cache. */
@@ -353,6 +355,7 @@ namespace LLD
             SectorKey key;
 
             {
+                SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
                 WRITE_LOCK(SECTOR_MUTEX);
 
                 /* Create new file if above current file size. */
@@ -490,6 +493,7 @@ namespace LLD
             return true;
 
         {
+            SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
             WRITE_LOCK(SECTOR_MUTEX);
 
             /* Find the file stream for LRU cache. */
@@ -832,7 +836,7 @@ namespace LLD
         /* Make all pending sector writes and their new directory entries durable
          * before the transaction journal can be released. */
         {
-            WRITE_LOCK(SECTOR_MUTEX);
+            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
             if(!cDurability.Sync(DurableIO::Current()))
                 return debug::error(FUNCTION, "failed to sync sector files");
         }
