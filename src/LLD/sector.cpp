@@ -1224,7 +1224,14 @@ namespace LLD
         LOCK(TRANSACTION_MUTEX);
 
         const std::string strPending = PendingJournalPath(nSequence);
-        if(filesystem::exists(strPending))
+        /* filesystem::exists uses stat and follows links, so a dangling symlink
+         * looks absent. std::rename would then replace that malformed recovery
+         * record. Reject every existing non-not_found destination first. */
+        std::error_code ecPending;
+        const std::filesystem::file_status nPendingStatus =
+            std::filesystem::symlink_status(strPending, ecPending);
+        if(ecPending != std::errc::no_such_file_or_directory
+        && (ecPending || nPendingStatus.type() != std::filesystem::file_type::not_found))
             return debug::error(FUNCTION, strName, " pending journal already exists");
 
         if(!filesystem::rename(JournalPath(), strPending))

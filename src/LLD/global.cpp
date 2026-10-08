@@ -756,7 +756,9 @@ namespace LLD
 
         bool fAllSatisfied = true;
         std::vector<PhysicalDB*> vComplete;
+        std::vector<PhysicalDB*> vIncomplete;
         vComplete.reserve(vParticipants.size());
+        vIncomplete.reserve(vParticipants.size());
 
         for(PhysicalDB* pDatabase : vParticipants)
         {
@@ -773,6 +775,8 @@ namespace LLD
 
             if(nRecovery == RECOVERY::COMPLETE)
                 vComplete.push_back(pDatabase);
+            else if(nRecovery == RECOVERY::INCOMPLETE && nJournalBytes > 0)
+                vIncomplete.push_back(pDatabase);
 
             std::vector<uint64_t> vPending;
             if(!pDatabase->TxnPendingSequences(vPending))
@@ -807,27 +811,40 @@ namespace LLD
             }
         }
 
-        /* Absent journals are the normal startup path. Truncate only when a
-         * commit was applied, a parked journal was discarded, or an incomplete
-         * journal.dat still has bytes. Recovered sequences were already
-         * discarded above; do not discard a sequence this group does not own. */
-        bool fNeedsRelease = !vComplete.empty() || !setRecovered.empty();
-        if(!fAllSatisfied)
+        /* Absent journals are the normal startup path. Truncate a journal only
+         * after it was applied, or when it is an incomplete record that never
+         * reached commit and no partial parked sequence remains. A complete
+         * journal that this pass did not apply must stay: releasing the group
+         * would drop a transaction that crashed between participant checkpoints.
+         * Recovered sequences were already discarded above; do not discard a
+         * sequence this group does not own. */
+        if(fAllSatisfied)
         {
-            for(PhysicalDB* pDatabase : vParticipants)
+            if(!vComplete.empty() || !setRecovered.empty())
             {
-                if(pDatabase && pDatabase->TxnJournalBytes() > 0)
-                    fNeedsRelease = true;
+                if(!ReleasePhysicalTransactions(nInstances))
+                {
+                    FailRecovery("failed to durably release transaction journals");
+                    return false;
+                }
             }
+
+            return true;
         }
 
-        if(fNeedsRelease)
+        for(PhysicalDB* pDatabase : vIncomplete)
         {
-            if(!ReleasePhysicalTransactions(nInstances))
+            if(!pDatabase->TxnRelease())
             {
                 FailRecovery("failed to durably release transaction journals");
                 return false;
             }
+        }
+
+        if(!vComplete.empty())
+        {
+            FailRecovery("incomplete recovery retained unapplied complete journals");
+            return false;
         }
 
         return true;

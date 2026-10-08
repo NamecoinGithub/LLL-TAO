@@ -87,7 +87,7 @@ LLD recovery stays in that layer. There is no `BlockchainSync` class.
 On a deferred commit, after every selected participant has a complete journal:
 
 1. Apply each participant with `TxnCommit(false)`. That fsyncs files created during the apply, not update-dirty pages. A crash after the journal is parked must still be able to open those files while replaying.
-2. Rename that participant's `journal.dat` to `journal.<8-digit sequence>.pending`. The sequence is an unsigned decimal with no sign. Names that do not round-trip to that filename fail recovery and are not discarded.
+2. Rename that participant's `journal.dat` to `journal.<8-digit sequence>.pending`. The sequence is an unsigned decimal with no sign. Names that do not round-trip to that filename fail recovery and are not discarded. The rename rejects any existing destination, including a dangling symlink, instead of replacing that malformed record.
 3. Fsync the journal directory.
 4. Leave the transaction owner committed. Do not truncate the journal.
 
@@ -139,7 +139,9 @@ pending sequence. A non-empty journal without `"commit"` is still incomplete.
 
 If the group is satisfied, complete `journal.dat` participants are applied and
 fsynced. Pending-only dirtiness is fsynced. Parked journals are deleted only
-after that fsync. Then `journal.dat` is released.
+after that fsync. Then `journal.dat` is released. If the group is not fully
+satisfied, those complete journals are not applied and are not truncated.
+Recovery fails so a later checkpoint cannot append over that crash record.
 
 If a sequence is missing from any participant and is not the unparked
 `journal.dat` of that same commit, that sequence and every higher one stay on

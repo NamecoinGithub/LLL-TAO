@@ -364,6 +364,23 @@ namespace
         return ssJournal;
     }
 
+
+    /* Build a parsed journal that never reached the commit marker. */
+    DataStream MakeUncommittedJournal(const std::pair<std::string, uint32_t>& key,
+                                      const uint32_t nValue)
+    {
+        DataStream ssKey(SER_LLD, LLD::DATABASE_VERSION);
+        ssKey << key;
+
+        DataStream ssData(SER_LLD, LLD::DATABASE_VERSION);
+        ssData << std::string("NONE");
+        ssData << nValue;
+
+        DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
+        ssJournal << std::string("write") << ssKey.Bytes() << ssData.Bytes();
+        return ssJournal;
+    }
+
     DataStream MakeCommitJournal()
     {
         DataStream ssJournal(SER_LLD, LLD::DATABASE_VERSION);
@@ -1810,6 +1827,139 @@ TEST_CASE("LLD::TxnRecovery retains complete journals after partial CONSENSUS ap
 }
 
 
+TEST_CASE("LLD::TxnRecovery retains unapplied complete journals when the group is not satisfied",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    LogicalGuard logicalGuard;
+
+    const std::pair<std::string, uint32_t> contractKey =
+        std::make_pair(std::string("recovery-partial-checkpoint-contract"), 1);
+    const std::pair<std::string, uint32_t> legacyKey =
+        std::make_pair(std::string("recovery-partial-checkpoint-legacy"), 1);
+
+    struct Cleanup
+    {
+        std::pair<std::string, uint32_t> contractKey;
+        std::pair<std::string, uint32_t> legacyKey;
+
+        ~Cleanup()
+        {
+            LLD::ResetTxnRecoveryRequired();
+            if(LLD::Contract)
+            {
+                LLD::Contract->TxnRelease();
+                LLD::Contract->Erase(contractKey);
+            }
+            if(LLD::Register)
+                LLD::Register->TxnRelease();
+            if(LLD::Ledger)
+                LLD::Ledger->TxnRelease();
+            if(LLD::Trust)
+                LLD::Trust->TxnRelease();
+            if(LLD::Legacy)
+            {
+                LLD::Legacy->TxnRelease();
+                LLD::Legacy->Erase(legacyKey);
+            }
+            if(LLD::Logical)
+                LLD::Logical->TxnRelease();
+        }
+    } cleanup{contractKey, legacyKey};
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
+    REQUIRE(LLD::Register->TxnRelease());
+    REQUIRE(LLD::Ledger->TxnRelease());
+    REQUIRE(LLD::Trust->TxnRelease());
+    REQUIRE(LLD::Legacy->TxnRelease());
+    REQUIRE(LLD::Logical->TxnRelease());
+    LLD::Contract->Erase(contractKey);
+    LLD::Legacy->Erase(legacyKey);
+
+    SECTION("complete journals stay when another participant never committed")
+    {
+        /* Crash between participant checkpoints: some journals are complete, and
+         * one never reached commit. The complete records must not be truncated. */
+        REQUIRE(WriteRecoveryJournal("_CONTRACT", MakeWriteJournal(contractKey, 41)));
+        REQUIRE(WriteRecoveryJournal("_REGISTER", MakeWriteJournal(
+            std::make_pair(std::string("recovery-partial-checkpoint-register"), 1), 42)));
+        REQUIRE(WriteRecoveryJournal("_LEGACY", MakeUncommittedJournal(legacyKey, 43)));
+
+        const uint64_t nContractJournal = JournalSize("_CONTRACT");
+        const uint64_t nRegisterJournal = JournalSize("_REGISTER");
+        const uint64_t nLegacyJournal = JournalSize("_LEGACY");
+        REQUIRE(nContractJournal > 0);
+        REQUIRE(nRegisterJournal > 0);
+        REQUIRE(nLegacyJournal > 0);
+
+        REQUIRE_FALSE(LLD::TxnRecovery());
+        REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+        /* TxnRecovery stages a complete journal in memory. Disk must stay
+         * unchanged, including the unapplied payload. */
+        REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
+        REQUIRE(JournalSize("_REGISTER") == nRegisterJournal);
+        REQUIRE(JournalSize("_LEGACY") == 0);
+    }
+
+    SECTION("an uncommitted journal is discarded when no complete journal remains")
+    {
+        REQUIRE(WriteRecoveryJournal("_LEGACY", MakeUncommittedJournal(legacyKey, 44)));
+        const uint64_t nLegacyJournal = JournalSize("_LEGACY");
+        REQUIRE(nLegacyJournal > 0);
+
+        REQUIRE(LLD::TxnRecovery());
+        REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERED);
+        REQUIRE_FALSE(LLD::Legacy->Exists(legacyKey));
+        REQUIRE(JournalSize("_LEGACY") == 0);
+    }
+}
+
+
+TEST_CASE("LLD::TxnParkJournal retains a dangling pending symlink",
+          "[lld][txncommit][recovery]")
+{
+    LedgerGuard ledgerGuard;
+
+    const std::string strPending = debug::safe_printstr(
+        config::GetDataDir(), "_LEDGER/journal.",
+        std::setfill('0'), std::setw(8), uint64_t(1), ".pending");
+
+    struct Cleanup
+    {
+        std::string strPending;
+
+        ~Cleanup()
+        {
+            std::error_code ecRemove;
+            std::filesystem::remove(strPending, ecRemove);
+            if(LLD::Ledger)
+                LLD::Ledger->TxnRelease();
+        }
+    } cleanup{strPending};
+
+    std::error_code ecRemove;
+    std::filesystem::remove(strPending, ecRemove);
+    REQUIRE(WriteRecoveryJournal("_LEDGER", MakeCommitJournal()));
+
+    std::error_code ecLink;
+    std::filesystem::create_symlink("missing-journal-target", strPending, ecLink);
+    REQUIRE_FALSE(ecLink);
+    /* stat follows the link, so the old exists() check would miss this record. */
+    REQUIRE_FALSE(filesystem::exists(strPending));
+    REQUIRE(std::filesystem::is_symlink(std::filesystem::symlink_status(strPending)));
+
+    REQUIRE_FALSE(LLD::Ledger->TxnParkJournal(1));
+    REQUIRE(std::filesystem::is_symlink(std::filesystem::symlink_status(strPending)));
+    REQUIRE(JournalSize("_LEDGER") > 0);
+    REQUIRE_FALSE(std::filesystem::is_regular_file(strPending));
+}
+
+
 TEST_CASE("LLD::TxnRecovery retains journals after a CONSENSUS parse failure",
           "[lld][txncommit][recovery]")
 {
@@ -2269,10 +2419,19 @@ TEST_CASE("LLD reports recovery-required rather than abort after partial journal
     REQUIRE(JournalSize("_CONTRACT") > 0);
     REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CONSENSUS));
 
+    /* The apply already landed, but release truncated only some journals.
+     * The remaining complete journal is indistinguishable from a crash between
+     * checkpoints, so recovery must retain it instead of deleting the record. */
     LLD::ResetTxnRecoveryRequired();
-    REQUIRE(LLD::TxnRecovery());
-    REQUIRE(JournalSize("_CONTRACT") == 0);
+    const uint64_t nContractJournal = JournalSize("_CONTRACT");
+    REQUIRE(nContractJournal > 0);
+    REQUIRE_FALSE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+    REQUIRE(JournalSize("_CONTRACT") == nContractJournal);
     REQUIRE(LLD::Ledger->Exists(key));
+
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::Contract->TxnRelease());
     REQUIRE(LLD::Ledger->Erase(key));
 }
 
