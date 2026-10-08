@@ -62,6 +62,8 @@ namespace LLD
         void ResetRecoveryRequired();
         void RetainPendingJournals();
         bool MayDiscardPendingJournals() const;
+        bool ShutdownGroupBarrier();
+        bool MayDiscardPendingSequence(const void* pDatabase, uint64_t nSequence) const;
 
     private:
         using PhysicalDB = SectorDatabase<BinaryHashMap, BinaryLRU>;
@@ -76,7 +78,10 @@ namespace LLD
         bool RecoverPendingSequences(uint16_t nInstances,
                                      const std::vector<PhysicalDB*>& vParticipants,
                                      const std::set<uint64_t>& setSequences);
-        bool RecoverGroup(uint16_t nInstances, const std::vector<PhysicalDB*>& vParticipants);
+        bool RecoverGroup(uint16_t nInstances,
+                          const std::vector<PhysicalDB*>& vParticipants,
+                          const std::vector<PhysicalDB*>* pvSequenceSources = nullptr);
+        bool QuiesceGroup(uint16_t nInstances);
         void FailRecovery(const std::string& strError);
         void RequireRecovery();
         void AllowPendingJournalDiscard();
@@ -85,8 +90,9 @@ namespace LLD
         std::atomic<bool> fRecoveryRequired{false};
         std::atomic<bool> fDiscardPendingJournals{false};
         /* CONSENSUS and MERKLE share Contract and Register, but each group has
-         * its own parked journals. A shared counter lets one group's flush reset
-         * the barrier while the other group's journals and dirty data remain. */
+         * its own DeferredBatch. A flush resets and discards only that group's
+         * commits, bytes, and sequences, so the other group's barrier and parked
+         * journals, including copies on the shared databases, stay in place. */
         struct DeferredBatch
         {
             uint32_t nCommits{0};
@@ -348,11 +354,19 @@ namespace LLD
     }
 
 
-    bool DurableCommitCoordinator::RecoverGroup(const uint16_t nInstances,
-                                                const std::vector<PhysicalDB*>& vParticipants)
+    bool DurableCommitCoordinator::RecoverGroup(
+        const uint16_t nInstances,
+        const std::vector<PhysicalDB*>& vParticipants,
+        const std::vector<PhysicalDB*>* pvSequenceSources)
     {
+        /* Sequence sources limit replay and discard to journals this group
+         * owns. Shared Contract/Register copies of the other group's sequences
+         * stay on disk when a full node recovers MERKLE before CONSENSUS. */
+        const std::vector<PhysicalDB*>& vSources =
+            pvSequenceSources ? *pvSequenceSources : vParticipants;
+
         std::set<uint64_t> setSequences;
-        for(PhysicalDB* pDatabase : vParticipants)
+        for(PhysicalDB* pDatabase : vSources)
         {
             if(!pDatabase)
                 continue;
@@ -448,7 +462,11 @@ namespace LLD
                 }
             }
 
-            if(!DiscardGroup(nInstances))
+            const std::vector<uint64_t> vSequences(setSequences.begin(), setSequences.end());
+            const bool fDiscarded = pvSequenceSources
+                ? DiscardSequences(nInstances, vSequences)
+                : DiscardGroup(nInstances);
+            if(!fDiscarded)
             {
                 FailRecovery("failed to discard parked journals after data sync");
                 return false;
@@ -595,6 +613,12 @@ namespace LLD
     {
         debug::log(0, FUNCTION, "Shutting down LLD");
 
+        /* Quiesce every participant before any destructor runs. Contract and
+         * Register are destroyed first and hold both groups' parked journals;
+         * discarding there would drop a MERKLE record before Logical/Client
+         * have synced. */
+        cTxnCoordinator.ShutdownGroupBarrier();
+
         /* Cleanup the contract database. */
         delete Contract;
         Contract = nullptr;
@@ -646,11 +670,19 @@ namespace LLD
         }
         else
         {
-            /* Lookup paths open MERKLE transactions on a full node. Selecting
-             * the group solely from fClient leaves _API/journal.<seq>.pending
-             * unreplayed and its dirty data unsynced. Replay those sequences,
-             * including the shared Contract/Register copies, before CONSENSUS
-             * recovery discards every parked journal on those databases. */
+            /* Lookup paths open MERKLE transactions on a full node. Pending
+             * journals are not the only crash record: a checkpoint that synced
+             * but did not reach TxnParkJournal() leaves journal.dat and no
+             * sequence. Logical and Client are the databases that prove that
+             * journal belongs to MERKLE. Recover the group, including that
+             * journal.dat, before CONSENSUS can truncate the shared
+             * Contract/Register copies without applying them. Discard only
+             * sequences found on Logical/Client so CONSENSUS parked journals
+             * on the shared databases stay replayable. */
+            const bool fMerkleJournal =
+                (Logical && Logical->TxnHasRecoverableJournal())
+                || (Client && Client->TxnHasRecoverableJournal());
+
             std::set<uint64_t> setMerkleSequences;
             if(!CollectPendingSequences(Logical, setMerkleSequences)
             || !CollectPendingSequences(Client, setMerkleSequences))
@@ -659,9 +691,17 @@ namespace LLD
                 return false;
             }
 
-            if(!RecoverPendingSequences(INSTANCES::MERKLE,
-                                        {Logical, Contract, Register, Client},
-                                        setMerkleSequences))
+            if(fMerkleJournal)
+            {
+                const std::vector<PhysicalDB*> vSequenceSources = {Logical, Client};
+                if(!RecoverGroup(INSTANCES::MERKLE,
+                                 {Logical, Contract, Register, Client},
+                                 &vSequenceSources))
+                    return false;
+            }
+            else if(!RecoverPendingSequences(INSTANCES::MERKLE,
+                                             {Logical, Contract, Register, Client},
+                                             setMerkleSequences))
                 return false;
 
             DeferredFor(INSTANCES::MERKLE) = {};
@@ -1181,6 +1221,86 @@ namespace LLD
     }
 
 
+    bool MayDiscardPendingSequence(const void* pDatabase, const uint64_t nSequence)
+    {
+        return cTxnCoordinator.MayDiscardPendingSequence(pDatabase, nSequence);
+    }
+
+
+    bool DurableCommitCoordinator::QuiesceGroup(const uint16_t nInstances)
+    {
+        bool fSynced = true;
+
+        const auto Quiesce = [&fSynced](PhysicalDB* pDatabase, const uint16_t nBit, const uint16_t nMask)
+        {
+            if(pDatabase && (nMask & nBit))
+                fSynced = pDatabase->QuiesceAndSync() && fSynced;
+        };
+
+        Quiesce(Logical, INSTANCES::LOGICAL, nInstances);
+        Quiesce(Contract, INSTANCES::CONTRACT, nInstances);
+        Quiesce(Register, INSTANCES::REGISTER, nInstances);
+        Quiesce(Ledger, INSTANCES::LEDGER, nInstances);
+        Quiesce(Client, INSTANCES::CLIENT, nInstances);
+        Quiesce(Trust, INSTANCES::TRUST, nInstances);
+        Quiesce(Legacy, INSTANCES::LEGACY, nInstances);
+        return fSynced;
+    }
+
+
+    bool DurableCommitCoordinator::ShutdownGroupBarrier()
+    {
+        /* Recovery failure must keep every parked journal, including ones this
+         * process did not create. A successful barrier quiesces the whole group
+         * before deleting only that group's sequences. */
+        if(!MayDiscardPendingJournals())
+            return false;
+
+        bool fOk = true;
+
+        if(!QuiesceGroup(INSTANCES::MERKLE))
+            fOk = false;
+        else if(!DiscardSequences(INSTANCES::MERKLE, cDeferredMerkle.vSequences))
+            fOk = false;
+        else
+            cDeferredMerkle = {};
+
+        if(!QuiesceGroup(INSTANCES::CONSENSUS))
+            fOk = false;
+        else if(!DiscardSequences(INSTANCES::CONSENSUS, cDeferredConsensus.vSequences))
+            fOk = false;
+        else
+            cDeferredConsensus = {};
+
+        return fOk;
+    }
+
+
+    bool DurableCommitCoordinator::MayDiscardPendingSequence(const void* pDatabase,
+                                                             const uint64_t nSequence) const
+    {
+        const auto Contains = [nSequence](const std::vector<uint64_t>& vSequences)
+        {
+            return std::find(vSequences.begin(), vSequences.end(), nSequence) != vSequences.end();
+        };
+
+        /* Tracked sequences are deleted by ShutdownGroupBarrier only after
+         * every participant in that group has quiesced. A per-database
+         * destructor must not remove them. */
+        if(Contains(cDeferredConsensus.vSequences) || Contains(cDeferredMerkle.vSequences))
+            return false;
+
+        /* Contract and Register can hold either group's crash record. An
+         * untracked file there is not proof that the other participants have
+         * synced, so keep it for the coordinator barrier or the next startup. */
+        if(pDatabase == static_cast<const void*>(Contract)
+        || pDatabase == static_cast<const void*>(Register))
+            return false;
+
+        return true;
+    }
+
+
     bool TxnRecovery()
     {
         return cTxnCoordinator.Recover();
@@ -1247,6 +1367,12 @@ namespace LLD
     void ResetTxnRecoveryRequired()
     {
         cTxnCoordinator.ResetRecoveryRequired();
+    }
+
+
+    bool TxnShutdownGroupBarrier()
+    {
+        return cTxnCoordinator.ShutdownGroupBarrier();
     }
     #endif
 }

@@ -870,6 +870,23 @@ namespace LLD
         uint64_t TxnJournalBytes() const;
 
 
+        /** True when journal.dat is a non-empty or non-regular crash record.
+         *
+         *  A missing file and an empty regular file are the released state.
+         *  An existing non-regular entry is a recovery failure, not absence.
+         */
+        bool TxnHasRecoverableJournal() const;
+
+
+        /** Stop background writers and fsync sector and keychain files.
+         *
+         *  Safe to call more than once. Does not discard journals or free
+         *  the database. Shutdown uses this so every recovery-group participant
+         *  can sync before any parked journal is deleted.
+         */
+        bool QuiesceAndSync();
+
+
         /** Parked journal sequence numbers, in ascending order.
          *
          *  An empty vector is a missing or empty journal directory. Enumeration
@@ -893,8 +910,10 @@ namespace LLD
         /** Delete parked journals only after their data sync has succeeded.
          *
          *  @param[in] fAfterDataSync  True only for the coordinator barrier that
-         *             already fsynced every participant. Shutdown passes false and
-         *             refuses while recovery is required or has not succeeded.
+         *             already fsynced every participant in the recovery group.
+         *             Per-database shutdown passes false. A sequence owned by a
+         *             group, or an untracked sequence on a shared database, is
+         *             kept until that group barrier has quiesced every participant.
          */
         bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
 

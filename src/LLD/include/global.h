@@ -183,6 +183,15 @@ namespace LLD
     bool MayDiscardPendingJournals();
 
 
+    /** True when a per-database discard may delete this parked sequence.
+     *
+     *  Sequences owned by a CONSENSUS or MERKLE batch, and any untracked
+     *  sequence on the shared Contract or Register databases, stay until the
+     *  coordinator has quiesced that sequence's entire recovery group.
+     */
+    bool MayDiscardPendingSequence(const void* pDatabase, uint64_t nSequence);
+
+
     /** Abort a transaction automatically if its scope exits before it is consumed. */
     class TransactionGuard
     {
@@ -209,6 +218,11 @@ namespace LLD
     /** Clear the recovery-required latch so unit tests can continue after a
      *  forced partial-apply failure. */
     void ResetTxnRecoveryRequired();
+
+
+    /** Quiesce both recovery groups and discard only sequences whose group synced.
+     *  Does not destroy database instances. */
+    bool TxnShutdownGroupBarrier();
     #endif
 }
 

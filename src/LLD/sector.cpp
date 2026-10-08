@@ -105,6 +105,36 @@ namespace LLD
     template<class KeychainType, class CacheType>
     SectorDatabase<KeychainType, CacheType>::~SectorDatabase()
     {
+        /* Parked journals are the crash record for deferred applies. Drop them
+         * only after recovery succeeded and this database's own sync succeeded.
+         * Sequences whose recovery group has not quiesced are retained by
+         * TxnDiscardPendingJournals(); a Contract destructor must not delete a
+         * MERKLE journal before Logical and Client have synced. */
+        const bool fSynced = QuiesceAndSync();
+
+        if(pTransaction)
+            delete pTransaction;
+
+        if(cachePool)
+            delete cachePool;
+
+        if(fileCache)
+            delete fileCache;
+
+        if(pSectorKeys)
+        {
+            delete pSectorKeys;
+            pSectorKeys = nullptr;
+        }
+
+        if(MayDiscardPendingJournals() && fSynced && !TxnDiscardPendingJournals())
+            debug::error(FUNCTION, "failed to discard parked journals during shutdown");
+    }
+
+
+    template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::QuiesceAndSync()
+    {
         fDestruct = true;
         CONDITION.notify_all();
 
@@ -122,33 +152,15 @@ namespace LLD
                 debug::error(FUNCTION, "failed to sync sector files during shutdown");
         }
 
-        if(pTransaction)
-            delete pTransaction;
-
-        if(cachePool)
-            delete cachePool;
-
-        if(fileCache)
-            delete fileCache;
-
         bool fKeysSynced = true;
         if(pSectorKeys)
         {
             fKeysSynced = pSectorKeys->SyncTouchedFiles();
             if(!fKeysSynced)
                 debug::error(FUNCTION, "failed to sync keychain files during shutdown");
-
-            delete pSectorKeys;
-            pSectorKeys = nullptr;
         }
 
-        /* Parked journals are the crash record for deferred applies. Drop them
-         * only after recovery succeeded and both sector and keychain syncs
-         * succeeded. RECOVERY_REQUIRED, failed replay, and failed data sync
-         * must leave them for the next startup. */
-        if(MayDiscardPendingJournals() && fSectorSynced && fKeysSynced
-        && !TxnDiscardPendingJournals())
-            debug::error(FUNCTION, "failed to discard parked journals during shutdown");
+        return fSectorSynced && fKeysSynced;
     }
 
 
@@ -1133,6 +1145,31 @@ namespace LLD
 
 
     template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::TxnHasRecoverableJournal() const
+    {
+        std::error_code ec;
+        const std::string strJournal = JournalPath();
+        const std::filesystem::file_status nStatus = std::filesystem::status(strJournal, ec);
+        if(ec == std::errc::no_such_file_or_directory)
+            return false;
+
+        /* An unreadable or non-regular journal is a recovery failure. Treating
+         * it as absent would let the other group truncate a shared copy. */
+        if(ec || !std::filesystem::exists(nStatus))
+            return static_cast<bool>(ec);
+
+        if(!std::filesystem::is_regular_file(nStatus))
+            return true;
+
+        const auto nSize = std::filesystem::file_size(strJournal, ec);
+        if(ec)
+            return true;
+
+        return nSize > 0;
+    }
+
+
+    template<class KeychainType, class CacheType>
     bool SectorDatabase<KeychainType, CacheType>::TxnPendingSequences(std::vector<uint64_t>& vSequences) const
     {
         vSequences.clear();
@@ -1246,6 +1283,17 @@ namespace LLD
         {
             if(!fAfterDataSync && !MayDiscardPendingJournals())
                 return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
+
+            /* fAfterDataSync is the coordinator path that already quiesced every
+             * participant in the group. A per-database caller must not delete a
+             * sequence until that group barrier has completed, or an untracked
+             * sequence on Contract/Register that may belong to the other group. */
+            uint64_t nSequence = 0;
+            if(!ParsePendingSequence(pathPending.filename().string(), nSequence))
+                return debug::error(FUNCTION, strName, " parked journal name is not a canonical sequence");
+
+            if(!fAfterDataSync && !MayDiscardPendingSequence(this, nSequence))
+                continue;
 
             std::error_code ecRemove;
             if(!std::filesystem::remove(pathPending, ecRemove) || ecRemove)

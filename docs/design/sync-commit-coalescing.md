@@ -101,9 +101,11 @@ On a flush:
    the directory. The other group's sequences stay.
 3. Truncate `journal.dat` as before.
 
-Shutdown takes the flush path when `fShutdown` is set. Process exit also
-fsyncs sector and keychain files in the database destructor and discards
-parked journals only after both syncs succeed and startup recovery succeeded.
+Shutdown takes the flush path when `fShutdown` is set. Process exit
+quiesces every participant in a recovery group before it discards that
+group's parked journals. Contract and Register are destroyed first and can
+hold both groups' sequences, so a per-database destructor must not delete a
+sequence until the coordinator has synced the whole group that owns it.
 A failed replay, failed data sync, or `RECOVERY_REQUIRED` outcome leaves the
 parked journals in place.
 
@@ -111,9 +113,12 @@ parked journals in place.
 
 Startup replays `journal.*.pending` in sequence order before it inspects
 `journal.dat`. A client recovers the MERKLE group. A full node recovers that
-group as well whenever Logical or Client has parked journals, then recovers
-CONSENSUS. Shared Contract and Register sequences owned by the other group are
-not discarded. Replay is idempotent.
+group as well whenever Logical or Client has parked journals or a current
+`journal.dat`, then recovers CONSENSUS. A checkpoint that synced but was not
+yet renamed has no pending sequence; leaving it for CONSENSUS would truncate
+the shared Contract and Register copies without applying them. Shared
+Contract and Register sequences owned by the other group are not discarded.
+Replay is idempotent.
 
 A participant is satisfied when `journal.dat` is a complete commit, or when
 `journal.dat` is missing or empty and the participant has the group's latest
