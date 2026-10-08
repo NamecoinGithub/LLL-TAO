@@ -109,8 +109,11 @@ parked journals in place.
 
 ## Recovery
 
-Startup replays `journal.*.pending` in sequence order, across the CONSENSUS or
-MERKLE group, before it inspects `journal.dat`. Replay is idempotent.
+Startup replays `journal.*.pending` in sequence order before it inspects
+`journal.dat`. A client recovers the MERKLE group. A full node recovers that
+group as well whenever Logical or Client has parked journals, then recovers
+CONSENSUS. Shared Contract and Register sequences owned by the other group are
+not discarded. Replay is idempotent.
 
 A participant is satisfied when `journal.dat` is a complete commit, or when
 `journal.dat` is missing or empty and the participant has the group's latest

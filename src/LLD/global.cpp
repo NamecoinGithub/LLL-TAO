@@ -72,6 +72,10 @@ namespace LLD
         bool ParkGroup(uint16_t nInstances, uint64_t nSequence);
         bool DiscardGroup(uint16_t nInstances);
         bool DiscardSequences(uint16_t nInstances, const std::vector<uint64_t>& vSequences);
+        bool CollectPendingSequences(PhysicalDB* pDatabase, std::set<uint64_t>& setSequences);
+        bool RecoverPendingSequences(uint16_t nInstances,
+                                     const std::vector<PhysicalDB*>& vParticipants,
+                                     const std::set<uint64_t>& setSequences);
         bool RecoverGroup(uint16_t nInstances, const std::vector<PhysicalDB*>& vParticipants);
         void FailRecovery(const std::string& strError);
         void RequireRecovery();
@@ -283,6 +287,64 @@ namespace LLD
         RequireRecovery();
         cContext.nOutcome = TXN_OUTCOME::RECOVERY_REQUIRED;
         debug::error(FUNCTION, strError);
+    }
+
+
+    bool DurableCommitCoordinator::CollectPendingSequences(PhysicalDB* pDatabase,
+                                                            std::set<uint64_t>& setSequences)
+    {
+        if(!pDatabase)
+            return true;
+
+        std::vector<uint64_t> vPending;
+        if(!pDatabase->TxnPendingSequences(vPending))
+            return false;
+
+        setSequences.insert(vPending.begin(), vPending.end());
+        return true;
+    }
+
+
+    /* Replay one recovery group's parked sequences, including journals those
+     * sequences left on databases shared with the other group. Discard only
+     * those sequences so the other group's crash records stay replayable. */
+    bool DurableCommitCoordinator::RecoverPendingSequences(
+        const uint16_t nInstances,
+        const std::vector<PhysicalDB*>& vParticipants,
+        const std::set<uint64_t>& setSequences)
+    {
+        if(setSequences.empty())
+            return true;
+
+        for(const uint64_t nSequence : setSequences)
+        {
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(pDatabase && !pDatabase->TxnReplayPending(nSequence))
+                {
+                    FailRecovery("failed to replay parked transaction journal");
+                    return false;
+                }
+            }
+        }
+
+        for(PhysicalDB* pDatabase : vParticipants)
+        {
+            if(pDatabase && !pDatabase->TxnSyncDeferred())
+            {
+                FailRecovery("failed to sync replayed transaction data; parked journals retained");
+                return false;
+            }
+        }
+
+        const std::vector<uint64_t> vSequences(setSequences.begin(), setSequences.end());
+        if(!DiscardSequences(nInstances, vSequences))
+        {
+            FailRecovery("failed to discard parked journals after data sync");
+            return false;
+        }
+
+        return true;
     }
 
 
@@ -584,6 +646,25 @@ namespace LLD
         }
         else
         {
+            /* Lookup paths open MERKLE transactions on a full node. Selecting
+             * the group solely from fClient leaves _API/journal.<seq>.pending
+             * unreplayed and its dirty data unsynced. Replay those sequences,
+             * including the shared Contract/Register copies, before CONSENSUS
+             * recovery discards every parked journal on those databases. */
+            std::set<uint64_t> setMerkleSequences;
+            if(!CollectPendingSequences(Logical, setMerkleSequences)
+            || !CollectPendingSequences(Client, setMerkleSequences))
+            {
+                FailRecovery("failed to list parked transaction journals");
+                return false;
+            }
+
+            if(!RecoverPendingSequences(INSTANCES::MERKLE,
+                                        {Logical, Contract, Register, Client},
+                                        setMerkleSequences))
+                return false;
+
+            DeferredFor(INSTANCES::MERKLE) = {};
             vParticipants = {Contract, Register, Trust, Legacy, Ledger};
         }
 
