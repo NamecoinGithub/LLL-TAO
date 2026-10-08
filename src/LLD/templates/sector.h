@@ -95,6 +95,8 @@ namespace LLD
             acquire shared_lock (concurrent readers allowed) while write
             operations (Update, Force, Delete) acquire unique_lock (exclusive). */
         mutable std::shared_mutex SECTOR_MUTEX;
+        /* Record mutations share this lock; durability sync takes it exclusively. */
+        mutable std::shared_mutex SECTOR_DURABILITY_MUTEX;
         std::mutex BUFFER_MUTEX;
         std::mutex TRANSACTION_MUTEX;
 
