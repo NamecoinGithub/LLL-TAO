@@ -2411,3 +2411,72 @@ TEST_CASE("LLD shutdown retains parked journals when recovery fails",
     }
     REQUIRE(std::filesystem::exists(strPending));
 }
+
+
+TEST_CASE("deferred commit syncs files created during apply",
+          "[lld][durable][synccommit]")
+{
+    const std::string strName = "_deferred_created_sync";
+    const std::string strPath = config::GetDataDir() + strName;
+    const std::string strNewSector = strPath + "/datachain/_block.00001";
+    const std::string strHashMap = strPath + "/keychain/_hashmap.00000";
+    std::filesystem::remove_all(strPath);
+    FaultInjectingDurableIO cIO;
+    DurableIOGuard ioGuard(cIO);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 8);
+        db.RequireRollover();
+        cIO.vSyncedFiles.clear();
+        db.TxnBegin();
+        REQUIRE(db.Write(std::string("rollover-key"), uint32_t(1)));
+        REQUIRE(db.TxnCommit(false));
+        REQUIRE(std::find(cIO.vSyncedFiles.begin(), cIO.vSyncedFiles.end(), strNewSector)
+            != cIO.vSyncedFiles.end());
+        REQUIRE(std::find(cIO.vSyncedFiles.begin(), cIO.vSyncedFiles.end(), strHashMap)
+            == cIO.vSyncedFiles.end());
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("parked journal names must be canonical unsigned sequences",
+          "[lld][durable][recovery]")
+{
+    const std::string strName = "_pending_sequence_names";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        const auto WritePending = [&strPath](const std::string& strFile)
+        {
+            std::ofstream cPending(strPath + "/" + strFile, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPending.is_open());
+            cPending << "payload";
+            REQUIRE(cPending.good());
+        };
+
+        WritePending("journal.-1.pending");
+        WritePending("journal.+1.pending");
+        WritePending("journal.18446744073709551616.pending");
+        WritePending("journal.00000007.pending");
+
+        std::vector<uint64_t> vSequences;
+        REQUIRE_FALSE(db.TxnPendingSequences(vSequences));
+        REQUIRE(vSequences.empty());
+        REQUIRE_FALSE(db.TxnDiscardPendingJournals(true));
+        REQUIRE(std::filesystem::exists(strPath + "/journal.-1.pending"));
+        REQUIRE(std::filesystem::exists(strPath + "/journal.+1.pending"));
+        REQUIRE(std::filesystem::exists(strPath + "/journal.18446744073709551616.pending"));
+        REQUIRE(std::filesystem::exists(strPath + "/journal.00000007.pending"));
+
+        REQUIRE(std::filesystem::remove(strPath + "/journal.-1.pending"));
+        REQUIRE(std::filesystem::remove(strPath + "/journal.+1.pending"));
+        REQUIRE(std::filesystem::remove(strPath + "/journal.18446744073709551616.pending"));
+
+        REQUIRE(db.TxnPendingSequences(vSequences));
+        REQUIRE(vSequences == std::vector<uint64_t>{7});
+        REQUIRE(db.TxnDiscardPendingJournals(true));
+        REQUIRE_FALSE(std::filesystem::exists(strPath + "/journal.00000007.pending"));
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}

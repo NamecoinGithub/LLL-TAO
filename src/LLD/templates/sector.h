@@ -847,9 +847,10 @@ namespace LLD
          *
          *  Commit data from transaction object.
          *
-         *  @param[in] fSyncData  When false, apply the transaction but leave sector
-         *             and keychain fsyncs for a later barrier. The journal remains
-         *             the crash-recovery record until that barrier succeeds.
+         *  @param[in] fSyncData  When false, apply the transaction and fsync only
+         *             files created by that apply. Update-dirty pages stay tracked
+         *             for a later barrier. The journal remains the crash-recovery
+         *             record until that barrier succeeds.
          *
          *  @return True, if commit is successful, false otherwise.
          *
@@ -873,11 +874,13 @@ namespace LLD
          *
          *  An empty vector is a missing or empty journal directory. Enumeration
          *  failure is reported separately so recovery does not treat an I/O
-         *  error as "no parked journals".
+         *  error as "no parked journals". A journal.*.pending name that is not
+         *  the canonical unsigned sequence filename also fails listing.
          *
          *  @param[out] vSequences Cleared and filled on success.
          *
-         *  @return False if the journal directory cannot be listed.
+         *  @return False if the journal directory cannot be listed or a pending
+         *          name is not a canonical sequence.
          *
          **/
         bool TxnPendingSequences(std::vector<uint64_t>& vSequences) const;
@@ -909,7 +912,9 @@ namespace LLD
         std::string JournalPath() const;
         std::string PendingJournalPath(uint64_t nSequence) const;
         bool ApplyTransaction(SectorTransaction& tx);
+        bool SyncCreatedLocked();
         bool SyncDeferredLocked();
+        bool ParsePendingSequence(const std::string& strFile, uint64_t& nSequence) const;
         bool ParseJournal(const std::vector<uint8_t>& vBuffer,
                           SectorTransaction& tx,
                           bool& fCommit) const;

@@ -54,7 +54,9 @@ sequenceDiagram
     LLD->>Data: SyncCreated only (new files, not dirty hashmap)
     LLD->>Journal: append records and "commit", fsync file and directory
     Note over Journal: Decision is durable here
-    LLD->>Data: apply payloads, do not fsync dirty pages
+    LLD->>Data: apply payloads
+    LLD->>Data: SyncCreated for files created by that apply
+    Note over Data: New files are durable; dirty pages stay deferred
     LLD->>Park: rename journal.dat and fsync directory
     LLD-->>Accept: COMMITTED (ChainState may publish)
     Note over Park,Data: Crash rolls the parked journal forward
@@ -76,8 +78,8 @@ LLD recovery stays in that layer. There is no `BlockchainSync` class.
 
 On a deferred commit, after every selected participant has a complete journal:
 
-1. Apply each participant with `TxnCommit(false)`.
-2. Rename that participant's `journal.dat` to `journal.<8-digit sequence>.pending`.
+1. Apply each participant with `TxnCommit(false)`. That fsyncs files created during the apply, not update-dirty pages. A crash after the journal is parked must still be able to open those files while replaying.
+2. Rename that participant's `journal.dat` to `journal.<8-digit sequence>.pending`. The sequence is an unsigned decimal with no sign. Names that do not round-trip to that filename fail recovery and are not discarded.
 3. Fsync the journal directory.
 4. Leave the transaction owner committed. Do not truncate the journal.
 

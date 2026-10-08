@@ -24,17 +24,34 @@ ________________________________________________________________________________
 #include <Util/include/hex.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <set>
 
 namespace LLD
 {
+    namespace
+    {
+        /* True for any journal.*.pending name, including ones that are not a
+         * canonical sequence. Those must fail closed rather than be skipped. */
+        bool IsPendingJournalName(const std::string& strFile)
+        {
+            static const std::string strPrefix = "journal.";
+            static const std::string strSuffix = ".pending";
+            return strFile.size() > strPrefix.size() + strSuffix.size()
+                && strFile.compare(0, strPrefix.size(), strPrefix) == 0
+                && strFile.compare(strFile.size() - strSuffix.size(), strSuffix.size(), strSuffix) == 0;
+        }
+    }
+
+
     /* The Database Constructor. To determine file location and the Bytes per Record. */
     template<class KeychainType, class CacheType>
     SectorDatabase<KeychainType, CacheType>::SectorDatabase(const std::string& strNameIn,
@@ -814,9 +831,17 @@ namespace LLD
         if(!ApplyTransaction(*pTransaction))
             return false;
 
-        /* Deferred commits leave the fsync to the coordinator's barrier. The
-         * journal is not released until that barrier succeeds. */
-        if(fSyncData && !SyncDeferredLocked())
+        /* The checkpoint sync ran before this apply. Put() and Force() can
+         * create hashmap and sector files while applying, and a deferred commit
+         * parks the journal as soon as this returns. Sync those new files and
+         * their directory entries now. Update-dirty pages stay tracked until
+         * the coordinator's data barrier. */
+        if(fSyncData)
+        {
+            if(!SyncDeferredLocked())
+                return false;
+        }
+        else if(!SyncCreatedLocked())
             return false;
 
         /* Cleanup the transaction object. */
@@ -909,6 +934,38 @@ namespace LLD
 
 
     template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::ParsePendingSequence(const std::string& strFile,
+                                                                       uint64_t& nSequence) const
+    {
+        /* strtoull accepts a leading sign and saturates on overflow. Either
+         * would record a sequence whose PendingJournalPath() is a different
+         * file, so recovery would skip the real payload and discard could
+         * delete it. Accept only an unsigned decimal that round-trips to the
+         * filename this database would park. */
+        if(!IsPendingJournalName(strFile))
+            return false;
+
+        static const std::string strPrefix = "journal.";
+        static const std::string strSuffix = ".pending";
+        const std::string strSequence = strFile.substr(
+            strPrefix.size(), strFile.size() - strPrefix.size() - strSuffix.size());
+        if(strSequence.empty()
+        || strSequence.find_first_not_of("0123456789") != std::string::npos)
+            return false;
+
+        errno = 0;
+        char* pEnd = nullptr;
+        const unsigned long long nParsed = std::strtoull(strSequence.c_str(), &pEnd, 10);
+        if(errno == ERANGE || !pEnd || *pEnd != '\0' || nParsed == 0
+        || nParsed > std::numeric_limits<uint64_t>::max())
+            return false;
+
+        nSequence = static_cast<uint64_t>(nParsed);
+        return std::filesystem::path(PendingJournalPath(nSequence)).filename() == strFile;
+    }
+
+
+    template<class KeychainType, class CacheType>
     bool SectorDatabase<KeychainType, CacheType>::ApplyTransaction(SectorTransaction& tx)
     {
         pSectorKeys->BeginDurabilityTracking();
@@ -955,6 +1012,22 @@ namespace LLD
             if(!pSectorKeys->Put(cKey))
                 return debug::error(FUNCTION, "failed to write indexing entry");
         }
+
+        return true;
+    }
+
+
+    template<class KeychainType, class CacheType>
+    bool SectorDatabase<KeychainType, CacheType>::SyncCreatedLocked()
+    {
+        {
+            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
+            if(!cDurability.SyncCreated(DurableIO::Current()))
+                return debug::error(FUNCTION, "failed to sync created sector files");
+        }
+
+        if(!pSectorKeys->SyncCreatedFiles())
+            return debug::error(FUNCTION, "failed to sync created keychain storage");
 
         return true;
     }
@@ -1085,23 +1158,18 @@ namespace LLD
                 return debug::error(FUNCTION, strName, " failed to list parked journals");
             }
 
-            static const std::string strPrefix = "journal.";
-            static const std::string strSuffix = ".pending";
-            if(strFile.size() <= strPrefix.size() + strSuffix.size())
-                continue;
-            if(strFile.compare(0, strPrefix.size(), strPrefix) != 0)
-                continue;
-            if(strFile.compare(strFile.size() - strSuffix.size(), strSuffix.size(), strSuffix) != 0)
+            if(!IsPendingJournalName(strFile))
                 continue;
 
-            const std::string strSequence = strFile.substr(
-                strPrefix.size(), strFile.size() - strPrefix.size() - strSuffix.size());
-            char* pEnd = nullptr;
-            const unsigned long long nSequence = std::strtoull(strSequence.c_str(), &pEnd, 10);
-            if(!pEnd || *pEnd != '\0' || nSequence == 0)
-                continue;
+            uint64_t nSequence = 0;
+            if(!ParsePendingSequence(strFile, nSequence))
+            {
+                vSequences.clear();
+                return debug::error(FUNCTION, strName,
+                    " parked journal name is not a canonical sequence");
+            }
 
-            vSequences.push_back(static_cast<uint64_t>(nSequence));
+            vSequences.push_back(nSequence);
         }
 
         std::sort(vSequences.begin(), vSequences.end());
@@ -1145,9 +1213,18 @@ namespace LLD
         if(!std::filesystem::exists(strDirectory, ec))
             return !ec;
 
-        for(const std::filesystem::directory_entry& cEntry :
-            std::filesystem::directory_iterator(strDirectory, ec))
+        /* Range-for uses the throwing iterator increment. A listing error in
+         * the destructor must return false and keep the recovery records. */
+        std::filesystem::directory_iterator itEntries(strDirectory, ec);
+        if(ec)
+            return debug::error(FUNCTION, strName, " failed to list parked journals");
+
+        const std::filesystem::directory_iterator itEnd;
+        std::vector<std::filesystem::path> vDiscard;
+        while(itEntries != itEnd)
         {
+            const std::filesystem::directory_entry cEntry = *itEntries;
+            itEntries.increment(ec);
             if(ec)
                 return debug::error(FUNCTION, strName, " failed to list parked journals");
 
@@ -1155,17 +1232,25 @@ namespace LLD
                 return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
 
             const std::string strFile = cEntry.path().filename().string();
-            if(strFile.rfind("journal.", 0) != 0 || strFile.size() < 17
-            || strFile.compare(strFile.size() - 8, 8, ".pending") != 0)
+            if(!IsPendingJournalName(strFile))
                 continue;
 
-            std::error_code ecRemove;
-            if(!std::filesystem::remove(cEntry.path(), ecRemove) || ecRemove)
-                return debug::error(FUNCTION, strName, " failed to discard parked journal");
+            uint64_t nSequence = 0;
+            if(!ParsePendingSequence(strFile, nSequence))
+                return debug::error(FUNCTION, strName, " parked journal name is not a canonical sequence");
+
+            vDiscard.push_back(cEntry.path());
         }
 
-        if(ec)
-            return debug::error(FUNCTION, strName, " failed to list parked journals");
+        for(const std::filesystem::path& pathPending : vDiscard)
+        {
+            if(!fAfterDataSync && !MayDiscardPendingJournals())
+                return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
+
+            std::error_code ecRemove;
+            if(!std::filesystem::remove(pathPending, ecRemove) || ecRemove)
+                return debug::error(FUNCTION, strName, " failed to discard parked journal");
+        }
 
         if(!DurableIO::Current().SyncDirectoryChain(strDirectory))
             return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
