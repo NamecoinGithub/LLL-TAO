@@ -2228,3 +2228,107 @@ TEST_CASE("LLD reports recovery-required rather than abort after partial journal
     REQUIRE(LLD::Ledger->Exists(key));
     REQUIRE(LLD::Ledger->Erase(key));
 }
+
+
+TEST_CASE("DurabilityTracker syncs created files without flushing dirty updates",
+          "[lld][durable]")
+{
+    const std::string strDirectory =
+        debug::safe_printstr(config::GetDataDir(), "_durable_created_only_test");
+    const std::string strCreated = strDirectory + "/created.dat";
+    const std::string strDirty = strDirectory + "/dirty.dat";
+    std::filesystem::create_directories(strDirectory);
+    {
+        std::ofstream created(strCreated, std::ios::binary | std::ios::trunc);
+        std::ofstream dirty(strDirty, std::ios::binary | std::ios::trunc);
+        REQUIRE(created.is_open());
+        REQUIRE(dirty.is_open());
+        created << "new";
+        dirty << "update";
+    }
+
+    LLD::DurabilityTracker cTracker;
+    cTracker.MarkCreated(strCreated);
+    cTracker.MarkDirty(strDirty);
+
+    FaultInjectingDurableIO cIO;
+    cIO.fSkipDirectorySync = true;
+    REQUIRE(cTracker.SyncCreated(cIO));
+    REQUIRE(cIO.vSyncedFiles == std::vector<std::string>{strCreated});
+
+    cIO.vSyncedFiles.clear();
+    REQUIRE(cTracker.Sync(cIO));
+    REQUIRE(cIO.vSyncedFiles == std::vector<std::string>{strDirty});
+
+    REQUIRE(std::filesystem::remove_all(strDirectory) > 0);
+}
+
+
+TEST_CASE("LLD parks journals until the sync-commit barrier",
+          "[lld][txncommit][durable]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+    LLD::ResetTxnRecoveryRequired();
+
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("sync-commit-parked-journal"), 1);
+    LLD::Ledger->Erase(key);
+
+    struct PendingRecoveryGuard
+    {
+        std::pair<std::string, uint32_t> key;
+
+        ~PendingRecoveryGuard()
+        {
+            const bool fPending =
+                HasPendingJournal("_CONTRACT") || HasPendingJournal("_REGISTER")
+                || HasPendingJournal("_LEDGER") || HasPendingJournal("_TRUST")
+                || HasPendingJournal("_LEGACY");
+            if(fPending || JournalSize("_LEDGER") > 0 || JournalSize("_CONTRACT") > 0)
+            {
+                LLD::ResetTxnRecoveryRequired();
+                LLD::TxnRecovery();
+            }
+            if(LLD::Ledger)
+                LLD::Ledger->Erase(key);
+        }
+    } cleanup{key};
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, LLD::SYNC_COMMIT_BLOCKS));
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::COMMITTED);
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 77);
+    REQUIRE(JournalSize("_LEDGER") == 0);
+    REQUIRE(JournalSize("_CONTRACT") == 0);
+    REQUIRE(HasPendingJournal("_LEDGER"));
+    REQUIRE(HasPendingJournal("_CONTRACT"));
+    REQUIRE(HasPendingJournal("_REGISTER"));
+    REQUIRE(HasPendingJournal("_TRUST"));
+    REQUIRE(HasPendingJournal("_LEGACY"));
+
+    /* Drop the applied record. Crash recovery must restore it from the parked
+     * journal, which is the durable decision until the data barrier. */
+    REQUIRE(LLD::Ledger->Erase(key));
+    REQUIRE_FALSE(LLD::Ledger->Exists(key));
+
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERED);
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 77);
+    REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
+    REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+    REQUIRE_FALSE(HasPendingJournal("_TRUST"));
+    REQUIRE_FALSE(HasPendingJournal("_LEGACY"));
+    REQUIRE(JournalSize("_LEDGER") == 0);
+}

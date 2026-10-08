@@ -296,7 +296,20 @@ namespace LLD
             }
         }
 
-        if(!fAllSatisfied || !vComplete.empty() || !setSequences.empty())
+        /* Absent journals are the normal startup path. Truncate only when a
+         * commit was applied, a parked journal was discarded, or an incomplete
+         * journal.dat still has bytes. */
+        bool fNeedsRelease = !vComplete.empty() || !setSequences.empty();
+        if(!fAllSatisfied)
+        {
+            for(PhysicalDB* pDatabase : vParticipants)
+            {
+                if(pDatabase && pDatabase->TxnJournalBytes() > 0)
+                    fNeedsRelease = true;
+            }
+        }
+
+        if(fNeedsRelease)
         {
             if(!ReleasePhysicalTransactions(nInstances))
             {
