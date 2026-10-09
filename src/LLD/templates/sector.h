@@ -36,7 +36,6 @@ ________________________________________________________________________________
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
-#include <vector>
 
 namespace LLD
 {
@@ -828,11 +827,8 @@ namespace LLD
          *
          *  Write the transaction commitment message.
          *
-         *  @param[in] fDeferDirtySync  When true, sync only newly created keychain
-         *             files. Update-dirty files stay tracked until a later barrier.
-         *
          **/
-        bool TxnCheckpoint(bool fDeferDirtySync = false);
+        bool TxnCheckpoint();
 
 
         /** TxnRelease
@@ -847,15 +843,10 @@ namespace LLD
          *
          *  Commit data from transaction object.
          *
-         *  @param[in] fSyncData  When false, apply the transaction and fsync only
-         *             files created by that apply. Update-dirty pages stay tracked
-         *             for a later barrier. The journal remains the crash-recovery
-         *             record until that barrier succeeds.
-         *
          *  @return True, if commit is successful, false otherwise.
          *
          **/
-        bool TxnCommit(bool fSyncData = true);
+        bool TxnCommit();
 
 
         /** TxnRecovery
@@ -864,98 +855,6 @@ namespace LLD
          *
          **/
         RECOVERY TxnRecovery();
-
-
-        /** Bytes currently stored in journal.dat, or 0 if it is absent. */
-        uint64_t TxnJournalBytes() const;
-
-
-        /** True when journal.dat is a non-empty or non-regular crash record.
-         *
-         *  A missing file and an empty regular file are the released state.
-         *  An existing non-regular entry, including a symlink, is a recovery
-         *  failure, not absence. The check does not follow links.
-         */
-        bool TxnHasRecoverableJournal() const;
-
-
-        /** Stop background writers and fsync sector and keychain files.
-         *
-         *  Safe to call more than once. Does not discard journals or free
-         *  the database. Shutdown uses this so every recovery-group participant
-         *  can sync before any parked journal is deleted.
-         */
-        bool QuiesceAndSync();
-
-
-        /** Parked journal sequence numbers, in ascending order.
-         *
-         *  An empty vector is a missing or empty journal directory. Enumeration
-         *  failure is reported separately so recovery does not treat an I/O
-         *  error as "no parked journals". A journal.*.pending name that is not
-         *  the canonical unsigned sequence filename also fails listing.
-         *
-         *  @param[out] vSequences Cleared and filled on success.
-         *
-         *  @return False if the journal directory cannot be listed or a pending
-         *          name is not a canonical sequence.
-         *
-         **/
-        bool TxnPendingSequences(std::vector<uint64_t>& vSequences) const;
-
-
-        /** Rename journal.dat to a pending journal and sync its directory. */
-        bool TxnParkJournal(uint64_t nSequence);
-
-
-        /** Delete parked journals only after their data sync has succeeded.
-         *
-         *  @param[in] fAfterDataSync  True only for the coordinator barrier that
-         *             already fsynced every participant in the recovery group.
-         *             Per-database shutdown passes false. A sequence owned by a
-         *             group, or an untracked sequence on a shared database, is
-         *             kept until that group barrier has quiesced every participant.
-         *             An existing non-regular pending entry, including a symlink
-         *             or directory, is retained and fails the discard. If an
-         *             earlier removal in this call succeeded, the journal
-         *             directory is synced before that failure is returned.
-         */
-        bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
-
-
-        /** Delete one recovery group's parked sequences after that group's data sync.
-         *
-         *  A missing sequence is already gone and is success. An existing
-         *  non-regular path fails and is left in place. Sequences not listed
-         *  are kept, so the other recovery group can still replay them. If an
-         *  earlier removal in this call succeeded, the journal directory is
-         *  synced before a later removal or type error is returned.
-         *
-         *  @param[in] vSequences  Canonical pending sequences owned by the group
-         *             whose data barrier just succeeded.
-         */
-        bool TxnDiscardPendingSequences(const std::vector<uint64_t>& vSequences);
-
-
-        /** Fsync sector and keychain files still tracked from deferred applies. */
-        bool TxnSyncDeferred();
-
-
-        /** Replay one parked journal if this database has it.
-         *  A missing file is success. An existing non-regular path is failure. */
-        bool TxnReplayPending(uint64_t nSequence);
-
-    private:
-        std::string JournalDirectory() const;
-        std::string JournalPath() const;
-        std::string PendingJournalPath(uint64_t nSequence) const;
-        bool ApplyTransaction(SectorTransaction& tx);
-        bool SyncCreatedLocked();
-        bool SyncDeferredLocked();
-        bool ParsePendingSequence(const std::string& strFile, uint64_t& nSequence) const;
-        bool ParseJournal(const std::vector<uint8_t>& vBuffer,
-                          SectorTransaction& tx,
-                          bool& fCommit) const;
 
     };
 }

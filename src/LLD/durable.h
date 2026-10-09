@@ -60,23 +60,14 @@ namespace LLD
         void MarkDirty(const std::string& strPath);
         void MarkCreated(const std::string& strPath);
         void MarkDirectoryCreated(const std::string& strPath);
-
-        /** Fsync dirty files and their directory chains. Clears every obligation that succeeds. */
         bool Sync(DurableIO& cIO);
-
-        /** Fsync newly created files and their directories only.
-         *  Update-dirty files stay tracked for a later Sync(). */
-        bool SyncCreated(DurableIO& cIO);
 
     private:
         void TrackParentDirectories(const std::string& strPath);
-        void RememberCreatedDirectory(const std::string& strPath);
-        bool SyncDirectoryLeaves(DurableIO& cIO, std::set<std::string>& setDirectories, bool fClearUnsynced);
 
         std::set<std::string> setDirtyFiles;
         std::set<std::string> setNewEntries;
         std::set<std::string> setUnsyncedDirectories;
-        std::set<std::string> setCreatedDirectories;
     };
 }
 
