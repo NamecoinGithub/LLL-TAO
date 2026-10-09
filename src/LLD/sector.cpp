@@ -39,7 +39,6 @@ namespace LLD
     : CONDITION_MUTEX()
     , CONDITION()
     , SECTOR_MUTEX()
-    , SECTOR_DURABILITY_MUTEX()
     , BUFFER_MUTEX()
     , TRANSACTION_MUTEX()
     , strBaseLocation(config::GetDataDir() + strNameIn + "/datachain/")
@@ -94,7 +93,7 @@ namespace LLD
             MeterThread.join();
 
         {
-            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
+            WRITE_LOCK(SECTOR_MUTEX);
             if(!cDurability.Sync(DurableIO::Current()))
                 debug::error(FUNCTION, "failed to sync sector files during shutdown");
         }
@@ -285,8 +284,10 @@ namespace LLD
         if(nSize != key.nSectorSize)
             return false;
 
+        /* Write the data into the memory cache. */
+        cachePool->Put(key, vKey, vData, false);
+
         {
-            SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
             WRITE_LOCK(SECTOR_MUTEX);
 
             /* Find the file stream for LRU cache. */
@@ -327,9 +328,6 @@ namespace LLD
             cDurability.MarkDirty(debug::safe_printstr(
                 strBaseLocation, "_block.", std::setfill('0'), std::setw(5), key.nSectorFile));
 
-            /* Update the memory cache after the sector write succeeds. */
-            cachePool->Put(key, vKey, vData, false);
-
             /* Records flushed indicator. */
             ++nRecordsFlushed;
             nBytesWrote += static_cast<uint32_t>(vData.size());
@@ -355,7 +353,6 @@ namespace LLD
             SectorKey key;
 
             {
-                SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
                 WRITE_LOCK(SECTOR_MUTEX);
 
                 /* Create new file if above current file size. */
@@ -493,7 +490,6 @@ namespace LLD
             return true;
 
         {
-            SHARED_LOCK(SECTOR_DURABILITY_MUTEX);
             WRITE_LOCK(SECTOR_MUTEX);
 
             /* Find the file stream for LRU cache. */
@@ -836,7 +832,7 @@ namespace LLD
         /* Make all pending sector writes and their new directory entries durable
          * before the transaction journal can be released. */
         {
-            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
+            WRITE_LOCK(SECTOR_MUTEX);
             if(!cDurability.Sync(DurableIO::Current()))
                 return debug::error(FUNCTION, "failed to sync sector files");
         }
