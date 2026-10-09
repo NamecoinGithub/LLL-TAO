@@ -168,6 +168,122 @@ namespace TAO::API
     }
 
 
+    namespace
+    {
+        /* Records SessionDB links that Index() may update. Index() writes the previous
+         * or first link, then the tx record, then the last link, and returns false after
+         * any individual write. Transaction::Delete() uses the same non-atomic sequence,
+         * so a failed Index() is undone by restoring this snapshot instead. */
+        struct SessionIndexSnapshot
+        {
+            /* True when a record existed but could not be read. Restoring would guess. */
+            bool        fIncomplete = false;
+
+            bool        fHavePrev   = false;
+            Transaction txPrev;
+
+            bool        fHaveFirst  = false;
+            uint512_t   hashFirst   = 0;
+
+            /* Confirmed absent, as opposed to an unreadable first index. */
+            bool        fAbsentFirst = false;
+
+            bool        fHaveLast   = false;
+            uint512_t   hashLast    = 0;
+
+            bool        fHaveTx     = false;
+            Transaction txStored;
+
+            /* Confirmed absent, as opposed to an unreadable tx record. */
+            bool        fAbsentTx   = false;
+        };
+
+
+        /* Read the SessionDB records Index() can mutate. Confirmed absence is not an error. */
+        bool CaptureSessionIndex(const Transaction& tIndex, const uint512_t& hashTx, SessionIndexSnapshot& snap)
+        {
+            if(!LLD::Sessions)
+                return false;
+
+            if(!tIndex.IsFirst())
+            {
+                if(LLD::Sessions->HasTx(tIndex.hashPrevTx))
+                {
+                    snap.fHavePrev = LLD::Sessions->ReadTx(tIndex.hashPrevTx, snap.txPrev);
+                    if(!snap.fHavePrev)
+                        snap.fIncomplete = true;
+                }
+            }
+            else if(LLD::Sessions->HasFirst(tIndex.hashGenesis))
+            {
+                snap.fHaveFirst = LLD::Sessions->ReadFirst(tIndex.hashGenesis, snap.hashFirst);
+                if(!snap.fHaveFirst)
+                    snap.fIncomplete = true;
+            }
+            else
+                snap.fAbsentFirst = true;
+
+            snap.fHaveLast = LLD::Sessions->ReadLast(tIndex.hashGenesis, snap.hashLast);
+
+            if(LLD::Sessions->HasTx(hashTx))
+            {
+                snap.fHaveTx = LLD::Sessions->ReadTx(hashTx, snap.txStored);
+                if(!snap.fHaveTx)
+                    snap.fIncomplete = true;
+            }
+            else
+                snap.fAbsentTx = true;
+
+            return true;
+        }
+
+
+        /* Restore records captured before Index(). Only erase a link that was confirmed
+         * absent and now points at this tx. An incomplete snapshot cannot be restored. */
+        bool RestoreSessionIndex(const Transaction& tIndex, const uint512_t& hashTx, const SessionIndexSnapshot& snap)
+        {
+            if(!LLD::Sessions)
+                return debug::error(FUNCTION, "session database unavailable");
+
+            if(snap.fIncomplete)
+                return debug::error(FUNCTION, "incomplete session index snapshot for ", VARIABLE(hashTx.SubString()));
+
+            if(!tIndex.IsFirst())
+            {
+                if(snap.fHavePrev && !LLD::Sessions->WriteTx(tIndex.hashPrevTx, snap.txPrev))
+                    return debug::error(FUNCTION, "failed to restore previous ", VARIABLE(tIndex.hashPrevTx.SubString()));
+            }
+            else if(snap.fHaveFirst)
+            {
+                if(!LLD::Sessions->WriteFirst(tIndex.hashGenesis, snap.hashFirst))
+                    return debug::error(FUNCTION, "failed to restore first index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+            }
+            else if(snap.fAbsentFirst)
+            {
+                uint512_t hashNow = 0;
+                if(LLD::Sessions->ReadFirst(tIndex.hashGenesis, hashNow) && hashNow == hashTx
+                && !LLD::Sessions->EraseFirst(tIndex.hashGenesis))
+                    return debug::error(FUNCTION, "failed to erase partial first index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+            }
+
+            /* Index() does not publish the last link when it returns false. Restore a
+             * captured value, but do not erase an unreadable one. */
+            if(snap.fHaveLast && !LLD::Sessions->WriteLast(tIndex.hashGenesis, snap.hashLast))
+                return debug::error(FUNCTION, "failed to restore last index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+
+            if(snap.fHaveTx)
+            {
+                if(!LLD::Sessions->WriteTx(hashTx, snap.txStored))
+                    return debug::error(FUNCTION, "failed to restore ", VARIABLE(hashTx.SubString()));
+            }
+            else if(snap.fAbsentTx && LLD::Sessions->HasTx(hashTx) && !LLD::Sessions->EraseTx(hashTx))
+                return debug::error(FUNCTION, "failed to erase partial ", VARIABLE(hashTx.SubString()));
+
+            return true;
+        }
+    }
+
+
     /* Builds a transaction based on a list of contracts, to be deployed as a single tx or batched. */
     std::vector<uint512_t> BuildAndAccept(const encoding::json& jParams, const std::vector<TAO::Operation::Contract>& vContracts,
                                           const uint8_t nUnlockedActions)
@@ -324,12 +440,49 @@ namespace TAO::API
                 TAO::API::Transaction tIndex =
                     TAO::API::Transaction(tx);
 
+                /* Capture links before Index() so a partial write can be restored. */
+                SessionIndexSnapshot snapIndex;
+                const bool fCapturedIndex = CaptureSessionIndex(tIndex, hashTx, snapIndex);
+
                 /* Index the transaction to the database. */
                 if(!tIndex.Index(hashTx))
                 {
                     const std::string strIndexError = debug::GetLastError();
-                    if(!tIndex.Delete(hashTx))
-                        debug::warning(FUNCTION, "failed to rollback partial index ", VARIABLE(hashTx.SubString()));
+
+                    /* Accept() holds this mutex across the shared MEMPOOL overlay.
+                     * MemoryBegin() replaces that overlay, so the restore, disconnect,
+                     * and removal must stay serialized with Accept() and Check(). */
+                    const std::scoped_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX);
+
+                    /* Delete() commits each SessionDB write as it goes and returns
+                     * false after any one of them fails. Restore the pre-index
+                     * snapshot instead, and retry that restore. If it still fails,
+                     * keep the accepted mempool entry rather than dropping a tx
+                     * whose session links may be only partly undone. */
+                    bool fRestored = false;
+                    std::string strRestoreError;
+                    if(!fCapturedIndex)
+                        strRestoreError = "failed to capture session index";
+                    else if(snapIndex.fIncomplete)
+                        strRestoreError = "incomplete session index snapshot";
+                    else
+                    {
+                        for(uint32_t nTry = 0; nTry < 3 && !fRestored; ++nTry)
+                            fRestored = RestoreSessionIndex(tIndex, hashTx, snapIndex);
+
+                        if(!fRestored)
+                            strRestoreError = debug::GetLastError();
+                    }
+
+                    if(!fRestored)
+                    {
+                        throw Exception(-32, "Failed to roll back session index for ", hashTx.SubString(),
+                                        "; leaving accepted mempool entry in place: ", strRestoreError,
+                                        " (index error: ", strIndexError, ")");
+                    }
+
+                    /* A failed restore attempt must not leak into the index error below. */
+                    debug::strLastError.clear();
 
                     /* Accept() already committed Connect(FLAGS::MEMPOOL). Remove() only
                      * erases pool maps, so roll the overlay back under a MEMPOOL memory
