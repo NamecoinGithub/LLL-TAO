@@ -105,7 +105,7 @@ sequenceDiagram
 
 - **I1.** A transaction in `mapLedger` has already had `Connect(FLAGS::MEMPOOL)` committed. Erasing the map entry does not undo that connect.
 - **I2.** `Remove(hash)` only erases pool maps (`mapLedger`, `mapClaimed`, orphans, conflicts, rejected, legacy). It does not call `Disconnect`.
-- **I3.** To drop a live transaction, the caller must `Disconnect(FLAGS::MEMPOOL)` under `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, `TxnCommit` that memory transaction, and only then `Remove`. If disconnect or commit fails, `TxnAbort` and leave the map entry in place.
+- **I3.** To drop a live transaction, the caller must `Disconnect(FLAGS::MEMPOOL)` under `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, `TxnCommit` that memory transaction, and only then `Remove`. If disconnect or commit fails, `TxnAbort` and leave the map entry in place. Exception: `Mempool::Check()` orphan eviction does not leave the entry in place. After `TxnAbort`, it calls `Remove(hashTx)` to force-evict a stuck orphan whose `Disconnect` throws or returns false. That `Remove` is not a successful rollback, and no other caller may copy it.
 - **I4.** `Accept` of a parent can admit descendants before it returns. Rolling back only the parent leaves those descendants in `mapLedger` with a live predecessor claim. Walk `ClaimedDescendants` and disconnect **nearest child last** (reverse iteration), then the parent, in one MEMPOOL memory transaction.
 - **I5.** `Accept` can return true without inserting `mapLedger` (orphan predecessor, or a path that parked the tx). Callers that index or broadcast a "live" tx must check `InPool(hash)`, not the boolean alone.
 - **I6.** `mapClaimed` has one child per predecessor. `ClaimedDescendants` walks that chain, nearest first, and stops on a cycle, a missing `mapLedger` entry, or a guard past `mapLedger.size()`.
@@ -125,7 +125,7 @@ flowchart TD
     I -->|yes| J[Remove descendants then parent]
 ```
 
-`Mempool::Check()` follows I3 for its own orphan-chain eviction: it holds `MUTEX`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, disconnects in reverse sequence order, and aborts rather than erasing if `Disconnect` throws or returns false.
+`Mempool::Check()` holds `MUTEX`, then `Transaction::IndexLock(genesis)`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, and disconnects in reverse sequence order. It is an exception to I3: if `Disconnect` throws or returns false, it aborts the memory transaction and then explicitly calls `Remove(hashTx)` to force-evict that stuck orphan so the sweep cannot loop on it forever. It does not leave the map entry in place. A disconnect that returns true is erased only after that successful disconnect, and the memory transaction is committed only if it was not aborted.
 
 ---
 

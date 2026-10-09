@@ -385,8 +385,10 @@ namespace TAO::API
     /* Delete this transaction from the logical database. */
     bool Transaction::Delete(const uint512_t& hash)
     {
-        /* Serialize with Index() and snapshot restore. Callers that also hold
-         * mempool.MUTEX must already hold it; do not acquire it here. */
+        /* Serialize with Index() and snapshot restore. This does not cover a
+         * caller's preceding Disconnect/Remove: that sequence must already
+         * hold IndexLock, after mempool.MUTEX. Do not acquire the pool lock
+         * here. */
         RECURSIVE(IndexLock(hashGenesis));
         /* Read our previous transaction. */
         if(!IsFirst())

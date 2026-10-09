@@ -1184,6 +1184,14 @@ namespace TAO
                             else
                                 debug::notice(FUNCTION, "ORPHAN DETECTED AT INDEX ", n, ": last hash mismatch ", vtx[n].hashPrevTx.SubString());
 
+                            /* Pool mutex is already held. Take the per-genesis index lock
+                             * before disconnect, remove, and delete. Delete() locks
+                             * again, but that is too late: IndexSigchain() can advance
+                             * this genesis between Remove() and Delete(), and Delete()
+                             * then rewrites the previous/last links from stale state. */
+                            std::unique_lock<std::recursive_mutex> INDEX_LOCK(
+                                TAO::API::Transaction::IndexLock(rTransaction.first));
+
                             /* Begin the memory transaction. */
                             LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
 

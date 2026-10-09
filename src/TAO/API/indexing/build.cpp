@@ -89,6 +89,15 @@ namespace TAO::API
             hashLast = hashEvent;
         }
 
+        /* Hold the session index lock before the first indexing mutation and
+         * through both rebuild loops. IndexSession()/IndexSigchain() and the
+         * later Index() loop both write indexing.last. Ledger-loaded API
+         * transactions have hashNextTx == 0, so an interleaved Index() can
+         * otherwise rewrite indexing.last to an older transaction. Each Index()
+         * takes the lock again. Release before BroadcastUnconfirmed(), which
+         * takes mempool.MUTEX (callers lock the pool first). */
+        std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
+
         /* Check that our ledger indexes are up-to-date with our logical indexes. */
         uint512_t hashLedger = 0;
         if(LLD::Ledger->ReadLast(hashGenesis, hashLedger, TAO::Ledger::FLAGS::MEMPOOL))
@@ -165,11 +174,6 @@ namespace TAO::API
             /* Only output our data when we have indexes to build. */
             if(!vIndex.empty())
                 debug::log(1, FUNCTION, "Updating ", vIndex.size(), " indexes for genesis=", hashGenesis.SubString());
-
-            /* Hold the session index lock across the whole rebuild. Each
-             * Index() takes it again. Release before BroadcastUnconfirmed(),
-             * which takes mempool.MUTEX (callers lock the pool first). */
-            std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
 
             /* Reverse iterate our list of entries and index. */
             for(auto hashTx = vIndex.rbegin(); hashTx != vIndex.rend(); ++hashTx)
