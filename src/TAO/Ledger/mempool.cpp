@@ -967,6 +967,45 @@ namespace TAO
         }
 
 
+        /* Checks if a transaction is in the live ledger pool. */
+        bool Mempool::InPool(const uint512_t& hashTx) const
+        {
+            RECURSIVE(MUTEX);
+
+            return mapLedger.count(hashTx);
+        }
+
+
+        /* Live ledger-pool transactions that claim hashParent, nearest first. */
+        void Mempool::ClaimedDescendants(const uint512_t& hashParent, std::vector<TAO::Ledger::Transaction>& vtx) const
+        {
+            RECURSIVE(MUTEX);
+
+            vtx.clear();
+
+            uint512_t hashPrev = hashParent;
+            uint32_t nGuard = 0;
+            const uint32_t nLimit = static_cast<uint32_t>(mapLedger.size()) + 1;
+            while(mapClaimed.count(hashPrev))
+            {
+                /* A cycle or a claim with no live ledger entry is not a tail
+                 * this caller can safely disconnect. Stop rather than guess. */
+                if(++nGuard > nLimit)
+                    break;
+
+                const uint512_t hashChild = mapClaimed.at(hashPrev);
+                const auto it = mapLedger.find(hashChild);
+                if(it == mapLedger.end())
+                    break;
+
+                TAO::Ledger::Transaction tx = it->second;
+                tx.hashCache = hashChild;
+                vtx.push_back(tx);
+                hashPrev = hashChild;
+            }
+        }
+
+
         /* Checks if a genesis exists. */
         bool Mempool::Has(const uint256_t& hashGenesis) const
         {

@@ -239,7 +239,9 @@ namespace TAO::API
 
 
         /* Restore records captured before Index(). Only erase a link that was confirmed
-         * absent and now points at this tx. An incomplete snapshot cannot be restored. */
+         * absent and now points at this tx. An incomplete snapshot cannot be restored.
+         * A failed read of a key that still exists is unverifiable (Read returns false
+         * for both absence and an unreadable value) and must not be reported as success. */
         bool RestoreSessionIndex(const Transaction& tIndex, const uint512_t& hashTx, const SessionIndexSnapshot& snap)
         {
             if(!LLD::Sessions)
@@ -261,8 +263,15 @@ namespace TAO::API
             else if(snap.fAbsentFirst)
             {
                 uint512_t hashNow = 0;
-                if(LLD::Sessions->ReadFirst(tIndex.hashGenesis, hashNow) && hashNow == hashTx
-                && !LLD::Sessions->EraseFirst(tIndex.hashGenesis))
+                const bool fReadFirst = LLD::Sessions->ReadFirst(tIndex.hashGenesis, hashNow);
+                if(!fReadFirst)
+                {
+                    /* HasFirst is true when the key exists even if the value cannot
+                     * be deserialized. That is not confirmed absence. */
+                    if(LLD::Sessions->HasFirst(tIndex.hashGenesis))
+                        return debug::error(FUNCTION, "unreadable first index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+                }
+                else if(hashNow == hashTx && !LLD::Sessions->EraseFirst(tIndex.hashGenesis))
                     return debug::error(FUNCTION, "failed to erase partial first index for ", VARIABLE(tIndex.hashGenesis.SubString()));
             }
 
@@ -276,8 +285,17 @@ namespace TAO::API
                 if(!LLD::Sessions->WriteTx(hashTx, snap.txStored))
                     return debug::error(FUNCTION, "failed to restore ", VARIABLE(hashTx.SubString()));
             }
-            else if(snap.fAbsentTx && LLD::Sessions->HasTx(hashTx) && !LLD::Sessions->EraseTx(hashTx))
-                return debug::error(FUNCTION, "failed to erase partial ", VARIABLE(hashTx.SubString()));
+            else if(snap.fAbsentTx && LLD::Sessions->HasTx(hashTx))
+            {
+                /* HasTx alone is not a readable restore. An existing record that
+                 * cannot be read must fail closed so the accepted tx is kept. */
+                Transaction txNow;
+                if(!LLD::Sessions->ReadTx(hashTx, txNow))
+                    return debug::error(FUNCTION, "unreadable partial ", VARIABLE(hashTx.SubString()));
+
+                if(!LLD::Sessions->EraseTx(hashTx))
+                    return debug::error(FUNCTION, "failed to erase partial ", VARIABLE(hashTx.SubString()));
+            }
 
             return true;
         }
@@ -427,15 +445,28 @@ namespace TAO::API
                 break;
 
             const bool fActiveSession = Authentication::Active(tx.hashGenesis);
+            const uint512_t hashTx = tx.GetHash();
+
+            /* Check() can disconnect this tx and delete its API indexes as soon
+             * as Accept() drops the mempool mutex. Hold that lock across accept,
+             * snapshot, index, and rollback so those steps cannot interleave. */
+            std::unique_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX, std::defer_lock);
+            if(fActiveSession)
+                POOL_LOCK.lock();
 
             /* Execute the operations layer. */
             if(!TAO::Ledger::mempool.Accept(tx))
                 throw Exception(-32, "Failed to accept");
 
             /* Check that we have an active session to index for. */
-            const uint512_t hashTx = tx.GetHash();
             if(fActiveSession)
             {
+                /* Accept() can return true without inserting mapLedger (orphan
+                 * predecessor). Do not index or snapshot a tx Check() can already
+                 * have removed, and do not index one that was never live. */
+                if(!TAO::Ledger::mempool.InPool(hashTx))
+                    throw Exception(-32, "Transaction was not admitted to the live mempool");
+
                 /* Build an API transaction. */
                 TAO::API::Transaction tIndex =
                     TAO::API::Transaction(tx);
@@ -448,11 +479,6 @@ namespace TAO::API
                 if(!tIndex.Index(hashTx))
                 {
                     const std::string strIndexError = debug::GetLastError();
-
-                    /* Accept() holds this mutex across the shared MEMPOOL overlay.
-                     * MemoryBegin() replaces that overlay, so the restore, disconnect,
-                     * and removal must stay serialized with Accept() and Check(). */
-                    const std::scoped_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX);
 
                     /* Delete() commits each SessionDB write as it goes and returns
                      * false after any one of them fails. Restore the pre-index
@@ -484,24 +510,45 @@ namespace TAO::API
                     /* A failed restore attempt must not leak into the index error below. */
                     debug::strLastError.clear();
 
-                    /* Accept() already committed Connect(FLAGS::MEMPOOL). Remove() only
-                     * erases pool maps, so roll the overlay back under a MEMPOOL memory
-                     * transaction before dropping the entry. */
+                    /* Accept() already committed Connect(FLAGS::MEMPOOL) for this tx
+                     * and for any orphan/conflict tail it admitted. Remove() only
+                     * erases pool maps, so roll the whole claimed chain back under
+                     * one MEMPOOL memory transaction before dropping the entries.
+                     * Disconnect descendants first so their predecessor is still live. */
+                    std::vector<TAO::Ledger::Transaction> vDescendants;
+                    TAO::Ledger::mempool.ClaimedDescendants(hashTx, vDescendants);
+
                     LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
 
                     bool fRolledBack = false;
+                    uint512_t hashFailed = hashTx;
                     try
                     {
-                        fRolledBack = tx.Disconnect(TAO::Ledger::FLAGS::MEMPOOL);
+                        fRolledBack = true;
+                        for(auto it = vDescendants.rbegin(); it != vDescendants.rend(); ++it)
+                        {
+                            hashFailed = it->GetHash();
+                            if(!it->Disconnect(TAO::Ledger::FLAGS::MEMPOOL))
+                            {
+                                fRolledBack = false;
+                                break;
+                            }
+                        }
+
+                        if(fRolledBack)
+                        {
+                            hashFailed = hashTx;
+                            fRolledBack = tx.Disconnect(TAO::Ledger::FLAGS::MEMPOOL);
+                        }
                     }
                     catch(const std::exception& e)
                     {
-                        debug::error(FUNCTION, "mempool rollback threw for ", hashTx.SubString(), ": ", e.what());
+                        debug::error(FUNCTION, "mempool rollback threw for ", hashFailed.SubString(), ": ", e.what());
                         fRolledBack = false;
                     }
                     catch(...)
                     {
-                        debug::error(FUNCTION, "mempool rollback threw for ", hashTx.SubString());
+                        debug::error(FUNCTION, "mempool rollback threw for ", hashFailed.SubString());
                         fRolledBack = false;
                     }
 
@@ -510,8 +557,8 @@ namespace TAO::API
                         const std::string strRollbackError = debug::GetLastError();
                         LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
 
-                        /* Leave the pool entry in place: the overlay is still live. */
-                        throw Exception(-32, "Failed to roll back mempool transaction ", hashTx.SubString(),
+                        /* Leave the pool entries in place: the overlay is still live. */
+                        throw Exception(-32, "Failed to roll back mempool transaction ", hashFailed.SubString(),
                                         " after index failure: ", strRollbackError,
                                         " (index error: ", strIndexError, ")");
                     }
@@ -522,6 +569,13 @@ namespace TAO::API
                         debug::error(FUNCTION, "failed to commit mempool rollback ", hashTx.SubString());
                         throw Exception(-32, "Failed to commit mempool rollback for ", hashTx.SubString(),
                                         " after index failure: ", strIndexError);
+                    }
+
+                    for(auto it = vDescendants.rbegin(); it != vDescendants.rend(); ++it)
+                    {
+                        const uint512_t hashDesc = it->GetHash();
+                        if(!TAO::Ledger::mempool.Remove(hashDesc))
+                            debug::warning(FUNCTION, "failed to remove rolled-back descendant ", VARIABLE(hashDesc.SubString()));
                     }
 
                     if(!TAO::Ledger::mempool.Remove(hashTx))
