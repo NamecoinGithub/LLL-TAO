@@ -289,32 +289,62 @@ namespace TAO::API
             return;
 
         /* Check our re-broadcast time. */
-        if(nModified + 60 < runtime::unifiedtimestamp())
+        if(nModified + 60 >= runtime::unifiedtimestamp())
+            return;
+
+        /* Get a copy of our hash. */
+        const uint512_t hashTx = GetHash();
+        bool fRelay = false;
+
         {
-            /* Get a copy of our hash. */
-            const uint512_t hashTx = GetHash();
+            /* Same lock as Index()/Delete(). A copy read before this lock can
+             * have a stale hashNextTx. WriteTx of that copy clobbers the link
+             * Index() just stored, or recreates a record Delete() removed.
+             * Re-read under the lock and persist only the current record. */
+            RECURSIVE(IndexLock(hashGenesis));
 
-            /* Adjust our modified timestamp. */
-            nModified = runtime::unifiedtimestamp();
+            TAO::API::Transaction txCurrent;
+            if(!LLD::Sessions->ReadTx(hashTx, txCurrent))
+                return;
 
-            /* Relay tx if creating ourselves. */
-            if(LLP::TRITIUM_SERVER)
+            if(txCurrent.Confirmed() || txCurrent.nModified + 60 >= runtime::unifiedtimestamp())
             {
-                /* Relay the transaction notification. */
-                LLP::TRITIUM_SERVER->Relay
-                (
-                    LLP::TritiumNode::ACTION::NOTIFY,
-                    uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
-                    hashTx
-                );
-
-                /* Log that tx was rebroadcast. */
-                debug::log(1, FUNCTION, "Re-Broadcasted ", hashTx.SubString(), " to network");
+                nModified  = txCurrent.nModified;
+                hashNextTx = txCurrent.hashNextTx;
+                nStatus    = txCurrent.nStatus;
+                return;
             }
 
+            /* Adjust our modified timestamp on the current record only. */
+            txCurrent.nModified = runtime::unifiedtimestamp();
+
             /* Write our transaction update to disk. */
-            if(!LLD::Sessions->WriteTx(hashTx, *this))
+            if(!LLD::Sessions->WriteTx(hashTx, txCurrent))
+            {
                 debug::error(FUNCTION, "failed to write ", VARIABLE(hashTx.SubString()));
+                return;
+            }
+
+            nModified  = txCurrent.nModified;
+            hashNextTx = txCurrent.hashNextTx;
+            nStatus    = txCurrent.nStatus;
+            fRelay = true;
+        }
+
+        /* Relay only after the session record is known to still exist. Do not
+         * hold IndexLock across the network write. */
+        if(fRelay && LLP::TRITIUM_SERVER)
+        {
+            /* Relay the transaction notification. */
+            LLP::TRITIUM_SERVER->Relay
+            (
+                LLP::TritiumNode::ACTION::NOTIFY,
+                uint8_t(LLP::TritiumNode::TYPES::TRANSACTION),
+                hashTx
+            );
+
+            /* Log that tx was rebroadcast. */
+            debug::log(1, FUNCTION, "Re-Broadcasted ", hashTx.SubString(), " to network");
         }
     }
 

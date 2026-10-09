@@ -176,6 +176,8 @@ namespace TAO::API
         /** Broadcast
          *
          *  Broadcast the transaction to all available nodes and update status.
+         *  The SessionDB write takes IndexLock and persists the current record
+         *  so a stale hashNextTx cannot overwrite a concurrent Index().
          *
          **/
         void Broadcast();
@@ -184,9 +186,9 @@ namespace TAO::API
         /** IndexLock
          *
          *  Recursive lock for multi-record SessionDB index mutations on one
-         *  sigchain. Index(), Delete(), snapshot/restore, and sigchain rebuild
-         *  must share this lock. It is striped by genesis, so the same genesis
-         *  always maps to the same mutex. Callers that also hold
+         *  sigchain. Index(), Delete(), Broadcast(), snapshot/restore, and
+         *  sigchain rebuild must share this lock. It is striped by genesis, so
+         *  the same genesis always maps to the same mutex. Callers that also hold
          *  mempool.MUTEX must acquire that lock first.
          *
          *  @param[in] hashGenesis The sigchain this index mutation belongs to.

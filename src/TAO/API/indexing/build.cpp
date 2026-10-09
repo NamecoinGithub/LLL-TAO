@@ -94,8 +94,9 @@ namespace TAO::API
          * later Index() loop both write indexing.last. Ledger-loaded API
          * transactions have hashNextTx == 0, so an interleaved Index() can
          * otherwise rewrite indexing.last to an older transaction. Each Index()
-         * takes the lock again. Release before BroadcastUnconfirmed(), which
-         * takes mempool.MUTEX (callers lock the pool first). */
+         * takes the lock again. Release before BroadcastUnconfirmed(): that path
+         * takes mempool.MUTEX and then IndexLock, and drops IndexLock before
+         * Accept(). Entering it while IndexLock is held inverts the lock order. */
         std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
 
         /* Check that our ledger indexes are up-to-date with our logical indexes. */

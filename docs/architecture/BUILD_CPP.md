@@ -132,6 +132,8 @@ Two different writers touch the same SessionDB sigchain links, and only one of t
 | `BuildAndAccept` index path | no | yes, before `IndexLock` | yes, across snapshot, `Index`, restore |
 | `Indexing::IndexSigchain` (Tritium merkle receive) | yes | no — must not take it here | yes, inside `Transaction::Index` |
 | `Indexing::BuildIndexes` | no | no during the index loops | yes, before both rebuild loops; released before `BroadcastUnconfirmed` |
+| `Indexing::BroadcastUnconfirmed` | no | yes, before `IndexLock`, including across `Accept` | yes, across the session read and `Broadcast()` write; dropped before `Accept` |
+| `Transaction::Broadcast` | no | no — caller must already hold the pool lock if it also holds it | yes, around the conditional SessionDB write |
 | `Notifications::SanitizeUnconfirmed` | no | yes, before hash collection through Disconnect / Delete / Remove | yes, before hash collection and again across delete; both released before the rebuild `BuildAndAccept` |
 | `Transaction::Delete` | no | must already be held if the caller uses it | yes, internally |
 
@@ -153,6 +155,8 @@ flowchart TD
 
 `IndexSigchain` must not take `mempool.MUTEX`. It already holds `CLIENT_MUTEX`. Session-index exclusion is `IndexLock`, not the pool lock.
 
+`BroadcastUnconfirmed` takes `mempool.MUTEX`, then `IndexLock`, before it reads the unconfirmed tail and before `Broadcast()` writes that tail back. It drops `IndexLock` before `Accept()` and keeps the pool lock across that call. `Transaction::Broadcast()` re-reads the SessionDB record under `IndexLock` and writes that current record's `nModified` only, so a stale `hashNextTx` cannot clobber `Index()` and a deleted record is not recreated.
+
 ---
 
 ## 6. What not to do
@@ -165,6 +169,7 @@ flowchart TD
 - Do not index a hash that `Accept` did not leave in `mapLedger`.
 - Do not restore a snapshot that was taken without `IndexLock`, and do not restore one taken outside `mempool.MUTEX` on the API accept path. `Check()` and `SanitizeUnconfirmed` can otherwise delete or replace the links between the snapshot and the restore.
 - Do not acquire `mempool.MUTEX` while holding `IndexLock`.
+- Do not call `BroadcastUnconfirmed` while holding `IndexLock`. It takes the pool lock first.
 
 ---
 

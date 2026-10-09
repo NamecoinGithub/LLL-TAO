@@ -19,7 +19,7 @@ Lock order when a caller also mutates SessionDB indexes:
 1. `TAO::Ledger::mempool.MUTEX`
 2. `TAO::API::Transaction::IndexLock(hashGenesis)`
 
-Never acquire `mempool.MUTEX` while already holding `IndexLock`. `Indexing::BuildIndexes()` releases `IndexLock` before `BroadcastUnconfirmed()`, because that path calls `Accept()`.
+Never acquire `mempool.MUTEX` while already holding `IndexLock`. `Indexing::BuildIndexes()` releases `IndexLock` before `BroadcastUnconfirmed()`, because that path calls `Accept()`. `BroadcastUnconfirmed()` takes the pool lock, then `IndexLock`, across the session read and `Broadcast()` write, and drops `IndexLock` before `Accept()`.
 
 ---
 
