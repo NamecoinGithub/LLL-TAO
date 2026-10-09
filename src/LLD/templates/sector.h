@@ -916,7 +916,9 @@ namespace LLD
          *             group, or an untracked sequence on a shared database, is
          *             kept until that group barrier has quiesced every participant.
          *             An existing non-regular pending entry, including a symlink
-         *             or directory, is retained and fails the discard.
+         *             or directory, is retained and fails the discard. If an
+         *             earlier removal in this call succeeded, the journal
+         *             directory is synced before that failure is returned.
          */
         bool TxnDiscardPendingJournals(bool fAfterDataSync = false);
 
@@ -925,7 +927,9 @@ namespace LLD
          *
          *  A missing sequence is already gone and is success. An existing
          *  non-regular path fails and is left in place. Sequences not listed
-         *  are kept, so the other recovery group can still replay them.
+         *  are kept, so the other recovery group can still replay them. If an
+         *  earlier removal in this call succeeded, the journal directory is
+         *  synced before a later removal or type error is returned.
          *
          *  @param[in] vSequences  Canonical pending sequences owned by the group
          *             whose data barrier just succeeded.

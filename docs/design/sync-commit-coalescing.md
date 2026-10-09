@@ -102,7 +102,11 @@ On a flush:
    deferred applies.
 2. Sync the other recovery group if it still has parked journals. Delete every
    parked sequence, lowest sequence first, and fsync the directory. Every
-   parked journal is older than this barrier.
+   parked journal is older than this barrier. Before any copy of a sequence is
+   deleted, a `txn-retire/journal.<sequence>.consensus` or `.merkle` intent is
+   written, fsynced, and renamed into place. The intent is removed only after
+   every remaining copy of that sequence is gone. A crash in between is an
+   interrupted retirement, not an incomplete park.
 3. Truncate `journal.dat` as before.
 
 Shutdown takes the flush path when `fShutdown` is set. Process exit
@@ -118,7 +122,15 @@ or followed.
 
 ## Recovery
 
-Startup replays `journal.*.pending` in global sequence order before it inspects
+Startup first finishes any durable retirement intent in `txn-retire/`. The
+intent file contains the marker `retire` and names one sequence plus its
+recovery group. Those copies are deleted without replay, because the intent is
+written only after that sequence's data sync. A `*.prepare` file is an
+unpublished intent and is removed without deleting journals. A missing or
+incomplete intent is not treated as retirement: a partial sequence still fails
+closed.
+
+Startup then replays `journal.*.pending` in global sequence order before it inspects
 an unparked `journal.dat`. Sequence numbers are shared by CONSENSUS and MERKLE,
 so a full node does not replay one group and then the other. A client recovers
 the MERKLE group. A parked sequence is replayed and discarded only when every
@@ -144,8 +156,13 @@ satisfied, those complete journals are not applied and are not truncated.
 Recovery fails so a later checkpoint cannot append over that crash record.
 
 If a sequence is missing from any participant and is not the unparked
-`journal.dat` of that same commit, that sequence and every higher one stay on
-disk. Recovery fails instead of applying the subset and deleting it. An
+`journal.dat` of that same commit, and no retirement intent names that
+sequence, that sequence and every higher one stay on disk. Recovery fails
+instead of applying the subset and deleting it. An interrupted retirement is
+the exception: the intent is finished and does not block later sequences. A
+removal error after some copies of a sequence were deleted syncs that journal
+directory before returning, so those deletions stay durable while the intent
+remains for the next startup. An
 incomplete `journal.dat` that never reached `"commit"` is still truncated when
 the group has no partial parked sequence left to preserve.
 

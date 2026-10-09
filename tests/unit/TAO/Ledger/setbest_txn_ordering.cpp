@@ -3152,3 +3152,264 @@ TEST_CASE("LLD::TxnRecovery replays CONSENSUS and MERKLE journals in global sequ
         REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
     }
 }
+
+
+TEST_CASE("parked journal removal syncs earlier deletions before returning an error",
+          "[lld][durable][recovery]")
+{
+    const std::string strName = "_discard_removal_sync";
+    const std::string strPath = config::GetDataDir() + strName;
+    std::filesystem::remove_all(strPath);
+
+    struct FaultGuard
+    {
+        ~FaultGuard()
+        {
+            LLD::SetJournalRemovalFault(0, 0);
+        }
+    } faultGuard;
+
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        const auto WritePending = [&strPath](const uint64_t nSequence)
+        {
+            const std::string strFile = debug::safe_printstr(
+                strPath, "/journal.", std::setfill('0'), std::setw(8), nSequence, ".pending");
+            std::ofstream cPending(strFile, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPending.is_open());
+            cPending << "payload";
+            REQUIRE(cPending.good());
+            return strFile;
+        };
+
+        const std::string strFirst = WritePending(1);
+        const std::string strSecond = WritePending(2);
+        FaultInjectingDurableIO cIO;
+        DurableIOGuard ioGuard(cIO);
+        LLD::SetJournalRemovalFault(1, 1);
+        REQUIRE_FALSE(db.TxnDiscardPendingSequences(std::vector<uint64_t>{1, 2}));
+        REQUIRE(cIO.nDirectorySyncCalls >= 1);
+        REQUIRE_FALSE(std::filesystem::exists(strFirst));
+        REQUIRE(std::filesystem::exists(strSecond));
+
+        /* Directory iteration order is unspecified, so either remaining file may
+         * be the one whose removal fails. One earlier deletion must still sync. */
+        cIO.nDirectorySyncCalls = 0;
+        LLD::SetJournalRemovalFault(1, 1);
+        const std::string strThird = WritePending(3);
+        REQUIRE_FALSE(db.TxnDiscardPendingJournals(true));
+        REQUIRE(cIO.nDirectorySyncCalls >= 1);
+        const bool fSecond = std::filesystem::exists(strSecond);
+        const bool fThird = std::filesystem::exists(strThird);
+        REQUIRE(fSecond != fThird);
+    }
+
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
+TEST_CASE("LLD finishes an interrupted multi-participant journal retirement",
+          "[lld][durable][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+    LLD::ResetTxnRecoveryRequired();
+
+    const uint64_t nSequence = 77;
+    const std::filesystem::path pathRetire =
+        std::filesystem::path(config::GetDataDir()) / "txn-retire";
+    const std::string strIntent = debug::safe_printstr(
+        pathRetire.string(), "/journal.", std::setfill('0'), std::setw(8), nSequence, ".consensus");
+    const std::string strPrepare = strIntent + ".prepare";
+
+    struct Cleanup
+    {
+        std::filesystem::path pathRetire;
+
+        ~Cleanup()
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(pathRetire, ec);
+            LLD::SetJournalRemovalFault(0, 0);
+            config::fShutdown.store(false);
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+        }
+    } cleanup{pathRetire};
+
+    const auto Pending = [nSequence](const char* szName)
+    {
+        return debug::safe_printstr(config::GetDataDir(), szName, "/journal.",
+            std::setfill('0'), std::setw(8), nSequence, ".pending");
+    };
+    const std::string strContract = Pending("_CONTRACT");
+    const std::string strRegister = Pending("_REGISTER");
+
+    const auto WriteRaw = [](const std::string& strPath)
+    {
+        std::filesystem::create_directories(std::filesystem::path(strPath).parent_path());
+        std::ofstream cPending(strPath, std::ios::binary | std::ios::trunc);
+        REQUIRE(cPending.is_open());
+        cPending << "not-a-journal";
+        REQUIRE(cPending.good());
+    };
+    const auto RemovePlanted = [&]()
+    {
+        std::error_code ec;
+        std::filesystem::remove(strContract, ec);
+        std::filesystem::remove(strRegister, ec);
+        std::filesystem::remove_all(pathRetire, ec);
+        LLD::ResetTxnRecoveryRequired();
+    };
+
+    SECTION("partial sequence without an intent fails closed")
+    {
+        WriteRaw(strContract);
+        WriteRaw(strRegister);
+        REQUIRE_FALSE(LLD::TxnRecovery());
+        REQUIRE(std::filesystem::exists(strContract));
+        REQUIRE(std::filesystem::exists(strRegister));
+        RemovePlanted();
+    }
+
+    SECTION("an unpublished prepare file does not delete journals")
+    {
+        WriteRaw(strContract);
+        WriteRaw(strRegister);
+        std::filesystem::create_directories(pathRetire);
+        {
+            std::ofstream cPrepare(strPrepare, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPrepare.is_open());
+            cPrepare << "ret";
+            REQUIRE(cPrepare.good());
+        }
+
+        REQUIRE_FALSE(LLD::TxnRecovery());
+        REQUIRE(std::filesystem::exists(strContract));
+        REQUIRE(std::filesystem::exists(strRegister));
+        REQUIRE_FALSE(std::filesystem::exists(strPrepare));
+        RemovePlanted();
+    }
+
+    SECTION("a durable intent deletes the remaining copies without replay")
+    {
+        WriteRaw(strContract);
+        WriteRaw(strRegister);
+        std::filesystem::create_directories(pathRetire);
+        {
+            std::ofstream cIntent(strIntent, std::ios::binary | std::ios::trunc);
+            REQUIRE(cIntent.is_open());
+            cIntent << "retire";
+            REQUIRE(cIntent.good());
+        }
+
+        REQUIRE(LLD::TxnRecovery());
+        REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERED);
+        REQUIRE_FALSE(std::filesystem::exists(strContract));
+        REQUIRE_FALSE(std::filesystem::exists(strRegister));
+        REQUIRE_FALSE(std::filesystem::exists(strIntent));
+    }
+}
+
+
+TEST_CASE("LLD retirement intent lets startup finish a crashed barrier discard",
+          "[lld][durable][recovery]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+    LegacyGuard legacyGuard;
+    ContractGuard contractGuard;
+    RegisterGuard registerGuard;
+    ShutdownGuard shutdownGuard;
+    config::fShutdown.store(false);
+    LLD::ResetTxnRecoveryRequired();
+
+    const std::filesystem::path pathRetire =
+        std::filesystem::path(config::GetDataDir()) / "txn-retire";
+    const std::pair<std::string, uint32_t> key =
+        std::make_pair(std::string("retirement-intent-barrier"), 1);
+
+    struct Cleanup
+    {
+        std::filesystem::path pathRetire;
+        std::pair<std::string, uint32_t> key;
+        bool savedShutdown;
+
+        ~Cleanup()
+        {
+            LLD::SetJournalRemovalFault(0, 0);
+            config::fShutdown.store(savedShutdown);
+            std::error_code ec;
+            std::filesystem::remove_all(pathRetire, ec);
+            LLD::ResetTxnRecoveryRequired();
+            LLD::TxnRecovery();
+            if(LLD::Ledger)
+                LLD::Ledger->Erase(key);
+        }
+    } cleanup{pathRetire, key, config::fShutdown.load()};
+
+    REQUIRE(LLD::TxnRecovery());
+    LLD::Ledger->Erase(key);
+
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(77)));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, LLD::SYNC_COMMIT_BLOCKS));
+    REQUIRE(HasPendingJournal("_CONTRACT"));
+    REQUIRE(HasPendingJournal("_LEDGER"));
+
+    LLD::SetJournalRemovalFault(1, 1);
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::Ledger->Write(key, uint32_t(78)));
+    REQUIRE_FALSE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS, 1));
+    REQUIRE(config::fShutdown.load());
+    REQUIRE(LLD::LastTxnOutcome() == LLD::TXN_OUTCOME::RECOVERY_REQUIRED);
+
+    bool fIntent = false;
+    std::error_code ec;
+    REQUIRE(std::filesystem::exists(pathRetire, ec));
+    for(const std::filesystem::directory_entry& cEntry :
+        std::filesystem::directory_iterator(pathRetire))
+    {
+        const std::string strFile = cEntry.path().filename().string();
+        if(strFile.rfind("journal.", 0) == 0
+        && strFile.size() > std::string(".consensus").size()
+        && strFile.compare(strFile.size() - 10, 10, ".consensus") == 0
+        && strFile.compare(strFile.size() - 8, 8, ".prepare") != 0)
+            fIntent = true;
+    }
+    REQUIRE(fIntent);
+
+    const uint32_t nRemaining =
+        (HasPendingJournal("_CONTRACT") ? 1u : 0u)
+        + (HasPendingJournal("_REGISTER") ? 1u : 0u)
+        + (HasPendingJournal("_LEDGER") ? 1u : 0u)
+        + (HasPendingJournal("_TRUST") ? 1u : 0u)
+        + (HasPendingJournal("_LEGACY") ? 1u : 0u);
+    REQUIRE(nRemaining > 0);
+    REQUIRE(nRemaining < 5);
+
+    LLD::SetJournalRemovalFault(0, 0);
+    config::fShutdown.store(false);
+    LLD::ResetTxnRecoveryRequired();
+    REQUIRE(LLD::TxnRecovery());
+    REQUIRE_FALSE(HasPendingJournal("_CONTRACT"));
+    REQUIRE_FALSE(HasPendingJournal("_REGISTER"));
+    REQUIRE_FALSE(HasPendingJournal("_LEDGER"));
+    REQUIRE_FALSE(HasPendingJournal("_TRUST"));
+    REQUIRE_FALSE(HasPendingJournal("_LEGACY"));
+    if(std::filesystem::exists(pathRetire, ec))
+    {
+        for(const std::filesystem::directory_entry& cEntry :
+            std::filesystem::directory_iterator(pathRetire))
+            REQUIRE(cEntry.path().filename().string().rfind("journal.", 0) != 0);
+    }
+
+    uint32_t nValue = 0;
+    REQUIRE(LLD::Ledger->Read(key, nValue));
+    REQUIRE(nValue == 78);
+}

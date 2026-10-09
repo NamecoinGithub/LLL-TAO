@@ -37,8 +37,48 @@ ________________________________________________________________________________
 
 namespace LLD
 {
+    #ifdef UNIT_TESTS
     namespace
     {
+        std::atomic<uint32_t> nJournalRemovalAllow{0};
+        std::atomic<uint32_t> nJournalRemovalFail{0};
+    }
+
+
+    void SetJournalRemovalFault(const uint32_t nAllow, const uint32_t nFail)
+    {
+        nJournalRemovalAllow.store(nAllow);
+        nJournalRemovalFail.store(nFail);
+    }
+    #endif
+
+
+    namespace
+    {
+        /* True when a test asked this removal to fail. The file is left in place. */
+        bool ConsumeJournalRemovalFault(std::error_code& ecRemove)
+        {
+            #ifdef UNIT_TESTS
+            if(nJournalRemovalAllow.load() > 0)
+            {
+                nJournalRemovalAllow.fetch_sub(1);
+                return false;
+            }
+
+            if(nJournalRemovalFail.load() > 0)
+            {
+                nJournalRemovalFail.fetch_sub(1);
+                ecRemove = std::make_error_code(std::errc::io_error);
+                return true;
+            }
+            #else
+            (void)ecRemove;
+            #endif
+
+            return false;
+        }
+
+
         /* True for any journal.*.pending name, including ones that are not a
          * canonical sequence. Those must fail closed rather than be skipped. */
         bool IsPendingJournalName(const std::string& strFile)
@@ -1296,10 +1336,22 @@ namespace LLD
             vDiscard.push_back(cEntry.path());
         }
 
+        bool fRemoved = false;
+        /* A later removal error must not return before earlier deletions are
+         * durable. Recovery is still failed; the directory sync keeps those
+         * copies from reappearing as if this call never ran. */
+        const auto FailAfterRemoval = [&](const std::string& strMessage) -> bool
+        {
+            if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
+                return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
+
+            return debug::error(FUNCTION, strName, strMessage);
+        };
+
         for(const std::filesystem::path& pathPending : vDiscard)
         {
             if(!fAfterDataSync && !MayDiscardPendingJournals())
-                return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
+                return FailAfterRemoval(" refusing to discard parked journals; recovery is required");
 
             /* fAfterDataSync is the coordinator path that already quiesced every
              * participant in the group. A per-database caller must not delete a
@@ -1307,14 +1359,17 @@ namespace LLD
              * sequence on Contract/Register that may belong to the other group. */
             uint64_t nSequence = 0;
             if(!ParsePendingSequence(pathPending.filename().string(), nSequence))
-                return debug::error(FUNCTION, strName, " parked journal name is not a canonical sequence");
+                return FailAfterRemoval(" parked journal name is not a canonical sequence");
 
             if(!fAfterDataSync && !MayDiscardPendingSequence(this, nSequence))
                 continue;
 
             std::error_code ecRemove;
-            if(!std::filesystem::remove(pathPending, ecRemove) || ecRemove)
-                return debug::error(FUNCTION, strName, " failed to discard parked journal");
+            if(ConsumeJournalRemovalFault(ecRemove)
+            || !std::filesystem::remove(pathPending, ecRemove) || ecRemove)
+                return FailAfterRemoval(" failed to discard parked journal");
+
+            fRemoved = true;
         }
 
         if(!DurableIO::Current().SyncDirectoryChain(strDirectory))
@@ -1335,7 +1390,18 @@ namespace LLD
         if(vSequences.empty())
             return true;
 
+        const std::string strDirectory = JournalDirectory();
         bool fRemoved = false;
+        /* Same durability rule as TxnDiscardPendingJournals(): earlier deletions
+         * in this call are synced before a later removal or type error returns. */
+        const auto FailAfterRemoval = [&](const std::string& strMessage) -> bool
+        {
+            if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
+                return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
+
+            return debug::error(FUNCTION, strName, strMessage);
+        };
+
         for(const uint64_t nSequence : vSequences)
         {
             const std::string strPending = PendingJournalPath(nSequence);
@@ -1345,16 +1411,17 @@ namespace LLD
             || ec == std::errc::no_such_file_or_directory)
                 continue;
             if(ec || cStatus.type() != std::filesystem::file_type::regular)
-                return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
+                return FailAfterRemoval(" parked journal is not a readable regular file");
 
             std::error_code ecRemove;
-            if(!std::filesystem::remove(strPending, ecRemove) || ecRemove)
-                return debug::error(FUNCTION, strName, " failed to discard parked journal");
+            if(ConsumeJournalRemovalFault(ecRemove)
+            || !std::filesystem::remove(strPending, ecRemove) || ecRemove)
+                return FailAfterRemoval(" failed to discard parked journal");
 
             fRemoved = true;
         }
 
-        if(fRemoved && !DurableIO::Current().SyncDirectoryChain(JournalDirectory()))
+        if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
             return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
 
         return true;

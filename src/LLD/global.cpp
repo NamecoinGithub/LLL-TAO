@@ -12,13 +12,22 @@
 ____________________________________________________________________________________________*/
 
 #include <LLD/include/global.h>
+#include <LLD/durable.h>
 
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
 #include <Util/include/args.h>
+#include <Util/include/debug.h>
 #include <Util/include/signals.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -75,6 +84,9 @@ namespace LLD
         void ReleaseOwnership();
         bool ParkGroup(uint16_t nInstances, uint64_t nSequence);
         bool DiscardSequences(uint16_t nInstances, const std::vector<uint64_t>& vSequences);
+        bool PublishRetirement(uint16_t nInstances, uint64_t nSequence);
+        bool ClearRetirement(uint16_t nInstances, uint64_t nSequence);
+        bool FinishInterruptedRetirements();
         bool RecoverGroup(uint16_t nInstances,
                           const std::vector<PhysicalDB*>& vParticipants,
                           const std::vector<PhysicalDB*>* pvSequenceSources = nullptr);
@@ -203,30 +215,352 @@ namespace LLD
     }
 
 
+    namespace
+    {
+        const char RETIREMENT_MARK[] = "retire";
+
+
+        std::filesystem::path RetirementDirectory()
+        {
+            return std::filesystem::path(config::GetDataDir()) / "txn-retire";
+        }
+
+
+        /* CONSENSUS and MERKLE are the only groups that park a sequence. A subset
+         * mask must not be recorded as one of those groups. */
+        const char* RetirementGroup(const uint16_t nInstances)
+        {
+            if(nInstances == INSTANCES::CONSENSUS)
+                return "consensus";
+            if(nInstances == INSTANCES::MERKLE)
+                return "merkle";
+
+            return nullptr;
+        }
+
+
+        uint16_t RetirementInstances(const std::string& strGroup)
+        {
+            if(strGroup == "consensus")
+                return INSTANCES::CONSENSUS;
+            if(strGroup == "merkle")
+                return INSTANCES::MERKLE;
+
+            return 0;
+        }
+
+
+        std::string FormatParkSequence(const uint64_t nSequence)
+        {
+            return debug::safe_printstr(std::setfill('0'), std::setw(8), nSequence);
+        }
+
+
+        /* journal.<sequence>.consensus or .merkle, optional .prepare suffix.
+         * The sequence must round-trip to PendingJournalPath()'s width. */
+        bool ParseRetirementName(const std::string& strFile, uint64_t& nSequence,
+                                 uint16_t& nInstances, bool& fPrepare)
+        {
+            nSequence = 0;
+            nInstances = 0;
+            fPrepare = false;
+
+            static const std::string strPrefix = "journal.";
+            if(strFile.compare(0, strPrefix.size(), strPrefix) != 0)
+                return false;
+
+            std::string strRest = strFile.substr(strPrefix.size());
+            static const std::string strPrepare = ".prepare";
+            if(strRest.size() > strPrepare.size()
+            && strRest.compare(strRest.size() - strPrepare.size(), strPrepare.size(), strPrepare) == 0)
+            {
+                fPrepare = true;
+                strRest.erase(strRest.size() - strPrepare.size());
+            }
+
+            const std::size_t nDot = strRest.rfind('.');
+            if(nDot == std::string::npos || nDot == 0)
+                return false;
+
+            const std::string strSequence = strRest.substr(0, nDot);
+            const std::string strGroup = strRest.substr(nDot + 1);
+            nInstances = RetirementInstances(strGroup);
+            if(nInstances == 0)
+                return false;
+
+            if(strSequence.empty()
+            || strSequence.find_first_not_of("0123456789") != std::string::npos)
+                return false;
+
+            errno = 0;
+            char* pEnd = nullptr;
+            const unsigned long long nParsed = std::strtoull(strSequence.c_str(), &pEnd, 10);
+            if(errno == ERANGE || !pEnd || *pEnd != '\0' || nParsed == 0
+            || nParsed > std::numeric_limits<uint64_t>::max())
+                return false;
+
+            nSequence = static_cast<uint64_t>(nParsed);
+            const std::string strCanonical = debug::safe_printstr(
+                "journal.", FormatParkSequence(nSequence), ".", strGroup,
+                fPrepare ? strPrepare : "");
+            return strCanonical == strFile;
+        }
+
+
+        bool RetirementMarkMatches(const std::filesystem::path& pathIntent)
+        {
+            std::vector<uint8_t> vData;
+            if(!DurableIO::Current().Read(pathIntent.string(), vData))
+                return false;
+
+            return vData.size() == sizeof(RETIREMENT_MARK) - 1
+                && std::memcmp(vData.data(), RETIREMENT_MARK, vData.size()) == 0;
+        }
+    }
+
+
+    /* Record that this sequence's data sync already succeeded, before any
+     * participant copy is deleted. Startup finishes a durable intent instead of
+     * treating the remaining files as an incomplete park. */
+    bool DurableCommitCoordinator::PublishRetirement(const uint16_t nInstances,
+                                                     const uint64_t nSequence)
+    {
+        const char* szGroup = RetirementGroup(nInstances);
+        if(!szGroup)
+            return debug::error(FUNCTION, "retirement group is not CONSENSUS or MERKLE");
+
+        const std::filesystem::path pathDirectory = RetirementDirectory();
+        std::error_code ecCreate;
+        std::filesystem::create_directories(pathDirectory, ecCreate);
+        if(ecCreate)
+            return debug::error(FUNCTION, "failed to create retirement directory");
+
+        DurableIO& cIO = DurableIO::Current();
+        if(!cIO.SyncDirectoryChain(pathDirectory.string()))
+            return debug::error(FUNCTION, "failed to sync retirement directory");
+
+        const std::filesystem::path pathIntent = pathDirectory / debug::safe_printstr(
+            "journal.", FormatParkSequence(nSequence), ".", szGroup);
+        const std::filesystem::path pathPrepare = pathDirectory / debug::safe_printstr(
+            "journal.", FormatParkSequence(nSequence), ".", szGroup, ".prepare");
+
+        std::error_code ecIntent;
+        const std::filesystem::file_status nIntentStatus =
+            std::filesystem::symlink_status(pathIntent, ecIntent);
+        if(ecIntent != std::errc::no_such_file_or_directory
+        && (ecIntent || nIntentStatus.type() != std::filesystem::file_type::not_found))
+        {
+            if(ecIntent || nIntentStatus.type() != std::filesystem::file_type::regular
+            || !RetirementMarkMatches(pathIntent))
+                return debug::error(FUNCTION, "retirement intent is not a complete record");
+
+            /* Already published. Sync again so a crash after rename but before
+             * the previous directory sync still cannot delete journals first. */
+            return cIO.SyncDirectoryChain(pathDirectory.string())
+                || debug::error(FUNCTION, "failed to sync retirement directory");
+        }
+
+        std::error_code ecPrepare;
+        const std::filesystem::file_status nPrepareStatus =
+            std::filesystem::symlink_status(pathPrepare, ecPrepare);
+        if(ecPrepare != std::errc::no_such_file_or_directory
+        && (ecPrepare || nPrepareStatus.type() != std::filesystem::file_type::not_found))
+        {
+            if(ecPrepare || nPrepareStatus.type() != std::filesystem::file_type::regular)
+                return debug::error(FUNCTION, "incomplete retirement record is not a regular file");
+
+            std::error_code ecRemove;
+            if(!std::filesystem::remove(pathPrepare, ecRemove) || ecRemove)
+                return debug::error(FUNCTION, "failed to remove incomplete retirement record");
+            if(!cIO.SyncDirectoryChain(pathDirectory.string()))
+                return debug::error(FUNCTION, "failed to sync retirement directory");
+        }
+
+        FILE* pFile = cIO.Open(pathPrepare.string(), "wb");
+        if(!pFile)
+            return debug::error(FUNCTION, "failed to create retirement intent");
+
+        const bool fWrote = cIO.Write(pFile, RETIREMENT_MARK, sizeof(RETIREMENT_MARK) - 1)
+                == sizeof(RETIREMENT_MARK) - 1
+            && cIO.Flush(pFile)
+            && cIO.SyncFile(pFile);
+        const bool fClosed = cIO.Close(pFile);
+        if(!fWrote || !fClosed)
+            return debug::error(FUNCTION, "failed to sync retirement intent");
+
+        std::error_code ecRename;
+        std::filesystem::rename(pathPrepare, pathIntent, ecRename);
+        if(ecRename)
+            return debug::error(FUNCTION, "failed to publish retirement intent");
+
+        if(!cIO.SyncDirectoryChain(pathDirectory.string()))
+            return debug::error(FUNCTION, "failed to sync retirement directory");
+
+        return true;
+    }
+
+
+    bool DurableCommitCoordinator::ClearRetirement(const uint16_t nInstances,
+                                                   const uint64_t nSequence)
+    {
+        const char* szGroup = RetirementGroup(nInstances);
+        if(!szGroup)
+            return debug::error(FUNCTION, "retirement group is not CONSENSUS or MERKLE");
+
+        const std::filesystem::path pathDirectory = RetirementDirectory();
+        const std::filesystem::path pathIntent = pathDirectory / debug::safe_printstr(
+            "journal.", FormatParkSequence(nSequence), ".", szGroup);
+
+        std::error_code ec;
+        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(pathIntent, ec);
+        if(nStatus.type() == std::filesystem::file_type::not_found
+        || ec == std::errc::no_such_file_or_directory)
+            return true;
+        if(ec || nStatus.type() != std::filesystem::file_type::regular)
+            return debug::error(FUNCTION, "retirement intent is not a regular file");
+
+        std::error_code ecRemove;
+        if(!std::filesystem::remove(pathIntent, ecRemove) || ecRemove)
+            return debug::error(FUNCTION, "failed to remove retirement intent");
+
+        if(!DurableIO::Current().SyncDirectoryChain(pathDirectory.string()))
+            return debug::error(FUNCTION, "failed to sync retirement directory");
+
+        return true;
+    }
+
+
+    /* A committed intent means the data barrier already succeeded. Delete the
+     * copies that a crash left behind, then drop the intent. An incomplete
+     * prepare file is not an intent and must not delete journals. */
+    bool DurableCommitCoordinator::FinishInterruptedRetirements()
+    {
+        const std::filesystem::path pathDirectory = RetirementDirectory();
+        std::error_code ec;
+        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(pathDirectory, ec);
+        if(ec == std::errc::no_such_file_or_directory
+        || (!ec && nStatus.type() == std::filesystem::file_type::not_found))
+            return true;
+        if(ec || nStatus.type() != std::filesystem::file_type::directory)
+            return debug::error(FUNCTION, "retirement directory is not a directory");
+
+        std::filesystem::directory_iterator itEntries(pathDirectory, ec);
+        if(ec)
+            return debug::error(FUNCTION, "failed to list retirement intents");
+
+        struct Intent
+        {
+            uint64_t nSequence;
+            uint16_t nGroup;
+        };
+
+        std::vector<Intent> vIntents;
+        std::vector<std::filesystem::path> vPrepare;
+        const std::filesystem::directory_iterator itEnd;
+        while(itEntries != itEnd)
+        {
+            const std::filesystem::directory_entry cEntry = *itEntries;
+            itEntries.increment(ec);
+            if(ec)
+                return debug::error(FUNCTION, "failed to list retirement intents");
+
+            std::error_code ecStatus;
+            const std::filesystem::file_status cStatus = cEntry.symlink_status(ecStatus);
+            if(ecStatus || cStatus.type() != std::filesystem::file_type::regular)
+                return debug::error(FUNCTION, "retirement record is not a regular file");
+
+            uint64_t nSequence = 0;
+            uint16_t nGroup = 0;
+            bool fPrepare = false;
+            if(!ParseRetirementName(cEntry.path().filename().string(), nSequence, nGroup, fPrepare))
+                return debug::error(FUNCTION, "retirement record name is not canonical");
+
+            if(fPrepare)
+            {
+                vPrepare.push_back(cEntry.path());
+                continue;
+            }
+
+            if(!RetirementMarkMatches(cEntry.path()))
+                return debug::error(FUNCTION, "retirement intent is not a complete record");
+
+            vIntents.push_back(Intent{nSequence, nGroup});
+        }
+
+        bool fRemovedPrepare = false;
+        for(const std::filesystem::path& pathPrepare : vPrepare)
+        {
+            std::error_code ecRemove;
+            if(!std::filesystem::remove(pathPrepare, ecRemove) || ecRemove)
+                return debug::error(FUNCTION, "failed to remove incomplete retirement record");
+
+            fRemovedPrepare = true;
+        }
+
+        if(fRemovedPrepare && !DurableIO::Current().SyncDirectoryChain(pathDirectory.string()))
+            return debug::error(FUNCTION, "failed to sync retirement directory");
+
+        std::sort(vIntents.begin(), vIntents.end(),
+            [](const Intent& a, const Intent& b)
+            {
+                return a.nSequence < b.nSequence;
+            });
+
+        for(const Intent& cIntent : vIntents)
+        {
+            if(!DiscardSequences(cIntent.nGroup, std::vector<uint64_t>{cIntent.nSequence}))
+                return debug::error(FUNCTION, "failed to finish interrupted journal retirement");
+        }
+
+        return true;
+    }
+
+
     bool DurableCommitCoordinator::DiscardSequences(const uint16_t nInstances,
                                                     const std::vector<uint64_t>& vSequences)
     {
         if(vSequences.empty())
             return true;
 
-        bool fDiscarded = true;
+        /* One sequence at a time. The intent for that sequence is durable before
+         * any of its copies are deleted, and it is removed only after every
+         * remaining copy is gone. A later sequence is not touched until this
+         * one is fully retired. */
+        std::vector<uint64_t> vOrdered = vSequences;
+        std::sort(vOrdered.begin(), vOrdered.end());
+        vOrdered.erase(std::unique(vOrdered.begin(), vOrdered.end()), vOrdered.end());
 
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
-            fDiscarded = Logical->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            fDiscarded = Contract->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            fDiscarded = Register->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            fDiscarded = Ledger->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Client && (nInstances & INSTANCES::CLIENT))
-            fDiscarded = Client->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Trust && (nInstances & INSTANCES::TRUST))
-            fDiscarded = Trust->TxnDiscardPendingSequences(vSequences) && fDiscarded;
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
-            fDiscarded = Legacy->TxnDiscardPendingSequences(vSequences) && fDiscarded;
+        for(const uint64_t nSequence : vOrdered)
+        {
+            if(!PublishRetirement(nInstances, nSequence))
+                return false;
 
-        return fDiscarded;
+            const std::vector<uint64_t> vOne{nSequence};
+            bool fDiscarded = true;
+
+            if(Logical && (nInstances & INSTANCES::LOGICAL))
+                fDiscarded = Logical->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Contract && (nInstances & INSTANCES::CONTRACT))
+                fDiscarded = Contract->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Register && (nInstances & INSTANCES::REGISTER))
+                fDiscarded = Register->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Ledger && (nInstances & INSTANCES::LEDGER))
+                fDiscarded = Ledger->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Client && (nInstances & INSTANCES::CLIENT))
+                fDiscarded = Client->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Trust && (nInstances & INSTANCES::TRUST))
+                fDiscarded = Trust->TxnDiscardPendingSequences(vOne) && fDiscarded;
+            if(Legacy && (nInstances & INSTANCES::LEGACY))
+                fDiscarded = Legacy->TxnDiscardPendingSequences(vOne) && fDiscarded;
+
+            if(!fDiscarded)
+                return false;
+
+            if(!ClearRetirement(nInstances, nSequence))
+                return false;
+        }
+
+        return true;
     }
 
 
@@ -302,7 +636,8 @@ namespace LLD
     /* Every parked sequence is older than the commit that reached a data
      * barrier. Sync the groups that still have journals, then delete the
      * lowest sequence first so a crash cannot replay an earlier journal over
-     * an already-durable later one. */
+     * an already-durable later one. Each sequence publishes a retirement intent
+     * before any participant copy is removed. */
     bool DurableCommitCoordinator::RetireParkedJournals()
     {
         if(!cDeferredConsensus.vSequences.empty() && !SyncGroup(INSTANCES::CONSENSUS))
@@ -1012,6 +1347,14 @@ namespace LLD
     /* Check the transactions for recovery. */
     bool DurableCommitCoordinator::Recover()
     {
+        /* An interrupted retirement already synced its data. Finish deleting
+         * those copies before a partial sequence can fail closed. */
+        if(!FinishInterruptedRetirements())
+        {
+            FailRecovery("failed to finish interrupted journal retirement");
+            return false;
+        }
+
         std::vector<PhysicalDB*> vParticipants;
         uint16_t nInstances = INSTANCES::CONSENSUS;
 

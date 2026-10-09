@@ -225,6 +225,11 @@ namespace LLD
     /** Quiesce both recovery groups and discard only sequences whose group synced.
      *  Does not destroy database instances. */
     bool TxnShutdownGroupBarrier();
+
+
+    /** Fail the next nFail parked-journal removals after nAllow successes.
+     *  Used to simulate a crash between participant deletions. */
+    void SetJournalRemovalFault(uint32_t nAllow, uint32_t nFail);
     #endif
 }
 
