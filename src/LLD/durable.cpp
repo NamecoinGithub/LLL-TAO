@@ -169,6 +169,7 @@ namespace LLD
 
         setNewEntries.insert(strPath);
         MarkDirty(strPath);
+        RememberCreatedDirectory(strPath);
     }
 
 
@@ -179,6 +180,7 @@ namespace LLD
 
         setNewEntries.insert(strPath);
         TrackParentDirectories(strPath);
+        RememberCreatedDirectory(strPath);
     }
 
 
@@ -205,6 +207,167 @@ namespace LLD
 
             cDirectory = cParent;
         }
+    }
+
+
+    void DurabilityTracker::RememberCreatedDirectory(const std::string& strPath)
+    {
+        if(strPath.empty())
+            return;
+
+        std::filesystem::path cDataDirectory =
+            std::filesystem::path(config::GetDataDir()).lexically_normal();
+        if(cDataDirectory.has_relative_path() && cDataDirectory.filename().empty())
+            cDataDirectory = cDataDirectory.parent_path();
+
+        std::filesystem::path cDirectory =
+            std::filesystem::path(strPath).lexically_normal();
+        std::error_code ec;
+        if(!std::filesystem::is_directory(cDirectory, ec))
+            cDirectory = cDirectory.parent_path();
+
+        while(!cDirectory.empty())
+        {
+            setCreatedDirectories.insert(cDirectory.string());
+
+            if(cDirectory == cDataDirectory)
+                break;
+
+            const std::filesystem::path cParent = cDirectory.parent_path();
+            if(cParent == cDirectory)
+                break;
+
+            cDirectory = cParent;
+        }
+    }
+
+
+    namespace
+    {
+        bool IsAncestorOrSame(const std::string& strAncestor, const std::string& strDescendant)
+        {
+            const std::filesystem::path cAncestor =
+                std::filesystem::path(strAncestor).lexically_normal();
+            const std::filesystem::path cDescendant =
+                std::filesystem::path(strDescendant).lexically_normal();
+
+            auto itAncestor = cAncestor.begin();
+            auto itDescendant = cDescendant.begin();
+            for(; itAncestor != cAncestor.end() && itDescendant != cDescendant.end();
+                ++itAncestor, ++itDescendant)
+            {
+                if(*itAncestor != *itDescendant)
+                    return false;
+            }
+
+            return itAncestor == cAncestor.end();
+        }
+    }
+
+
+    bool DurabilityTracker::SyncDirectoryLeaves(DurableIO& cIO,
+                                                std::set<std::string>& setDirectories,
+                                                const bool fClearUnsynced)
+    {
+        std::vector<std::string> vLeafDirectories;
+        for(const std::string& strDirectory : setDirectories)
+        {
+            const bool fHasDescendant = std::any_of(
+                setDirectories.begin(), setDirectories.end(),
+                [&strDirectory](const std::string& strCandidate)
+                {
+                    return strCandidate != strDirectory
+                        && IsAncestorOrSame(strDirectory, strCandidate);
+                });
+
+            if(!fHasDescendant)
+                vLeafDirectories.push_back(strDirectory);
+        }
+
+        for(const std::string& strLeaf : vLeafDirectories)
+        {
+            if(!cIO.SyncDirectoryChain(strLeaf))
+                return false;
+
+            for(auto it = setDirectories.begin(); it != setDirectories.end();)
+            {
+                if(IsAncestorOrSame(*it, strLeaf))
+                    it = setDirectories.erase(it);
+                else
+                    ++it;
+            }
+
+            if(!fClearUnsynced)
+                continue;
+
+            for(auto it = setUnsyncedDirectories.begin(); it != setUnsyncedDirectories.end();)
+            {
+                if(IsAncestorOrSame(*it, strLeaf))
+                    it = setUnsyncedDirectories.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+        return true;
+    }
+
+
+    bool DurabilityTracker::SyncCreated(DurableIO& cIO)
+    {
+        std::vector<std::string> vFiles;
+        std::vector<std::string> vMissing;
+        for(const std::string& strEntry : setNewEntries)
+        {
+            std::error_code ec;
+            const std::filesystem::file_status nStatus =
+                std::filesystem::symlink_status(strEntry, ec);
+            if(ec == std::errc::no_such_file_or_directory)
+            {
+                vMissing.push_back(strEntry);
+                continue;
+            }
+
+            if(ec)
+                return false;
+
+            if(std::filesystem::is_regular_file(nStatus))
+                vFiles.push_back(strEntry);
+            else if(!std::filesystem::is_directory(nStatus))
+                return false;
+        }
+
+        for(const std::string& strMissing : vMissing)
+        {
+            setNewEntries.erase(strMissing);
+            setDirtyFiles.erase(strMissing);
+            setCreatedDirectories.erase(strMissing);
+        }
+
+        /* Created files are durable after this fsync. Leave every other dirty
+         * update tracked so a deferred commit does not write back the keychain. */
+        for(const std::string& strFile : vFiles)
+        {
+            if(!cIO.SyncFile(strFile))
+                return false;
+
+            setDirtyFiles.erase(strFile);
+            setNewEntries.erase(strFile);
+        }
+
+        if(!SyncDirectoryLeaves(cIO, setCreatedDirectories, true))
+            return false;
+
+        for(auto it = setNewEntries.begin(); it != setNewEntries.end();)
+        {
+            std::error_code ec;
+            if(std::filesystem::is_directory(*it, ec))
+                it = setNewEntries.erase(it);
+            else
+                ++it;
+        }
+
+        return true;
     }
 
 
@@ -267,6 +430,7 @@ namespace LLD
         }
 
         setNewEntries.clear();
+        setCreatedDirectories.clear();
         return true;
     }
 }

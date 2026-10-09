@@ -627,6 +627,15 @@ namespace LLD
     }
 
 
+    /* Sync newly created keychain files without fsyncing update-dirty files. */
+    bool BinaryHashMap::SyncCreatedFiles()
+    {
+        LOCK(KEY_MUTEX);
+
+        return cDurability.SyncCreated(DurableIO::Current());
+    }
+
+
     /*  Erase a key from the disk hashmaps.
      *  TODO: This should be optimized further. */
     bool BinaryHashMap::Erase(const std::vector<uint8_t> &vKey)
