@@ -330,7 +330,50 @@ namespace TAO::API
                     const std::string strIndexError = debug::GetLastError();
                     if(!tIndex.Delete(hashTx))
                         debug::warning(FUNCTION, "failed to rollback partial index ", VARIABLE(hashTx.SubString()));
-                    TAO::Ledger::mempool.Remove(hashTx);
+
+                    /* Accept() already committed Connect(FLAGS::MEMPOOL). Remove() only
+                     * erases pool maps, so roll the overlay back under a MEMPOOL memory
+                     * transaction before dropping the entry. */
+                    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+
+                    bool fRolledBack = false;
+                    try
+                    {
+                        fRolledBack = tx.Disconnect(TAO::Ledger::FLAGS::MEMPOOL);
+                    }
+                    catch(const std::exception& e)
+                    {
+                        debug::error(FUNCTION, "mempool rollback threw for ", hashTx.SubString(), ": ", e.what());
+                        fRolledBack = false;
+                    }
+                    catch(...)
+                    {
+                        debug::error(FUNCTION, "mempool rollback threw for ", hashTx.SubString());
+                        fRolledBack = false;
+                    }
+
+                    if(!fRolledBack)
+                    {
+                        const std::string strRollbackError = debug::GetLastError();
+                        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+
+                        /* Leave the pool entry in place: the overlay is still live. */
+                        throw Exception(-32, "Failed to roll back mempool transaction ", hashTx.SubString(),
+                                        " after index failure: ", strRollbackError,
+                                        " (index error: ", strIndexError, ")");
+                    }
+
+                    if(!LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
+                    {
+                        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                        debug::error(FUNCTION, "failed to commit mempool rollback ", hashTx.SubString());
+                        throw Exception(-32, "Failed to commit mempool rollback for ", hashTx.SubString(),
+                                        " after index failure: ", strIndexError);
+                    }
+
+                    if(!TAO::Ledger::mempool.Remove(hashTx))
+                        debug::warning(FUNCTION, "failed to remove rolled-back tx ", VARIABLE(hashTx.SubString()));
+
                     throw Exception(-32, "Failed to index accepted transaction: ", strIndexError);
                 }
 
