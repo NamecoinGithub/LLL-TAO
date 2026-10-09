@@ -469,7 +469,8 @@ namespace TAO::API
              * this tx and delete its API indexes as soon as Accept() drops the
              * mempool mutex. Hold that lock across accept, snapshot, index, and
              * rollback so those steps cannot interleave. SanitizeUnconfirmed()
-             * takes the same mutex around its Disconnect/Delete/Remove loop. */
+             * takes the same mutex before collecting its unconfirmed tail and
+             * holds it through Disconnect/Delete/Remove. */
             std::unique_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX, std::defer_lock);
             if(fActiveSession)
                 POOL_LOCK.lock();

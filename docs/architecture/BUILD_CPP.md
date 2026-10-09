@@ -131,8 +131,8 @@ Two different writers touch the same SessionDB sigchain links, and only one of t
 |--------|----------------------|------------------------|-------------------|
 | `BuildAndAccept` index path | no | yes, before `IndexLock` | yes, across snapshot, `Index`, restore |
 | `Indexing::IndexSigchain` (Tritium merkle receive) | yes | no — must not take it here | yes, inside `Transaction::Index` |
-| `Indexing::BuildIndexes` | no | no during the index loop | yes, across the loop; released before `BroadcastUnconfirmed` |
-| `Notifications::SanitizeUnconfirmed` cleanup | no | yes, around Disconnect / Delete / Remove | yes, after the pool lock; both released before the rebuild `BuildAndAccept` |
+| `Indexing::BuildIndexes` | no | no during the index loops | yes, before both rebuild loops; released before `BroadcastUnconfirmed` |
+| `Notifications::SanitizeUnconfirmed` | no | yes, before hash collection through Disconnect / Delete / Remove | yes, before hash collection and again across delete; both released before the rebuild `BuildAndAccept` |
 | `Transaction::Delete` | no | must already be held if the caller uses it | yes, internally |
 
 `IndexLock` is a 256-way stripe of recursive mutexes, selected by `hashGenesis.Get64(0) % 256`. The same genesis always shares one stripe. It is recursive because `Index()` and `Delete()` lock it even when the caller already holds it.
@@ -149,7 +149,7 @@ flowchart TD
     end
 ```
 
-`SanitizeUnconfirmed` must take `mempool.MUTEX` around its cleanup. Otherwise it can `Delete` the SessionDB index or `Remove` the pool entry between `Accept` and `Index`/rollback. It must drop both locks before calling `BuildAndAccept`, because `BuildAndAccept` takes the authentication lock and then `mempool.MUTEX`.
+`SanitizeUnconfirmed` must take `mempool.MUTEX`, then `IndexLock`, before it collects the unconfirmed hash list, and must still hold both across Disconnect / Delete / Remove. Otherwise a concurrent accept can append a successor during the scan, and `Delete` on the stale predecessor rewrites `indexing.last`. It drops `IndexLock` only while `SanitizeContract` takes `CLIENT_MUTEX` (that path already holds `CLIENT_MUTEX` and then `IndexLock`), then re-reads the tail under both locks and refuses to delete if the tail changed. It must drop both locks before calling `BuildAndAccept`, because `BuildAndAccept` takes the authentication lock and then `mempool.MUTEX`.
 
 `IndexSigchain` must not take `mempool.MUTEX`. It already holds `CLIENT_MUTEX`. Session-index exclusion is `IndexLock`, not the pool lock.
 

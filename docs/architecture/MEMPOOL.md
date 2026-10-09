@@ -125,7 +125,7 @@ flowchart TD
     I -->|yes| J[Remove descendants then parent]
 ```
 
-`Mempool::Check()` holds `MUTEX`, then `Transaction::IndexLock(genesis)`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, and disconnects in reverse sequence order. It is an exception to I3: if `Disconnect` throws or returns false, it aborts the memory transaction and then explicitly calls `Remove(hashTx)` to force-evict that stuck orphan so the sweep cannot loop on it forever. It does not leave the map entry in place. A disconnect that returns true is erased only after that successful disconnect, and the memory transaction is committed only if it was not aborted.
+The flowchart is the rule for every caller except `Mempool::Check()`. `Check()` holds `MUTEX`, then `Transaction::IndexLock(genesis)`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, and disconnects in reverse sequence order. It is an exception to I3: if `Disconnect` throws or returns false, it aborts the memory transaction and then explicitly calls `Remove(hashTx)` to force-evict that stuck orphan so the sweep cannot loop on it forever. It does not leave the map entry in place. A disconnect that returns true is erased only after that successful disconnect, and the memory transaction is committed only if it was not aborted.
 
 ---
 
