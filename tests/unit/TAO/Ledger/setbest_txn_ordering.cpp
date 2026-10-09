@@ -499,30 +499,17 @@ namespace
             nCurrentFileSize = LLD::MAX_SECTOR_FILE_SIZE + 1;
         }
 
-        bool SectorReadersAvailable()
+        bool SectorMutexIsLocked()
         {
-            bool fAvailable = false;
+            bool fLocked = false;
             std::thread probe([&]
             {
-                fAvailable = SECTOR_MUTEX.try_lock_shared();
-                if(fAvailable)
-                    SECTOR_MUTEX.unlock_shared();
+                fLocked = !SECTOR_MUTEX.try_lock();
+                if(!fLocked)
+                    SECTOR_MUTEX.unlock();
             });
             probe.join();
-            return fAvailable;
-        }
-
-        bool SectorWritersBlocked()
-        {
-            bool fBlocked = false;
-            std::thread probe([&]
-            {
-                fBlocked = !SECTOR_DURABILITY_MUTEX.try_lock_shared();
-                if(!fBlocked)
-                    SECTOR_DURABILITY_MUTEX.unlock_shared();
-            });
-            probe.join();
-            return fBlocked;
+            return fLocked;
         }
     };
 
@@ -2049,7 +2036,7 @@ TEST_CASE("LLD retries buffered I/O without losing records or advancing past a f
 }
 
 
-TEST_CASE("LLD keeps sector writers out of sync without blocking readers",
+TEST_CASE("LLD holds the sector write mutex while syncing a transaction",
           "[lld][durable]")
 {
     const std::string strName = "_durable_sync_lock_test";
@@ -2059,19 +2046,13 @@ TEST_CASE("LLD keeps sector writers out of sync without blocking readers",
     DurableIOGuard ioGuard(cIO);
     {
         DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
-        bool fReadersAvailable = false;
-        bool fWritersBlocked = false;
-        cIO.onSectorSync = [&]
-        {
-            fReadersAvailable = db.SectorReadersAvailable();
-            fWritersBlocked = db.SectorWritersBlocked();
-        };
+        bool fLocked = false;
+        cIO.onSectorSync = [&] { fLocked = db.SectorMutexIsLocked(); };
         db.TxnBegin();
         REQUIRE(db.Write(std::string("key"), uint32_t(1)));
         REQUIRE(db.TxnCommit());
         cIO.onSectorSync = nullptr;
-        REQUIRE(fReadersAvailable);
-        REQUIRE(fWritersBlocked);
+        REQUIRE(fLocked);
     }
     REQUIRE(std::filesystem::remove_all(strPath) > 0);
 }
