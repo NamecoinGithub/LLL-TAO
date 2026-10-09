@@ -1201,23 +1201,12 @@ namespace LLD
             if(!Client->ReadBlock(hashBlock, block))
                 return false;
 
-            if(block.GetHash() != hashBlock)
-                return debug::error(FUNCTION, "client block hash does not match requested key");
-
             /* Set the return value. */
             state = block;
             return true;
         }
 
-        TAO::Ledger::BlockState block;
-        if(!Read(hashBlock, block))
-            return false;
-
-        if(block.GetHash() != hashBlock)
-            return debug::error(FUNCTION, "block hash does not match requested key");
-
-        state = std::move(block);
-        return true;
+        return Read(hashBlock, state);
     }
 
 
@@ -1232,9 +1221,6 @@ namespace LLD
             if(!Client->ReadBlock(hashBlock, block))
                 return false;
 
-            if(block.GetHash() != hashBlock)
-                return debug::error(FUNCTION, "client block hash does not match requested key");
-
             /* Set the return value. */
             atomicState.store(block);
             return true;
@@ -1243,9 +1229,6 @@ namespace LLD
         TAO::Ledger::BlockState state;
         if(!Read(hashBlock, state))
             return false;
-
-        if(state.GetHash() != hashBlock)
-            return debug::error(FUNCTION, "block hash does not match requested key");
 
         atomicState.store(state);
         return true;
