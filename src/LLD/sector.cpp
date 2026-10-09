@@ -80,12 +80,14 @@ namespace LLD
 
 
         /* True for any journal.*.pending name, including ones that are not a
-         * canonical sequence. Those must fail closed rather than be skipped. */
+         * canonical sequence. Those must fail closed rather than be skipped.
+         * The length check is inclusive so journal..pending, an empty sequence,
+         * reaches ParsePendingSequence() instead of being ignored. */
         bool IsPendingJournalName(const std::string& strFile)
         {
             static const std::string strPrefix = "journal.";
             static const std::string strSuffix = ".pending";
-            return strFile.size() > strPrefix.size() + strSuffix.size()
+            return strFile.size() >= strPrefix.size() + strSuffix.size()
                 && strFile.compare(0, strPrefix.size(), strPrefix) == 0
                 && strFile.compare(strFile.size() - strSuffix.size(), strSuffix.size(), strSuffix) == 0;
         }

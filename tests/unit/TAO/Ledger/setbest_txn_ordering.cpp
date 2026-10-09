@@ -2688,6 +2688,35 @@ TEST_CASE("parked journal names must be canonical unsigned sequences",
 }
 
 
+TEST_CASE("empty pending journal sequence fails closed",
+          "[lld][durable][recovery]")
+{
+    const std::string strName = "_pending_empty_sequence";
+    const std::string strPath = config::GetDataDir() + strName;
+    const std::string strPending = strPath + "/journal..pending";
+    std::filesystem::remove_all(strPath);
+    {
+        DurabilityTestDatabase db(strName, LLD::FLAGS::CREATE | LLD::FLAGS::WRITE, 8);
+        {
+            std::ofstream cPending(strPending, std::ios::binary | std::ios::trunc);
+            REQUIRE(cPending.is_open());
+            cPending << "payload";
+            REQUIRE(cPending.good());
+        }
+
+        /* journal..pending matches journal.*.pending with an empty sequence.
+         * Listing and discard must reject it rather than treat it as absent. */
+        std::vector<uint64_t> vSequences;
+        REQUIRE_FALSE(db.TxnPendingSequences(vSequences));
+        REQUIRE(vSequences.empty());
+        REQUIRE_FALSE(db.TxnDiscardPendingJournals(true));
+        REQUIRE(std::filesystem::exists(strPending));
+        REQUIRE(std::filesystem::remove(strPending));
+    }
+    REQUIRE(std::filesystem::remove_all(strPath) > 0);
+}
+
+
 TEST_CASE("deferred commit barriers are tracked per recovery group",
           "[lld][txncommit][durable]")
 {
