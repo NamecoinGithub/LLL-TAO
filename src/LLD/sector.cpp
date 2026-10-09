@@ -12,7 +12,6 @@
 ____________________________________________________________________________________________*/
 
 #include <LLD/templates/sector.h>
-#include <LLD/include/global.h>
 
 #include <LLD/cache/binary_lfu.h>
 #include <LLD/cache/binary_lru.h>
@@ -23,77 +22,15 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 #include <Util/include/hex.h>
 
-#include <algorithm>
-#include <cerrno>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <iomanip>
-#include <limits>
 #include <memory>
 #include <set>
 
 namespace LLD
 {
-    #ifdef UNIT_TESTS
-    namespace
-    {
-        std::atomic<uint32_t> nJournalRemovalAllow{0};
-        std::atomic<uint32_t> nJournalRemovalFail{0};
-    }
-
-
-    void SetJournalRemovalFault(const uint32_t nAllow, const uint32_t nFail)
-    {
-        nJournalRemovalAllow.store(nAllow);
-        nJournalRemovalFail.store(nFail);
-    }
-    #endif
-
-
-    namespace
-    {
-        /* True when a test asked this removal to fail. The file is left in place. */
-        bool ConsumeJournalRemovalFault(std::error_code& ecRemove)
-        {
-            #ifdef UNIT_TESTS
-            if(nJournalRemovalAllow.load() > 0)
-            {
-                nJournalRemovalAllow.fetch_sub(1);
-                return false;
-            }
-
-            if(nJournalRemovalFail.load() > 0)
-            {
-                nJournalRemovalFail.fetch_sub(1);
-                ecRemove = std::make_error_code(std::errc::io_error);
-                return true;
-            }
-            #else
-            (void)ecRemove;
-            #endif
-
-            return false;
-        }
-
-
-        /* True for any journal.*.pending name, including ones that are not a
-         * canonical sequence. Those must fail closed rather than be skipped.
-         * The length check is inclusive so journal..pending, an empty sequence,
-         * reaches ParsePendingSequence() instead of being ignored. */
-        bool IsPendingJournalName(const std::string& strFile)
-        {
-            static const std::string strPrefix = "journal.";
-            static const std::string strSuffix = ".pending";
-            return strFile.size() >= strPrefix.size() + strSuffix.size()
-                && strFile.compare(0, strPrefix.size(), strPrefix) == 0
-                && strFile.compare(strFile.size() - strSuffix.size(), strSuffix.size(), strSuffix) == 0;
-        }
-    }
-
-
     /* The Database Constructor. To determine file location and the Bytes per Record. */
     template<class KeychainType, class CacheType>
     SectorDatabase<KeychainType, CacheType>::SectorDatabase(const std::string& strNameIn,
@@ -147,12 +84,20 @@ namespace LLD
     template<class KeychainType, class CacheType>
     SectorDatabase<KeychainType, CacheType>::~SectorDatabase()
     {
-        /* Parked journals are the crash record for deferred applies. Drop them
-         * only after recovery succeeded and this database's own sync succeeded.
-         * Sequences whose recovery group has not quiesced are retained by
-         * TxnDiscardPendingJournals(); a Contract destructor must not delete a
-         * MERKLE journal before Logical and Client have synced. */
-        const bool fSynced = QuiesceAndSync();
+        fDestruct = true;
+        CONDITION.notify_all();
+
+        if(CacheWriterThread.joinable())
+            CacheWriterThread.join();
+
+        if(MeterThread.joinable())
+            MeterThread.join();
+
+        {
+            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
+            if(!cDurability.Sync(DurableIO::Current()))
+                debug::error(FUNCTION, "failed to sync sector files during shutdown");
+        }
 
         if(pTransaction)
             delete pTransaction;
@@ -164,45 +109,7 @@ namespace LLD
             delete fileCache;
 
         if(pSectorKeys)
-        {
             delete pSectorKeys;
-            pSectorKeys = nullptr;
-        }
-
-        if(MayDiscardPendingJournals() && fSynced && !TxnDiscardPendingJournals())
-            debug::error(FUNCTION, "failed to discard parked journals during shutdown");
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::QuiesceAndSync()
-    {
-        fDestruct = true;
-        CONDITION.notify_all();
-
-        if(CacheWriterThread.joinable())
-            CacheWriterThread.join();
-
-        if(MeterThread.joinable())
-            MeterThread.join();
-
-        bool fSectorSynced = false;
-        {
-            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
-            fSectorSynced = cDurability.Sync(DurableIO::Current());
-            if(!fSectorSynced)
-                debug::error(FUNCTION, "failed to sync sector files during shutdown");
-        }
-
-        bool fKeysSynced = true;
-        if(pSectorKeys)
-        {
-            fKeysSynced = pSectorKeys->SyncTouchedFiles();
-            if(!fKeysSynced)
-                debug::error(FUNCTION, "failed to sync keychain files during shutdown");
-        }
-
-        return fSectorSynced && fKeysSynced;
     }
 
 
@@ -784,7 +691,7 @@ namespace LLD
 
     /*  Write the transaction commitment message. */
     template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnCheckpoint(const bool fDeferDirtySync)
+    bool SectorDatabase<KeychainType, CacheType>::TxnCheckpoint()
     {
         LOCK(TRANSACTION_MUTEX);
 
@@ -793,16 +700,8 @@ namespace LLD
             return false;
 
         /* A durable journal must never reference newly created keychain storage
-         * whose file and directory entries have not reached stable storage.
-         * Deferred commits must not fsync update-dirty keychain files here:
-         * that writeback is the historical-sync stall, and the parked journal
-         * remains the recovery record until the later data barrier. */
-        if(fDeferDirtySync)
-        {
-            if(!pSectorKeys->SyncCreatedFiles())
-                return debug::error(FUNCTION, "failed to sync created keychain storage");
-        }
-        else if(!pSectorKeys->SyncTouchedFiles())
+         * whose file and directory entries have not reached stable storage. */
+        if(!pSectorKeys->SyncTouchedFiles())
             return debug::error(FUNCTION, "failed to sync keychain storage");
 
         /* Set commit message into journal. */
@@ -874,7 +773,7 @@ namespace LLD
 
     /*  Commit data from transaction object. */
     template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnCommit(const bool fSyncData)
+    bool SectorDatabase<KeychainType, CacheType>::TxnCommit()
     {
         LOCK(TRANSACTION_MUTEX);
 
@@ -882,21 +781,68 @@ namespace LLD
         if(!pTransaction)
             return false;
 
-        if(!ApplyTransaction(*pTransaction))
-            return false;
+        pSectorKeys->BeginDurabilityTracking();
 
-        /* The checkpoint sync ran before this apply. Put() and Force() can
-         * create hashmap and sector files while applying, and a deferred commit
-         * parks the journal as soon as this returns. Sync those new files and
-         * their directory entries now. Update-dirty pages stay tracked until
-         * the coordinator's data barrier. */
-        if(fSyncData)
+        /* Erase data set to be removed. Erase is idempotent for missing keys
+         * and still propagates keychain I/O failures. */
+        for(const auto& item : pTransaction->setErasedData)
         {
-            if(!SyncDeferredLocked())
-                return false;
+            if(!pSectorKeys->Erase(item))
+                return debug::error(FUNCTION, "failed to erase from keychain");
         }
-        else if(!SyncCreatedLocked())
-            return false;
+
+        /* Commit the sector data. */
+        for(const auto& item : pTransaction->mapTransactions)
+        {
+            if(!Force(item.first, item.second))
+                return debug::error(FUNCTION, "failed to commit sector data");
+
+            SectorKey cKey;
+            if(!pSectorKeys->Get(item.first, cKey))
+                return debug::error(FUNCTION, "failed to read committed sector key");
+        }
+
+        /* Commit keychain entries. */
+        for(const auto& item : pTransaction->setKeychain)
+        {
+            SectorKey cKey(STATE::READY, item, 0, 0, 0);
+            if(!pSectorKeys->Put(cKey))
+                return debug::error(FUNCTION, "failed to commit to keychain");
+        }
+
+        /* Commit the index data. */
+        std::map<std::vector<uint8_t>, SectorKey> mapIndex;
+        for(const auto& item : pTransaction->mapIndex)
+        {
+            /* Get the key. */
+            SectorKey cKey;
+            if(mapIndex.count(item.second))
+                cKey = mapIndex[item.second];
+            else
+            {
+                /* Check for the new indexing entry. */
+                if(!pSectorKeys->Get(item.second, cKey))
+                    return debug::error(FUNCTION, "failed to read indexing entry");
+
+                mapIndex[item.second] = cKey;
+            }
+
+            /* Write the new sector key. */
+            cKey.SetKey(item.first);
+            if(!pSectorKeys->Put(cKey))
+                return debug::error(FUNCTION, "failed to write indexing entry");
+        }
+
+        /* Make all pending sector writes and their new directory entries durable
+         * before the transaction journal can be released. */
+        {
+            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
+            if(!cDurability.Sync(DurableIO::Current()))
+                return debug::error(FUNCTION, "failed to sync sector files");
+        }
+
+        if(!pSectorKeys->SyncTouchedFiles())
+            return debug::error(FUNCTION, "failed to sync keychain files");
 
         /* Cleanup the transaction object. */
         delete pTransaction;
@@ -914,9 +860,7 @@ namespace LLD
             debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
 
         std::error_code ec;
-        /* Do not follow links. A dangling journal.dat is a crash record, and a
-         * link to a regular file is not a payload inside this directory. */
-        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(strJournal, ec);
+        const std::filesystem::file_status nStatus = std::filesystem::status(strJournal, ec);
         if(ec)
         {
             if(ec == std::errc::no_such_file_or_directory)
@@ -948,523 +892,96 @@ namespace LLD
 
         /* Parse into a temporary transaction so failures retain the existing state. */
         std::unique_ptr<SectorTransaction> pRecovery(new SectorTransaction());
-        bool fCommit = false;
-        if(!ParseJournal(vBuffer, *pRecovery, fCommit))
-            return RECOVERY::FAILED;
-
-        if(!fCommit)
-        {
-            debug::log(0, FUNCTION, strName, " transaction journal never reached commit");
-            return RECOVERY::INCOMPLETE;
-        }
-
-        LOCK(TRANSACTION_MUTEX);
-        delete pTransaction;
-        pTransaction = pRecovery.release();
-
-        debug::log(0, FUNCTION, strName, " transaction journal ready to be restored");
-        return RECOVERY::COMPLETE;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    std::string SectorDatabase<KeychainType, CacheType>::JournalDirectory() const
-    {
-        return debug::safe_printstr(config::GetDataDir(), strName, "/");
-    }
-
-
-    template<class KeychainType, class CacheType>
-    std::string SectorDatabase<KeychainType, CacheType>::JournalPath() const
-    {
-        return debug::safe_printstr(config::GetDataDir(), strName, "/journal.dat");
-    }
-
-
-    template<class KeychainType, class CacheType>
-    std::string SectorDatabase<KeychainType, CacheType>::PendingJournalPath(const uint64_t nSequence) const
-    {
-        return debug::safe_printstr(config::GetDataDir(), strName, "/journal.",
-            std::setfill('0'), std::setw(8), nSequence, ".pending");
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::ParsePendingSequence(const std::string& strFile,
-                                                                       uint64_t& nSequence) const
-    {
-        /* strtoull accepts a leading sign and saturates on overflow. Either
-         * would record a sequence whose PendingJournalPath() is a different
-         * file, so recovery would skip the real payload and discard could
-         * delete it. Accept only an unsigned decimal that round-trips to the
-         * filename this database would park. */
-        if(!IsPendingJournalName(strFile))
-            return false;
-
-        static const std::string strPrefix = "journal.";
-        static const std::string strSuffix = ".pending";
-        const std::string strSequence = strFile.substr(
-            strPrefix.size(), strFile.size() - strPrefix.size() - strSuffix.size());
-        if(strSequence.empty()
-        || strSequence.find_first_not_of("0123456789") != std::string::npos)
-            return false;
-
-        errno = 0;
-        char* pEnd = nullptr;
-        const unsigned long long nParsed = std::strtoull(strSequence.c_str(), &pEnd, 10);
-        if(errno == ERANGE || !pEnd || *pEnd != '\0' || nParsed == 0
-        || nParsed > std::numeric_limits<uint64_t>::max())
-            return false;
-
-        nSequence = static_cast<uint64_t>(nParsed);
-        return std::filesystem::path(PendingJournalPath(nSequence)).filename() == strFile;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::ApplyTransaction(SectorTransaction& tx)
-    {
-        pSectorKeys->BeginDurabilityTracking();
-
-        /* Erase is idempotent for missing keys and still propagates keychain I/O failures. */
-        for(const auto& item : tx.setErasedData)
-        {
-            if(!pSectorKeys->Erase(item))
-                return debug::error(FUNCTION, "failed to erase from keychain");
-        }
-
-        for(const auto& item : tx.mapTransactions)
-        {
-            if(!Force(item.first, item.second))
-                return debug::error(FUNCTION, "failed to commit sector data");
-
-            SectorKey cKey;
-            if(!pSectorKeys->Get(item.first, cKey))
-                return debug::error(FUNCTION, "failed to read committed sector key");
-        }
-
-        for(const auto& item : tx.setKeychain)
-        {
-            SectorKey cKey(STATE::READY, item, 0, 0, 0);
-            if(!pSectorKeys->Put(cKey))
-                return debug::error(FUNCTION, "failed to commit to keychain");
-        }
-
-        std::map<std::vector<uint8_t>, SectorKey> mapIndex;
-        for(const auto& item : tx.mapIndex)
-        {
-            SectorKey cKey;
-            if(mapIndex.count(item.second))
-                cKey = mapIndex[item.second];
-            else
-            {
-                if(!pSectorKeys->Get(item.second, cKey))
-                    return debug::error(FUNCTION, "failed to read indexing entry");
-
-                mapIndex[item.second] = cKey;
-            }
-
-            cKey.SetKey(item.first);
-            if(!pSectorKeys->Put(cKey))
-                return debug::error(FUNCTION, "failed to write indexing entry");
-        }
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::SyncCreatedLocked()
-    {
-        {
-            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
-            if(!cDurability.SyncCreated(DurableIO::Current()))
-                return debug::error(FUNCTION, "failed to sync created sector files");
-        }
-
-        if(!pSectorKeys->SyncCreatedFiles())
-            return debug::error(FUNCTION, "failed to sync created keychain storage");
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::SyncDeferredLocked()
-    {
-        {
-            WRITE_LOCK(SECTOR_DURABILITY_MUTEX);
-            if(!cDurability.Sync(DurableIO::Current()))
-                return debug::error(FUNCTION, "failed to sync sector files");
-        }
-
-        if(!pSectorKeys->SyncTouchedFiles())
-            return debug::error(FUNCTION, "failed to sync keychain files");
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::ParseJournal(const std::vector<uint8_t>& vBuffer,
-                                                               SectorTransaction& tx,
-                                                               bool& fCommit) const
-    {
-        fCommit = false;
-        if(vBuffer.empty())
-            return true;
 
         try
         {
+            /* Serialize the key. */
             const DataStream ssJournal(vBuffer, SER_LLD, DATABASE_VERSION);
             while(!ssJournal.End())
             {
+                /* Read the data entry type. */
                 std::string strType;
                 ssJournal >> strType;
 
+                /* Check for Erase. */
                 if(strType == "erase")
                 {
+                    /* Get the key to erase. */
                     std::vector<uint8_t> vKey;
                     ssJournal >> vKey;
-                    tx.EraseTransaction(vKey);
+
+                    /* Erase the key. */
+                    pRecovery->EraseTransaction(vKey);
+
+                    /* Debug output. */
                     debug::log(0, FUNCTION, "erasing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
                 }
                 else if(strType == "key")
                 {
+                    /* Get the key to write. */
                     std::vector<uint8_t> vKey;
                     ssJournal >> vKey;
-                    tx.setKeychain.insert(vKey);
+
+                    /* Write the key. */
+                    pRecovery->setKeychain.insert(vKey);
+
+                    /* Debug output. */
                     debug::log(0, FUNCTION, "writing keychain ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
                 }
                 else if(strType == "write")
                 {
+                    /* Get the key to write. */
                     std::vector<uint8_t> vKey;
                     ssJournal >> vKey;
+
+                    /* Get the data to write. */
                     std::vector<uint8_t> vData;
                     ssJournal >> vData;
-                    tx.mapTransactions[vKey] = vData;
+
+                    /* Write the sector data. */
+                    pRecovery->mapTransactions[vKey] = vData;
+
+                    /* Debug output. */
                     debug::log(0, FUNCTION, "writing data ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
                 }
                 else if(strType == "index")
                 {
+                    /* Get the key to index. */
                     std::vector<uint8_t> vKey;
                     ssJournal >> vKey;
+
+                    /* Get the data to index to. */
                     std::vector<uint8_t> vIndex;
                     ssJournal >> vIndex;
-                    tx.mapIndex[vKey] = vIndex;
+
+                    /* Set the indexing key. */
+                    pRecovery->mapIndex[vKey] = vIndex;
+
+                    /* Debug output. */
                     debug::log(0, FUNCTION, "indexing key ", HexStr(vKey.begin(), vKey.end()).substr(0, 20));
                 }
                 else if(strType == "commit")
                 {
-                    fCommit = true;
-                    return true;
+                    LOCK(TRANSACTION_MUTEX);
+                    delete pTransaction;
+                    pTransaction = pRecovery.release();
+
+                    debug::log(0, FUNCTION, strName, " transaction journal ready to be restored");
+                    return RECOVERY::COMPLETE;
                 }
                 else
-                    return debug::error(FUNCTION, strName, " transaction journal contains invalid entry");
+                    return debug::error(FUNCTION, strName, " transaction journal contains invalid entry"),
+                           RECOVERY::FAILED;
             }
         }
         catch(const std::exception& e)
         {
-            return debug::error(FUNCTION, strName, " transaction journal parse failed: ", e.what());
+            return debug::error(FUNCTION, strName, " transaction journal parse failed: ", e.what()),
+                   RECOVERY::FAILED;
         }
 
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    uint64_t SectorDatabase<KeychainType, CacheType>::TxnJournalBytes() const
-    {
-        std::error_code ec;
-        const std::string strJournal = JournalPath();
-        if(!std::filesystem::is_regular_file(strJournal, ec) || ec)
-            return 0;
-
-        const auto nSize = std::filesystem::file_size(strJournal, ec);
-        if(ec)
-            return 0;
-
-        return static_cast<uint64_t>(nSize);
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnHasRecoverableJournal() const
-    {
-        std::error_code ec;
-        const std::string strJournal = JournalPath();
-        const std::filesystem::file_status nStatus = std::filesystem::symlink_status(strJournal, ec);
-        if(ec == std::errc::no_such_file_or_directory)
-            return false;
-
-        /* An unreadable, symlink, or other non-regular journal is a recovery
-         * failure. Treating it as absent would let the other group truncate a
-         * shared copy, or would apply a payload outside this directory. */
-        if(ec || !std::filesystem::exists(nStatus))
-            return static_cast<bool>(ec);
-
-        if(!std::filesystem::is_regular_file(nStatus))
-            return true;
-
-        const auto nSize = std::filesystem::file_size(strJournal, ec);
-        if(ec)
-            return true;
-
-        return nSize > 0;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnPendingSequences(std::vector<uint64_t>& vSequences) const
-    {
-        vSequences.clear();
-
-        std::error_code ec;
-        const std::string strDirectory = JournalDirectory();
-        std::filesystem::directory_iterator itEntries(strDirectory, ec);
-        /* Absent directory is the normal empty case. Any other open or
-         * increment error must not look like "no parked journals". */
-        if(ec == std::errc::no_such_file_or_directory)
-            return true;
-        if(ec)
-            return debug::error(FUNCTION, strName, " failed to list parked journals");
-
-        const std::filesystem::directory_iterator itEnd;
-        while(itEntries != itEnd)
-        {
-            const std::string strFile = itEntries->path().filename().string();
-            itEntries.increment(ec);
-            if(ec)
-            {
-                vSequences.clear();
-                return debug::error(FUNCTION, strName, " failed to list parked journals");
-            }
-
-            if(!IsPendingJournalName(strFile))
-                continue;
-
-            uint64_t nSequence = 0;
-            if(!ParsePendingSequence(strFile, nSequence))
-            {
-                vSequences.clear();
-                return debug::error(FUNCTION, strName,
-                    " parked journal name is not a canonical sequence");
-            }
-
-            vSequences.push_back(nSequence);
-        }
-
-        std::sort(vSequences.begin(), vSequences.end());
-        vSequences.erase(std::unique(vSequences.begin(), vSequences.end()), vSequences.end());
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnParkJournal(const uint64_t nSequence)
-    {
-        LOCK(TRANSACTION_MUTEX);
-
-        const std::string strPending = PendingJournalPath(nSequence);
-        /* filesystem::exists uses stat and follows links, so a dangling symlink
-         * looks absent. std::rename would then replace that malformed recovery
-         * record. Reject every existing non-not_found destination first. */
-        std::error_code ecPending;
-        const std::filesystem::file_status nPendingStatus =
-            std::filesystem::symlink_status(strPending, ecPending);
-        if(ecPending != std::errc::no_such_file_or_directory
-        && (ecPending || nPendingStatus.type() != std::filesystem::file_type::not_found))
-            return debug::error(FUNCTION, strName, " pending journal already exists");
-
-        if(!filesystem::rename(JournalPath(), strPending))
-            return debug::error(FUNCTION, strName, " failed to park transaction journal");
-
-        if(!DurableIO::Current().SyncDirectoryChain(JournalDirectory()))
-            return debug::error(FUNCTION, strName, " failed to sync parked journal directory");
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnDiscardPendingJournals(const bool fAfterDataSync)
-    {
-        LOCK(TRANSACTION_MUTEX);
-
-        /* The coordinator may discard only after its data sync. Every other
-         * caller, including database shutdown, must keep the crash record when
-         * recovery failed or has not succeeded. */
-        if(!fAfterDataSync && !MayDiscardPendingJournals())
-            return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
-
-        std::error_code ec;
-        const std::string strDirectory = JournalDirectory();
-        if(!std::filesystem::exists(strDirectory, ec))
-            return !ec;
-
-        /* Range-for uses the throwing iterator increment. A listing error in
-         * the destructor must return false and keep the recovery records. */
-        std::filesystem::directory_iterator itEntries(strDirectory, ec);
-        if(ec)
-            return debug::error(FUNCTION, strName, " failed to list parked journals");
-
-        const std::filesystem::directory_iterator itEnd;
-        std::vector<std::filesystem::path> vDiscard;
-        while(itEntries != itEnd)
-        {
-            const std::filesystem::directory_entry cEntry = *itEntries;
-            itEntries.increment(ec);
-            if(ec)
-                return debug::error(FUNCTION, strName, " failed to list parked journals");
-
-            if(!fAfterDataSync && !MayDiscardPendingJournals())
-                return debug::error(FUNCTION, strName, " refusing to discard parked journals; recovery is required");
-
-            const std::string strFile = cEntry.path().filename().string();
-            if(!IsPendingJournalName(strFile))
-                continue;
-
-            uint64_t nSequence = 0;
-            if(!ParsePendingSequence(strFile, nSequence))
-                return debug::error(FUNCTION, strName, " parked journal name is not a canonical sequence");
-
-            /* A directory or symlink with a pending name is a malformed crash
-             * record. Do not queue it for removal; retain it for inspection. */
-            std::error_code ecStatus;
-            const std::filesystem::file_status cStatus = cEntry.symlink_status(ecStatus);
-            if(ecStatus || cStatus.type() != std::filesystem::file_type::regular)
-                return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
-
-            vDiscard.push_back(cEntry.path());
-        }
-
-        bool fRemoved = false;
-        /* A later removal error must not return before earlier deletions are
-         * durable. Recovery is still failed; the directory sync keeps those
-         * copies from reappearing as if this call never ran. */
-        const auto FailAfterRemoval = [&](const std::string& strMessage) -> bool
-        {
-            if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
-                return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
-
-            return debug::error(FUNCTION, strName, strMessage);
-        };
-
-        for(const std::filesystem::path& pathPending : vDiscard)
-        {
-            if(!fAfterDataSync && !MayDiscardPendingJournals())
-                return FailAfterRemoval(" refusing to discard parked journals; recovery is required");
-
-            /* fAfterDataSync is the coordinator path that already quiesced every
-             * participant in the group. A per-database caller must not delete a
-             * sequence until that group barrier has completed, or an untracked
-             * sequence on Contract/Register that may belong to the other group. */
-            uint64_t nSequence = 0;
-            if(!ParsePendingSequence(pathPending.filename().string(), nSequence))
-                return FailAfterRemoval(" parked journal name is not a canonical sequence");
-
-            if(!fAfterDataSync && !MayDiscardPendingSequence(this, nSequence))
-                continue;
-
-            std::error_code ecRemove;
-            if(ConsumeJournalRemovalFault(ecRemove)
-            || !std::filesystem::remove(pathPending, ecRemove) || ecRemove)
-                return FailAfterRemoval(" failed to discard parked journal");
-
-            fRemoved = true;
-        }
-
-        if(!DurableIO::Current().SyncDirectoryChain(strDirectory))
-            return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnDiscardPendingSequences(
-        const std::vector<uint64_t>& vSequences)
-    {
-        LOCK(TRANSACTION_MUTEX);
-
-        /* The coordinator calls this only after the owning group's data sync.
-         * Other groups' sequences are not in vSequences and must remain. */
-        if(vSequences.empty())
-            return true;
-
-        const std::string strDirectory = JournalDirectory();
-        bool fRemoved = false;
-        /* Same durability rule as TxnDiscardPendingJournals(): earlier deletions
-         * in this call are synced before a later removal or type error returns. */
-        const auto FailAfterRemoval = [&](const std::string& strMessage) -> bool
-        {
-            if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
-                return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
-
-            return debug::error(FUNCTION, strName, strMessage);
-        };
-
-        for(const uint64_t nSequence : vSequences)
-        {
-            const std::string strPending = PendingJournalPath(nSequence);
-            std::error_code ec;
-            const std::filesystem::file_status cStatus = std::filesystem::symlink_status(strPending, ec);
-            if(cStatus.type() == std::filesystem::file_type::not_found
-            || ec == std::errc::no_such_file_or_directory)
-                continue;
-            if(ec || cStatus.type() != std::filesystem::file_type::regular)
-                return FailAfterRemoval(" parked journal is not a readable regular file");
-
-            std::error_code ecRemove;
-            if(ConsumeJournalRemovalFault(ecRemove)
-            || !std::filesystem::remove(strPending, ecRemove) || ecRemove)
-                return FailAfterRemoval(" failed to discard parked journal");
-
-            fRemoved = true;
-        }
-
-        if(fRemoved && !DurableIO::Current().SyncDirectoryChain(strDirectory))
-            return debug::error(FUNCTION, strName, " failed to sync discarded journal directory");
-
-        return true;
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnSyncDeferred()
-    {
-        LOCK(TRANSACTION_MUTEX);
-
-        return SyncDeferredLocked();
-    }
-
-
-    template<class KeychainType, class CacheType>
-    bool SectorDatabase<KeychainType, CacheType>::TxnReplayPending(const uint64_t nSequence)
-    {
-        LOCK(TRANSACTION_MUTEX);
-
-        const std::string strPending = PendingJournalPath(nSequence);
-        std::error_code ec;
-        const std::filesystem::file_status cStatus = std::filesystem::symlink_status(strPending, ec);
-        /* Success only when the path is absent. A directory, symlink, or other
-         * existing non-regular entry must not be skipped or followed. */
-        if(cStatus.type() == std::filesystem::file_type::not_found
-        || ec == std::errc::no_such_file_or_directory)
-            return true;
-        if(ec || cStatus.type() != std::filesystem::file_type::regular)
-            return debug::error(FUNCTION, strName, " parked journal is not a readable regular file");
-
-        std::vector<uint8_t> vBuffer;
-        if(!DurableIO::Current().Read(strPending, vBuffer))
-            return debug::error(FUNCTION, strName, " failed to read parked journal");
-
-        SectorTransaction tx;
-        bool fCommit = false;
-        if(!ParseJournal(vBuffer, tx, fCommit) || !fCommit)
-            return debug::error(FUNCTION, strName, " parked journal is not a complete commit");
-
-        return ApplyTransaction(tx);
+        debug::log(0, FUNCTION, strName, " transaction journal never reached commit");
+        return RECOVERY::INCOMPLETE;
     }
 
 

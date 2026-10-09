@@ -138,60 +138,17 @@ namespace LLD
     bool TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
-    /** Committed blocks whose sector and keychain fsync may be deferred.
-     *  Passing 1 restores a data barrier on every commit. This is a function
-     *  argument, not a nexus.conf option. */
-    static constexpr uint32_t SYNC_COMMIT_BLOCKS = 32;
-
-    /** Parked journal bytes that force a data barrier. Not a configuration option. */
-    static constexpr uint64_t SYNC_COMMIT_BYTES = 8ull * 1024ull * 1024ull;
-
-    /* Unit tests keep the historical per-commit barrier unless they opt in.
-     * The node binary defaults to SYNC_COMMIT_BLOCKS. */
-    #ifdef UNIT_TESTS
-    static constexpr uint32_t SYNC_COMMIT_BLOCKS_DEFAULT = 1;
-    #else
-    static constexpr uint32_t SYNC_COMMIT_BLOCKS_DEFAULT = SYNC_COMMIT_BLOCKS;
-    #endif
-
-
     /** Txn Commit
      *
      *  Global handler for all LLD instances.
      *
-     *  @param[in] nSyncCommitBlocks  Data/keychain fsyncs are coalesced until this
-     *             many commits in the same CONSENSUS or MERKLE recovery group,
-     *             SYNC_COMMIT_BYTES of that group's parked journals, or shutdown.
-     *             The other group's commits are not counted toward this threshold.
-     *             A barrier is newer than every parked journal, so it syncs both
-     *             groups and discards every parked sequence in global order.
-     *             Values below 2 sync on this commit. Default is
-     *             SYNC_COMMIT_BLOCKS_DEFAULT.
-     *
      *  @return True if every selected checkpoint and per-DB commit succeeded.
      *
      */
-    bool TxnCommit(const uint8_t nFlags = 0,
-                   const uint16_t nInstances = INSTANCES::CONSENSUS,
-                   const uint32_t nSyncCommitBlocks = SYNC_COMMIT_BLOCKS_DEFAULT);
+    bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
     /** Report whether the most recent owned transaction committed or requires recovery. */
     TXN_OUTCOME LastTxnOutcome();
-
-
-    /** Shutdown may delete parked journals only after recovery succeeded and no
-     *  later failure reported RECOVERY_REQUIRED. Replay and data-sync failures
-     *  clear this so the journals remain for the next startup. */
-    bool MayDiscardPendingJournals();
-
-
-    /** True when a per-database discard may delete this parked sequence.
-     *
-     *  Sequences owned by a CONSENSUS or MERKLE batch, and any untracked
-     *  sequence on the shared Contract or Register databases, stay until the
-     *  coordinator has quiesced that sequence's entire recovery group.
-     */
-    bool MayDiscardPendingSequence(const void* pDatabase, uint64_t nSequence);
 
 
     /** Abort a transaction automatically if its scope exits before it is consumed. */
@@ -220,16 +177,6 @@ namespace LLD
     /** Clear the recovery-required latch so unit tests can continue after a
      *  forced partial-apply failure. */
     void ResetTxnRecoveryRequired();
-
-
-    /** Quiesce both recovery groups and discard only sequences whose group synced.
-     *  Does not destroy database instances. */
-    bool TxnShutdownGroupBarrier();
-
-
-    /** Fail the next nFail parked-journal removals after nAllow successes.
-     *  Used to simulate a crash between participant deletions. */
-    void SetJournalRemovalFault(uint32_t nAllow, uint32_t nFail);
     #endif
 }
 
