@@ -26,6 +26,10 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/types/mempool.h>
 
+#include <Util/include/mutex.h>
+
+#include <array>
+
 /* Global TAO namespace. */
 namespace TAO::API
 {
@@ -314,9 +318,22 @@ namespace TAO::API
         }
     }
 
+    /* Stripe multi-record session index mutations by genesis. */
+    std::recursive_mutex& Transaction::IndexLock(const uint256_t& hashGenesis)
+    {
+        static std::array<std::recursive_mutex, 256> INDEX_LOCKS;
+        return INDEX_LOCKS[hashGenesis.Get64(0) % INDEX_LOCKS.size()];
+    }
+
+
     /* Index a transaction into the ledger database. */
     bool Transaction::Index(const uint512_t& hash)
     {
+        /* Same lock as snapshot/restore and Delete(). Tritium IndexSigchain()
+         * reaches this without mempool.MUTEX, so the session lock — not the
+         * pool lock — is what keeps a failed Index() from restoring over a
+         * concurrent successful index of this genesis. */
+        RECURSIVE(IndexLock(hashGenesis));
         /* Set our status to acceoted if transaction has been connected to a block. */
         if(LLD::Ledger->HasIndex(hash))
         {
@@ -368,6 +385,9 @@ namespace TAO::API
     /* Delete this transaction from the logical database. */
     bool Transaction::Delete(const uint512_t& hash)
     {
+        /* Serialize with Index() and snapshot restore. Callers that also hold
+         * mempool.MUTEX must already hold it; do not acquire it here. */
+        RECURSIVE(IndexLock(hashGenesis));
         /* Read our previous transaction. */
         if(!IsFirst())
         {

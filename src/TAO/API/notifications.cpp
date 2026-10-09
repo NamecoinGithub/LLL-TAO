@@ -571,6 +571,14 @@ namespace TAO::API
         /* If we reached here, we need to rebuild our sigchain indexes and transactions. */
         debug::notice(FUNCTION, "sigchain contains ", nFailedContracts, " invalid contracts (", nFeeContracts, " OP::FEE's removed), rebuilding ", vSanitized.size(), " contracts");
 
+        /* BuildAndAccept() holds mempool.MUTEX across Accept()/Index()/rollback.
+         * Take that lock, then the per-genesis session index lock, so this
+         * cleanup cannot delete a live index or remove a pool entry between
+         * those steps. Release both before BuildAndAccept() below: that path
+         * takes the authentication lock and then mempool.MUTEX. */
+        std::unique_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX);
+        std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
+
         /* Now we want to disconnect our transactions up to their root. */
         for(const auto& rHash : vHashes)
         {
@@ -598,6 +606,9 @@ namespace TAO::API
             if(rHash == hashRoot)
                 break;
         }
+
+        POOL_LOCK.unlock();
+        INDEX_LOCK.unlock();
 
         /* Now build our official transaction. */
         const std::vector<uint512_t> vRebuilt =

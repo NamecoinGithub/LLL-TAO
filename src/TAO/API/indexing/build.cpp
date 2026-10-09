@@ -18,6 +18,8 @@ ________________________________________________________________________________
 #include <TAO/API/types/indexing.h>
 #include <TAO/API/types/transaction.h>
 
+#include <mutex>
+
 /* Global TAO namespace. */
 namespace TAO::API
 {
@@ -164,6 +166,11 @@ namespace TAO::API
             if(!vIndex.empty())
                 debug::log(1, FUNCTION, "Updating ", vIndex.size(), " indexes for genesis=", hashGenesis.SubString());
 
+            /* Hold the session index lock across the whole rebuild. Each
+             * Index() takes it again. Release before BroadcastUnconfirmed(),
+             * which takes mempool.MUTEX (callers lock the pool first). */
+            std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
+
             /* Reverse iterate our list of entries and index. */
             for(auto hashTx = vIndex.rbegin(); hashTx != vIndex.rend(); ++hashTx)
             {
@@ -179,6 +186,8 @@ namespace TAO::API
                     debug::log(1, FUNCTION, "Updated Indexes for ", hashTx->SubString(), " to logical db");
                 }
             }
+
+            INDEX_LOCK.unlock();
 
             /* Check if we need to re-broadcast anything. */
             BroadcastUnconfirmed(hashGenesis);

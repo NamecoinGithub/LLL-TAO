@@ -73,7 +73,9 @@ namespace TAO::API
                     TAO::API::Transaction tIndex =
                         TAO::API::Transaction(tx);
 
-                    /* Index the transaction to the database. */
+                    /* Index() holds Transaction::IndexLock(genesis) for the
+                     * multi-record SessionDB write. Do not take mempool.MUTEX
+                     * here: this path already holds CLIENT_MUTEX. */
                     if(!tIndex.Index(hashTx))
                         return;
                 }

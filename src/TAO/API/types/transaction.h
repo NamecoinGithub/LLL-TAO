@@ -15,6 +15,8 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/types/transaction.h>
 
+#include <mutex>
+
 /* Global TAO namespace. */
 namespace TAO::API
 {
@@ -177,6 +179,22 @@ namespace TAO::API
          *
          **/
         void Broadcast();
+
+
+        /** IndexLock
+         *
+         *  Recursive lock for multi-record SessionDB index mutations on one
+         *  sigchain. Index(), Delete(), snapshot/restore, and sigchain rebuild
+         *  must share this lock. It is striped by genesis, so the same genesis
+         *  always maps to the same mutex. Callers that also hold
+         *  mempool.MUTEX must acquire that lock first.
+         *
+         *  @param[in] hashGenesis The sigchain this index mutation belongs to.
+         *
+         *  @return The recursive mutex for this genesis stripe.
+         *
+         **/
+        static std::recursive_mutex& IndexLock(const uint256_t& hashGenesis);
 
 
         /** Index

@@ -191,6 +191,9 @@ namespace TAO::API
             bool        fHaveLast   = false;
             uint512_t   hashLast    = 0;
 
+            /* Confirmed absent, as opposed to an unreadable last index. */
+            bool        fAbsentLast = false;
+
             bool        fHaveTx     = false;
             Transaction txStored;
 
@@ -223,7 +226,16 @@ namespace TAO::API
             else
                 snap.fAbsentFirst = true;
 
-            snap.fHaveLast = LLD::Sessions->ReadLast(tIndex.hashGenesis, snap.hashLast);
+            /* ReadLast() is false for both absence and an unreadable value.
+             * HasLast() is the existence check, matching HasFirst()/HasTx(). */
+            if(LLD::Sessions->HasLast(tIndex.hashGenesis))
+            {
+                snap.fHaveLast = LLD::Sessions->ReadLast(tIndex.hashGenesis, snap.hashLast);
+                if(!snap.fHaveLast)
+                    snap.fIncomplete = true;
+            }
+            else
+                snap.fAbsentLast = true;
 
             if(LLD::Sessions->HasTx(hashTx))
             {
@@ -276,9 +288,15 @@ namespace TAO::API
             }
 
             /* Index() does not publish the last link when it returns false. Restore a
-             * captured value, but do not erase an unreadable one. */
-            if(snap.fHaveLast && !LLD::Sessions->WriteLast(tIndex.hashGenesis, snap.hashLast))
-                return debug::error(FUNCTION, "failed to restore last index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+             * captured value, but do not treat an existing unreadable last link as
+             * absence — that would report success and drop the accepted chain. */
+            if(snap.fHaveLast)
+            {
+                if(!LLD::Sessions->WriteLast(tIndex.hashGenesis, snap.hashLast))
+                    return debug::error(FUNCTION, "failed to restore last index for ", VARIABLE(tIndex.hashGenesis.SubString()));
+            }
+            else if(!snap.fAbsentLast || LLD::Sessions->HasLast(tIndex.hashGenesis))
+                return debug::error(FUNCTION, "unreadable last index for ", VARIABLE(tIndex.hashGenesis.SubString()));
 
             if(snap.fHaveTx)
             {
@@ -447,9 +465,11 @@ namespace TAO::API
             const bool fActiveSession = Authentication::Active(tx.hashGenesis);
             const uint512_t hashTx = tx.GetHash();
 
-            /* Check() can disconnect this tx and delete its API indexes as soon
-             * as Accept() drops the mempool mutex. Hold that lock across accept,
-             * snapshot, index, and rollback so those steps cannot interleave. */
+            /* Check() and Notifications::SanitizeUnconfirmed() can disconnect
+             * this tx and delete its API indexes as soon as Accept() drops the
+             * mempool mutex. Hold that lock across accept, snapshot, index, and
+             * rollback so those steps cannot interleave. SanitizeUnconfirmed()
+             * takes the same mutex around its Disconnect/Delete/Remove loop. */
             std::unique_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX, std::defer_lock);
             if(fActiveSession)
                 POOL_LOCK.lock();
@@ -470,6 +490,12 @@ namespace TAO::API
                 /* Build an API transaction. */
                 TAO::API::Transaction tIndex =
                     TAO::API::Transaction(tx);
+
+                /* IndexSigchain() and BuildIndexes() mutate the same SessionDB
+                 * links without mempool.MUTEX. Hold the per-genesis index lock
+                 * across snapshot, Index(), and restore. mempool.MUTEX is
+                 * already held; never take these locks in the other order. */
+                std::unique_lock<std::recursive_mutex> INDEX_LOCK(TAO::API::Transaction::IndexLock(tx.hashGenesis));
 
                 /* Capture links before Index() so a partial write can be restored. */
                 SessionIndexSnapshot snapIndex;
