@@ -332,6 +332,112 @@ TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transactio
 }
 
 
+TEST_CASE("Coexisting MEMPOOL and MINER or SANITIZE transactions can commit",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    SECTION("MINER short-circuit succeeds without releasing a coexisting MEMPOOL owner")
+    {
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+
+        const uint512_t hashTx(0x4238406082ULL);
+        const uint32_t nContract = 1;
+        const uint64_t nClaimed = 42;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, 7, TAO::Ledger::FLAGS::MINER));
+
+        /* Owning both modes must not reject either commit. MINER does not release. */
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+        REQUIRE(nRead == 7);
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+        nRead = 0;
+        REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+    }
+
+    SECTION("SANITIZE short-circuit and MEMPOOL commit succeed when begun in either order")
+    {
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort sanitize{TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER};
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        sanitize.fActive = true;
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        sanitize.fActive = false;
+    }
+
+    SECTION("another thread cannot short-circuit commit an owned MINER slot")
+    {
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+
+        std::atomic<bool> fRejected{false};
+        std::exception_ptr pError;
+        std::thread other([&]()
+        {
+            try
+            {
+                fRejected.store(!LLD::TxnCommit(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+            }
+            catch(...)
+            {
+                pError = std::current_exception();
+            }
+        });
+        other.join();
+        if(pError)
+            std::rethrow_exception(pError);
+
+        REQUIRE(fRejected.load());
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+    }
+}
+
+
 TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay intact",
           "[lld][txncommit][concurrency]")
 {

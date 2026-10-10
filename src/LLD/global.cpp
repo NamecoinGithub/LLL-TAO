@@ -315,10 +315,12 @@ namespace LLD
      * PHYSICAL, matching abort and commit.
      *
      * An unowned memory abort or MEMPOOL commit is rejected and does not touch
-     * the overlay. MINER and SANITIZE commits remain a no-mutation short-circuit.
-     * A physical abort or commit owned by another thread is rejected before
-     * TxnRelease or TxnCommit. MemoryRelease/MemoryCommit of pMemory is skipped
-     * when another thread owns the MEMPOOL slot. */
+     * the overlay. MINER and SANITIZE commits remain a no-mutation short-circuit
+     * when this thread owns that slot, including when MEMPOOL coexists with it.
+     * Sole ownership is not required. A physical abort or commit owned by
+     * another thread is rejected before TxnRelease or TxnCommit.
+     * MemoryRelease/MemoryCommit of pMemory is skipped when another thread owns
+     * the MEMPOOL slot. */
     struct TxnSlot
     {
         std::mutex MUTEX;
@@ -428,12 +430,6 @@ namespace LLD
         default:
             return 0x08;
         }
-    }
-
-
-    static bool ThreadOwnsOther(const TxnKind kind)
-    {
-        return (nThreadOwnedMask & static_cast<uint8_t>(~MaskOf(kind))) != 0;
     }
 
 
@@ -663,27 +659,28 @@ namespace LLD
         const TxnKind kind = KindOf(nFlags);
 
         /* MINER and SANITIZE commits do not call MemoryCommit and do not release
-         * the owner. An unowned call returns true. A thread that owns a different
-         * mode is rejected so it cannot observe a false success. */
+        * the owner. Decide from the requested slot, not sole ownership: MEMPOOL
+        * may coexist with this mode. Reject a foreign owner, and reject when
+        * this thread owns a different mode but not this slot. A globally
+        * unowned slot on a thread that owns nothing stays a true short-circuit. */
         if(kind == TxnKind::MINER || kind == TxnKind::SANITIZE)
         {
-            if(ThreadOwnsOther(kind))
-                return debug::error(FUNCTION, "transaction mode does not match current owner");
+           TxnSlot& slot = SlotFor(kind);
+           std::lock_guard<std::mutex> lk(slot.MUTEX);
+           if(OwnedByOther(slot) || (!OwnedByThisThread(slot) && nThreadOwnedMask != 0))
+               return debug::error(FUNCTION, "transaction mode does not match current owner");
 
-            return true;
+           return true;
         }
 
-        /* An unowned MEMPOOL commit must not apply another thread's pMemory.
-         * A same-thread owner of a different mode is rejected before the overlay
-         * is touched and is not released. */
+        /* An unowned MEMPOOL commit, or one owned by another thread, must not
+        * apply pMemory. Owning MINER or SANITIZE as well is not a conflict and
+        * does not release those slots. */
         if(kind == TxnKind::MEMPOOL)
         {
-            if(ThreadOwnsOther(kind))
-                return debug::error(FUNCTION, "transaction mode does not match current owner");
-
-            std::lock_guard<std::mutex> lk(MempoolSlot().MUTEX);
-            if(!OwnedByThisThread(MempoolSlot()))
-                return debug::error(FUNCTION, "transaction mode does not match current owner");
+           std::lock_guard<std::mutex> lk(MempoolSlot().MUTEX);
+           if(!OwnedByThisThread(MempoolSlot()))
+               return debug::error(FUNCTION, "transaction mode does not match current owner");
 
             MemoryCommitSelected(nInstances);
             ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
