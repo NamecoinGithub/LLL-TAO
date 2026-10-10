@@ -309,15 +309,19 @@ namespace LLD
      * not thread-local. MINER and SANITIZE stay on distinct slots so they can
      * run beside MEMPOOL. MEMPOOL and physical BLOCK both map to pMemory, so
      * those two modes are coordinated at begin time: the second begin is
-     * rejected before MemoryBegin. There is no cross-mode coordinator and no
-     * post-acquire recovery-required flag. A slot mutex is held across the
-     * mutation of that slot only. Shared-overlay checks lock MEMPOOL before
-     * PHYSICAL, matching abort and commit.
+     * rejected before MemoryBegin. A duplicate begin of a slot this thread
+     * already owns is also rejected before MemoryBegin, so ClaimSlot cannot
+     * be followed by a replacement of the existing overlay. There is no
+     * cross-mode coordinator and no post-acquire recovery-required flag. A
+     * slot mutex is held across the mutation of that slot only. Shared-overlay
+     * checks lock MEMPOOL before PHYSICAL, matching abort and commit.
      *
      * An unowned memory abort or MEMPOOL commit is rejected and does not touch
      * the overlay. MINER and SANITIZE commits remain a no-mutation short-circuit
      * when this thread owns that slot, including when MEMPOOL coexists with it.
-     * Sole ownership is not required. A physical abort or commit owned by
+     * Sole ownership is not required. A foreign owner, another thread holding
+     * the requested slot, rejects that commit even if this thread owns nothing,
+     * and does not release the owner. A physical abort or commit owned by
      * another thread is rejected before TxnRelease or TxnCommit.
      * MemoryRelease/MemoryCommit of pMemory is skipped when another thread owns
      * the MEMPOOL slot. */
@@ -480,8 +484,9 @@ namespace LLD
     /* Global handler for all LLD instances. */
     void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
-        /* Claim the slot before creating its overlay or journal. A second thread
-         * must not replace a process-wide overlay it does not own. MEMPOOL and
+        /* Claim the slot before creating its overlay or journal. A second begin,
+         * including one from the current owner, must not reach MemoryBegin:
+         * that call deletes the existing process-wide overlay. MEMPOOL and
          * physical BLOCK share pMemory, so either mode being owned rejects the
          * other begin before MemoryBegin. Lock MEMPOOL before PHYSICAL. */
         const TxnKind kind = KindOf(nFlags);
@@ -495,9 +500,12 @@ namespace LLD
 
             TxnSlot& slot = (kind == TxnKind::MEMPOOL) ? MempoolSlot() : PhysicalSlot();
             const TxnSlot& other = (kind == TxnKind::MEMPOOL) ? PhysicalSlot() : MempoolSlot();
-            if(OwnedByOther(slot))
+            /* OwnedByOther misses a same-thread duplicate. slot.fOwned covers both. */
+            if(slot.fOwned)
             {
-                debug::error(FUNCTION, "transaction mode is owned by another thread");
+                debug::error(FUNCTION, OwnedByThisThread(slot)
+                    ? "transaction mode is already open"
+                    : "transaction mode is owned by another thread");
                 return;
             }
 
@@ -520,9 +528,13 @@ namespace LLD
         {
             TxnSlot& slot = SlotFor(kind);
             lkPrimary = std::unique_lock<std::mutex>(slot.MUTEX);
-            if(OwnedByOther(slot))
+            /* Same check as the shared-overlay path: a same-thread duplicate
+             * would otherwise delete pMiner or pSanitize inside MemoryBegin. */
+            if(slot.fOwned)
             {
-                debug::error(FUNCTION, "transaction mode is owned by another thread");
+                debug::error(FUNCTION, OwnedByThisThread(slot)
+                    ? "transaction mode is already open"
+                    : "transaction mode is owned by another thread");
                 return;
             }
 

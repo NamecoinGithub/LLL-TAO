@@ -677,6 +677,51 @@ TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
         REQUIRE(nRead == nClaimed);
         REQUIRE_FALSE(physical.fActive);
     }
+
+    SECTION("same thread cannot begin an owned mode again")
+    {
+        const uint512_t hashMempool(0x4238514288ULL);
+        const uint512_t hashBlock(0x4238514289ULL);
+        const uint512_t hashMiner(0x4238514290ULL);
+
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashMempool, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashMempool, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        OwnerAbort physical{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        physical.fActive = true;
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashBlock, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashBlock, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        physical.fActive = false;
+
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashMiner, nContract, nClaimed, TAO::Ledger::FLAGS::MINER));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashMiner, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+        REQUIRE(nRead == nClaimed);
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+    }
 }
 
 

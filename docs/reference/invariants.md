@@ -22,6 +22,6 @@ For multiple transactions from the same genesis in one block, each later transac
 
 ## 5. Shared `pMemory` ownership
 
-`FLAGS::MEMPOOL` and physical `FLAGS::BLOCK` both use the process-wide `pMemory` overlay. `TxnBegin` must reject the second of those begins before `MemoryBegin`. MINER and SANITIZE stay on `pMiner` and `pSanitize` and may remain open beside MEMPOOL. A mismatched or unowned memory abort or MEMPOOL commit must not release another thread's overlay.
+`FLAGS::MEMPOOL` and physical `FLAGS::BLOCK` both use the process-wide `pMemory` overlay. `TxnBegin` must reject the second of those begins, and any duplicate begin of an already-owned slot, before `MemoryBegin`. MINER and SANITIZE stay on `pMiner` and `pSanitize` and may remain open beside MEMPOOL. A foreign owner rejects MINER and SANITIZE commit without releasing that owner. A mismatched or unowned memory abort or MEMPOOL commit must not release another thread's overlay.
 
 Reference: [LLD global transaction ownership](../diagrams/architecture/lld-global-transactions.md).
