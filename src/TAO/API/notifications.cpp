@@ -473,6 +473,19 @@ namespace TAO::API
     /* Checks that the current unconfirmed transactions are in a valid state. */
     bool Notifications::SanitizeUnconfirmed(const uint256_t& hashGenesis, const encoding::json& jSession)
     {
+        /* BuildAndAccept() holds mempool.MUTEX across Accept()/Index()/rollback.
+         * Take that lock, then the per-genesis session index lock, before
+         * collecting the unconfirmed tail. A concurrent accept can otherwise
+         * append and index a successor during this scan; Delete() on the stale
+         * predecessor then rewrites indexing.last and drops that successor.
+         * SanitizeContract() takes CLIENT_MUTEX, and IndexSigchain() holds
+         * CLIENT_MUTEX before IndexLock, so the index lock is dropped for the
+         * sanitize loop and taken again before disconnect/delete. Release both
+         * before BuildAndAccept(): that path takes the authentication lock and
+         * then mempool.MUTEX. */
+        std::unique_lock<std::recursive_mutex> POOL_LOCK(TAO::Ledger::mempool.MUTEX);
+        std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
+
         /* Build list of transaction hashes. */
         std::vector<uint512_t> vHashes;
 
@@ -509,6 +522,9 @@ namespace TAO::API
             /* Set hash to previous hash. */
             hash = tx.hashPrevTx;
         }
+
+        /* Drop IndexLock before SanitizeContract() acquires CLIENT_MUTEX. */
+        INDEX_LOCK.unlock();
 
         /* Track the root transaction that has an invalid contract in mempool. */
         uint512_t hashRoot;
@@ -571,6 +587,52 @@ namespace TAO::API
         /* If we reached here, we need to rebuild our sigchain indexes and transactions. */
         debug::notice(FUNCTION, "sigchain contains ", nFailedContracts, " invalid contracts (", nFeeContracts, " OP::FEE's removed), rebuilding ", vSanitized.size(), " contracts");
 
+        /* Re-read the tail under both locks. IndexSigchain() can advance the
+         * same genesis while IndexLock is dropped. Do not Delete() a stale
+         * predecessor, and do not rebuild contracts that no longer match. */
+        INDEX_LOCK.lock();
+
+        std::vector<uint512_t> vLocked;
+        uint512_t hashLocked;
+        if(!LLD::Sessions->ReadLast(hashGenesis, hashLocked))
+            return false;
+
+        bool fFoundRoot = false;
+        while(!config::fShutdown.load())
+        {
+            /* Read the transaction from the ledger database. */
+            TAO::API::Transaction txLocked;
+            if(!LLD::Sessions->ReadTx(hashLocked, txLocked))
+            {
+                debug::warning(FUNCTION, "read for ", hashGenesis.SubString(), " failed at tx ", hashLocked.SubString());
+                break;
+            }
+
+            /* Check we have index to break. */
+            if(LLD::Ledger->HasIndex(hashLocked))
+                break;
+
+            /* Push transaction to list. */
+            vLocked.push_back(hashLocked);
+            if(hashLocked == hashRoot)
+                fFoundRoot = true;
+
+            /* Check for first. */
+            if(txLocked.IsFirst())
+                break;
+
+            /* Set hash to previous hash. */
+            hashLocked = txLocked.hashPrevTx;
+        }
+
+        /* Root already gone, or the tail changed. Leave the accepted entries
+         * in place and let the next notification tick sanitize the live chain. */
+        if(!fFoundRoot || vLocked != vHashes)
+        {
+            debug::warning(FUNCTION, "unconfirmed tail changed for ", hashGenesis.SubString(), ", skipping rebuild");
+            return false;
+        }
+
         /* Now we want to disconnect our transactions up to their root. */
         for(const auto& rHash : vHashes)
         {
@@ -598,6 +660,9 @@ namespace TAO::API
             if(rHash == hashRoot)
                 break;
         }
+
+        POOL_LOCK.unlock();
+        INDEX_LOCK.unlock();
 
         /* Now build our official transaction. */
         const std::vector<uint512_t> vRebuilt =

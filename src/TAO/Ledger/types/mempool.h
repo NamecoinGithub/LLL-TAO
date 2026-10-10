@@ -527,6 +527,33 @@ namespace TAO
             bool Has(const uint512_t& hashTx) const;
 
 
+            /** InPool
+             *
+             *  Checks if a transaction is in the live ledger pool.
+             *  Unlike Has(), this is false for orphans, conflict roots, and
+             *  parked conflict dependents.
+             *
+             *  @param[in] hashTx Hash of transaction to check.
+             *
+             *  @return true if transaction is in mapLedger.
+             *
+             **/
+            bool InPool(const uint512_t& hashTx) const;
+
+
+            /** ClaimedDescendants
+             *
+             *  Live ledger-pool transactions that claim hashParent, nearest
+             *  child first. Walks mapClaimed so a just-admitted orphan tail is
+             *  visible even when a genesis-wide sequence walk would truncate.
+             *
+             *  @param[in] hashParent Parent transaction hash.
+             *  @param[out] vtx Descendants, nearest first. Cleared on entry.
+             *
+             **/
+            void ClaimedDescendants(const uint512_t& hashParent, std::vector<TAO::Ledger::Transaction>& vtx) const;
+
+
             /** Has
              *
              *  Checks if a genesis exists.

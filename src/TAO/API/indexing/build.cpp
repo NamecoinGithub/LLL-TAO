@@ -18,6 +18,8 @@ ________________________________________________________________________________
 #include <TAO/API/types/indexing.h>
 #include <TAO/API/types/transaction.h>
 
+#include <mutex>
+
 /* Global TAO namespace. */
 namespace TAO::API
 {
@@ -86,6 +88,16 @@ namespace TAO::API
             /* Set our new dependant hash. */
             hashLast = hashEvent;
         }
+
+        /* Hold the session index lock before the first indexing mutation and
+         * through both rebuild loops. IndexSession()/IndexSigchain() and the
+         * later Index() loop both write indexing.last. Ledger-loaded API
+         * transactions have hashNextTx == 0, so an interleaved Index() can
+         * otherwise rewrite indexing.last to an older transaction. Each Index()
+         * takes the lock again. Release before BroadcastUnconfirmed(): that path
+         * takes mempool.MUTEX and then IndexLock, and drops IndexLock before
+         * Accept(). Entering it while IndexLock is held inverts the lock order. */
+        std::unique_lock<std::recursive_mutex> INDEX_LOCK(Transaction::IndexLock(hashGenesis));
 
         /* Check that our ledger indexes are up-to-date with our logical indexes. */
         uint512_t hashLedger = 0;
@@ -179,6 +191,8 @@ namespace TAO::API
                     debug::log(1, FUNCTION, "Updated Indexes for ", hashTx->SubString(), " to logical db");
                 }
             }
+
+            INDEX_LOCK.unlock();
 
             /* Check if we need to re-broadcast anything. */
             BroadcastUnconfirmed(hashGenesis);
