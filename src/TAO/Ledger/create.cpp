@@ -756,8 +756,12 @@ namespace TAO::Ledger
         std::vector<uint512_t> vMempool;
         mempool.List(vMempool);
 
-        /* Start a ACID transaction (to be disposed). */
-        LLD::TxnBegin(FLAGS::MINER);
+        /* Start a ACID transaction (to be disposed). A rejected begin must not
+         * connect into another thread's miner overlay. Legacy selection below
+         * does not use that overlay and still runs. */
+        const bool fMinerTxn = LLD::TxnBegin(FLAGS::MINER);
+        if(!fMinerTxn)
+            debug::error(FUNCTION, "failed to begin miner transaction");
 
         /* Loop through the list of transactions. */
         std::set<uint512_t> setDependents;
@@ -772,6 +776,9 @@ namespace TAO::Ledger
 
         for(const auto& hash : vMempool)
         {
+            if(!fMinerTxn)
+                break;
+
             /* Check the Size limits of the Current Block. */
             if(::GetSerializeSize(block, SER_NETWORK, LLP::PROTOCOL_VERSION) + 256 >= MAX_BLOCK_SIZE)
                 break;
@@ -881,7 +888,8 @@ namespace TAO::Ledger
         }
 
         /* Abort the temporary ACID transaction. */
-        LLD::TxnAbort(FLAGS::MINER);
+        if(fMinerTxn)
+            LLD::TxnAbort(FLAGS::MINER);
 
         /* Clear for legacy. */
         vMempool.clear();

@@ -161,7 +161,8 @@ namespace LLP
                                     LOCK(TritiumNode::CLIENT_MUTEX);
 
                                     /* Begin our ACID transaction across LLD instances. */
-                                    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                    if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                        return debug::drop(NODE, "FLAGS::LOOKUP: ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                                     /* Terminate early if we have already indexed this transaction. */
                                     if(!LLD::Client->HasIndex(hashTx))
@@ -220,7 +221,8 @@ namespace LLP
                                 /* Begin our ACID transaction across LLD instances. */
                                 { LOCK(TritiumNode::CLIENT_MUTEX);
 
-                                    LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                    if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                        return debug::drop(NODE, "FLAGS::LOOKUP: ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                                     /* Check if we have this transaction already. */
                                     if(!LLD::Client->HasIndex(hashTx))
@@ -276,7 +278,8 @@ namespace LLP
                                     { LOCK(TritiumNode::CLIENT_MUTEX);
 
                                         /* Begin our ACID transaction across LLD instances. */
-                                        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                            return debug::drop(NODE, "FLAGS::LOOKUP::PROOF: ", hash.SubString(), " REJECTED: ", debug::GetLastError());
 
                                         /* Track our contract-id to unpack proof data. */
                                         uint32_t nContract = 0;
@@ -346,7 +349,8 @@ namespace LLP
                                     /* Begin our ACID transaction across LLD instances. */
                                     { LOCK(TritiumNode::CLIENT_MUTEX);
 
-                                        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                            return debug::drop(NODE, "FLAGS::LOOKUP::PROOF: ", hash.SubString(), " REJECTED: ", debug::GetLastError());
 
                                         /* Iterate the transaction contracts. */
                                         for(const auto& in : tx.vin)

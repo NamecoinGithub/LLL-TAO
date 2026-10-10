@@ -559,7 +559,8 @@ namespace TAO::API
                     std::vector<TAO::Ledger::Transaction> vDescendants;
                     TAO::Ledger::mempool.ClaimedDescendants(hashTx, vDescendants);
 
-                    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                    if(!LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
+                        throw Exception(-32, "Failed to begin mempool rollback for ", hashTx.SubString());
 
                     bool fRolledBack = false;
                     uint512_t hashFailed = hashTx;

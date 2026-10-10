@@ -851,10 +851,19 @@ namespace TAO
                  * caller has not already opened one (call sites #1/#2 in legacy.cpp/tritium.cpp
                  * and #3-#5 in chainstate.cpp all open a TxnBegin before calling SetBest()).
                  * A future caller that forgets to open a transaction is self-healed here
-                 * instead of silently hitting TxnCommit with no active transaction. */
-                const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-                if(fOwnedTxn)
-                    LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                 * instead of silently hitting TxnCommit with no active transaction.
+                 *
+                 * HasOpenTransaction is process-wide. Treat that journal as an outer
+                 * transaction only when this thread owns PhysicalSlot. A foreign or
+                 * unowned journal must not be written, and failure paths must not
+                 * TxnAbort it through the unowned recovery release. */
+                const bool fJournalOpen = LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(fJournalOpen && !LLD::ThreadOwnsTransaction(FLAGS::BLOCK))
+                    return debug::error(FUNCTION, "open block transaction is not owned by this thread");
+
+                const bool fOwnedTxn = !fJournalOpen;
+                if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "failed to begin block transaction");
 
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();

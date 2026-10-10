@@ -242,8 +242,11 @@ namespace TAO
                             debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
                                 " REVERTING TO HARDCODED Ancestor ", iAncestor->first, " Hash ", iAncestor->second.SubString());
 
-                            /* Set the best to older block. */
-                            LLD::TxnBegin();
+                            /* Set the best to older block. A begin failure is not "no more
+                             * checkpoints": the missing record was not reverted, so
+                             * initialization must fail instead of continuing. */
+                            if(!LLD::TxnBegin())
+                                return debug::error(FUNCTION, "failed to begin block transaction");
 
                             /* Bug fix (call site #4): check return value before committing.
                              * A failed SetBest() must abort the transaction to avoid committing
@@ -284,7 +287,8 @@ namespace TAO
                 }
 
                 /* Set the best to older block. */
-                LLD::TxnBegin();
+                if(!LLD::TxnBegin())
+                    return debug::error(FUNCTION, "failed to begin block transaction");
 
                 /* Abort our transaction if we fail to rollback. */
                 if(!state.SetBest())

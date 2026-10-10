@@ -650,7 +650,9 @@ namespace TAO
                 }
 
                 /* Connect transaction in memory. */
-                LLD::TxnBegin(FLAGS::MEMPOOL);
+                if(!LLD::TxnBegin(FLAGS::MEMPOOL))
+                    return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: failed to begin mempool transaction");
+
                 if(!tx.Connect(FLAGS::MEMPOOL))
                 {
                     /* Abort memory commits on failures. */
@@ -1146,7 +1148,11 @@ namespace TAO
                     if(!vtx[n].IsFirst())
                     {
                         /* Start a ACID transaction (to be disposed). */
-                        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+                        {
+                            debug::error(FUNCTION, "failed to begin sanitize transaction");
+                            break;
+                        }
                         bool fSanitizeTxnActive = true;
 
                         /* Check the contracts for our root transaction to make sure it's valid. */
@@ -1202,7 +1208,11 @@ namespace TAO
                                 TAO::API::Transaction::IndexLock(rTransaction.first));
 
                             /* Begin the memory transaction. */
-                            LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            if(!LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
+                            {
+                                debug::error(FUNCTION, "failed to begin mempool transaction");
+                                break;
+                            }
 
                             /* Track whether the LLD transaction is still active (not aborted). */
                             bool fTxnActive = true;

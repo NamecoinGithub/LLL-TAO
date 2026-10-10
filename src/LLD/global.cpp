@@ -15,6 +15,10 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
+#include <atomic>
+#include <mutex>
+#include <thread>
+
 namespace LLD
 {
     /* The LLD global instance pointers. */
@@ -125,10 +129,25 @@ namespace LLD
     }
 
 
+    static void AbortOwnedByThisThread();
+    static std::atomic<bool>& InstancesAlive();
+    static std::recursive_mutex& LifetimeMutex();
+
+
     /*  Shutdown and cleanup the global LLD instances. */
     void Shutdown()
     {
         debug::log(0, FUNCTION, "Shutting down LLD");
+
+        /* Hold the lifetime lock across the owner abort, the alive flag, and
+         * instance deletion. A thread exiting at the same time waits, then sees
+         * the flag and does not touch freed databases. */
+        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
+
+        /* Drop slots this thread still owns before the instances are deleted.
+         * A thread that exits earlier releases its own slots from the owner guard. */
+        AbortOwnedByThisThread();
+        InstancesAlive().store(false, std::memory_order_release);
 
         /* Cleanup the contract database. */
         if(Contract)
@@ -300,9 +319,290 @@ namespace LLD
     }
 
 
-    /* Global handler for all LLD instances. */
-    void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    /* Process-wide owner of each in-flight transaction mode.
+     *
+     * pMemory, pMiner, pSanitize, and the physical journal are process-wide,
+     * not thread-local. MINER and SANITIZE stay on distinct slots so they can
+     * run beside MEMPOOL. MEMPOOL and physical BLOCK both map to pMemory, so
+     * those two modes are coordinated at begin time: the second begin is
+     * rejected before MemoryBegin. A duplicate begin of a slot this thread
+     * already owns is also rejected before MemoryBegin, so ClaimSlot cannot
+     * be followed by a replacement of the existing overlay. There is no
+     * cross-mode coordinator and no post-acquire recovery-required flag. A
+     * slot mutex is held across the mutation of that slot only. Shared-overlay
+     * checks lock MEMPOOL before PHYSICAL, matching abort and commit.
+     *
+     * An unowned memory abort or MEMPOOL commit is rejected and does not touch
+     * the overlay. MINER and SANITIZE commits remain a no-mutation short-circuit
+     * when this thread owns that slot, including when MEMPOOL coexists with it.
+     * Sole ownership is not required. A foreign owner, another thread holding
+     * the requested slot, rejects that commit even if this thread owns nothing,
+     * and does not release the owner. A physical abort or commit is rejected
+     * before TxnRelease or TxnCommit unless this thread owns the physical slot.
+     * Owning a different mode with no physical slot is a mismatch, not the
+     * unowned recovery no-op. TxnBegin returns false on rejection so callers
+     * stop before writing into the existing overlay. A redundant physical
+     * commit after the journal is already gone returns false and does not
+     * checkpoint. MemoryRelease/MemoryCommit of pMemory is skipped when
+     * another thread owns the MEMPOOL slot.
+     *
+     * Ownership is not a bare thread id. ClaimSlot arms a thread-local guard
+     * that aborts every slot this thread still owns when the thread exits, so
+     * fOwned cannot outlive the owner and a reused thread id cannot act on the
+     * stale overlay. Shutdown aborts slots owned by the calling thread before
+     * the instances are deleted. */
+    struct TxnSlot
     {
+        std::mutex MUTEX;
+        bool fOwned = false;
+        std::thread::id idOwner{};
+        uint8_t nFlags = 0;
+        uint16_t nInstances = 0;
+    };
+
+
+    /* Defined below TxnAbort. Constructed only after a slot is claimed, and
+     * destroyed when that thread exits. */
+    struct ThreadTxnOwnerGuard
+    {
+        ~ThreadTxnOwnerGuard();
+    };
+
+
+    static std::atomic<bool>& InstancesAlive()
+    {
+        static std::atomic<bool> fAlive{true};
+        return fAlive;
+    }
+
+
+    static void ArmThreadTxnOwnerGuard()
+    {
+        static thread_local ThreadTxnOwnerGuard guard;
+        (void)guard;
+    }
+
+
+    enum class TxnKind : uint8_t
+    {
+        MEMPOOL,
+        MINER,
+        SANITIZE,
+        PHYSICAL
+    };
+
+
+    static TxnSlot& MempoolSlot()
+    {
+        static TxnSlot slot;
+        return slot;
+    }
+
+
+    static TxnSlot& MinerSlot()
+    {
+        static TxnSlot slot;
+        return slot;
+    }
+
+
+    static TxnSlot& SanitizeSlot()
+    {
+        static TxnSlot slot;
+        return slot;
+    }
+
+
+    static TxnSlot& PhysicalSlot()
+    {
+        static TxnSlot slot;
+        return slot;
+    }
+
+
+    static TxnKind KindOf(const uint8_t nFlags)
+    {
+        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
+            return TxnKind::MEMPOOL;
+
+        if(nFlags == TAO::Ledger::FLAGS::MINER)
+            return TxnKind::MINER;
+
+        if(nFlags == TAO::Ledger::FLAGS::SANITIZE)
+            return TxnKind::SANITIZE;
+
+        return TxnKind::PHYSICAL;
+    }
+
+
+    static TxnSlot& SlotFor(const TxnKind kind)
+    {
+        switch(kind)
+        {
+        case TxnKind::MEMPOOL:
+            return MempoolSlot();
+        case TxnKind::MINER:
+            return MinerSlot();
+        case TxnKind::SANITIZE:
+            return SanitizeSlot();
+        default:
+            return PhysicalSlot();
+        }
+    }
+
+
+    /* Caller holds slot.MUTEX. */
+    static bool OwnedByThisThread(const TxnSlot& slot)
+    {
+        return slot.fOwned && slot.idOwner == std::this_thread::get_id();
+    }
+
+
+    /* Caller holds slot.MUTEX. */
+    static bool OwnedByOther(const TxnSlot& slot)
+    {
+        return slot.fOwned && slot.idOwner != std::this_thread::get_id();
+    }
+
+
+    /* Bits this thread currently owns. Updated only by this thread, under the
+     * corresponding slot mutex, so a same-thread mode mismatch can be rejected
+     * without locking every slot. */
+    static thread_local uint8_t nThreadOwnedMask = 0;
+
+
+    static uint8_t MaskOf(const TxnKind kind)
+    {
+        switch(kind)
+        {
+        case TxnKind::MEMPOOL:
+            return 0x01;
+        case TxnKind::MINER:
+            return 0x02;
+        case TxnKind::SANITIZE:
+            return 0x04;
+        default:
+            return 0x08;
+        }
+    }
+
+
+    /* Caller holds slot.MUTEX. Arms the exit guard so this claim cannot outlive
+     * the thread. A same-thread duplicate must not reach this function. */
+    static void ClaimSlot(TxnSlot& slot, const TxnKind kind, const uint8_t nFlags, const uint16_t nInstances)
+    {
+        slot.fOwned = true;
+        slot.idOwner = std::this_thread::get_id();
+        slot.nFlags = nFlags;
+        slot.nInstances = nInstances;
+        nThreadOwnedMask |= MaskOf(kind);
+        ArmThreadTxnOwnerGuard();
+    }
+
+
+    /* Caller holds slot.MUTEX. */
+    static void ReleaseSlot(TxnSlot& slot, const TxnKind kind)
+    {
+        slot.fOwned = false;
+        slot.idOwner = std::thread::id();
+        slot.nFlags = 0;
+        slot.nInstances = 0;
+        nThreadOwnedMask &= static_cast<uint8_t>(~MaskOf(kind));
+    }
+
+
+    static void MemoryReleaseSelected(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        if(Contract && (nInstances & INSTANCES::CONTRACT))
+            Contract->MemoryRelease(nFlags);
+
+        if(Register && (nInstances & INSTANCES::REGISTER))
+            Register->MemoryRelease(nFlags);
+
+        if(Ledger && (nInstances & INSTANCES::LEDGER))
+            Ledger->MemoryRelease(nFlags);
+    }
+
+
+    static void MemoryCommitSelected(const uint16_t nInstances)
+    {
+        if(Contract && (nInstances & INSTANCES::CONTRACT))
+            Contract->MemoryCommit();
+
+        if(Register && (nInstances & INSTANCES::REGISTER))
+            Register->MemoryCommit();
+
+        if(Ledger && (nInstances & INSTANCES::LEDGER))
+            Ledger->MemoryCommit();
+    }
+
+
+    /* True when this thread owns the process-wide slot for nFlags. */
+    bool ThreadOwnsTransaction(const uint8_t nFlags)
+    {
+        TxnSlot& slot = SlotFor(KindOf(nFlags));
+        std::lock_guard<std::mutex> lk(slot.MUTEX);
+        return OwnedByThisThread(slot);
+    }
+
+
+    /* Global handler for all LLD instances. */
+    bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        /* Claim the slot before creating its overlay or journal. A second begin,
+         * including one from the current owner, must not reach MemoryBegin:
+         * that call deletes the existing process-wide overlay. MEMPOOL and
+         * physical BLOCK share pMemory, so either mode being owned rejects the
+         * other begin before MemoryBegin. Lock MEMPOOL before PHYSICAL. */
+        const TxnKind kind = KindOf(nFlags);
+        std::unique_lock<std::mutex> lkPrimary;
+        std::unique_lock<std::mutex> lkSecondary;
+
+        if(kind == TxnKind::MEMPOOL || kind == TxnKind::PHYSICAL)
+        {
+            lkPrimary = std::unique_lock<std::mutex>(MempoolSlot().MUTEX);
+            lkSecondary = std::unique_lock<std::mutex>(PhysicalSlot().MUTEX);
+
+            TxnSlot& slot = (kind == TxnKind::MEMPOOL) ? MempoolSlot() : PhysicalSlot();
+            const TxnSlot& other = (kind == TxnKind::MEMPOOL) ? PhysicalSlot() : MempoolSlot();
+            /* OwnedByOther misses a same-thread duplicate. slot.fOwned covers both. */
+            if(slot.fOwned)
+            {
+                return debug::error(FUNCTION, OwnedByThisThread(slot)
+                    ? "transaction mode is already open"
+                    : "transaction mode is owned by another thread");
+            }
+
+            if(other.fOwned)
+            {
+                return debug::error(FUNCTION, "shared memory overlay is already owned");
+            }
+
+            ClaimSlot(slot, kind, nFlags, nInstances);
+
+            /* The claim makes a concurrent begin of the other mode fail. Drop
+             * the unused lock before creating the overlay. */
+            if(kind == TxnKind::MEMPOOL)
+                lkSecondary.unlock();
+            else
+                lkPrimary.unlock();
+        }
+        else
+        {
+            TxnSlot& slot = SlotFor(kind);
+            lkPrimary = std::unique_lock<std::mutex>(slot.MUTEX);
+            /* Same check as the shared-overlay path: a same-thread duplicate
+             * would otherwise delete pMiner or pSanitize inside MemoryBegin. */
+            if(slot.fOwned)
+            {
+                return debug::error(FUNCTION, OwnedByThisThread(slot)
+                    ? "transaction mode is already open"
+                    : "transaction mode is owned by another thread");
+            }
+
+            ClaimSlot(slot, kind, nFlags, nInstances);
+        }
+
         /* Start the contract DB transaction. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
             Contract->MemoryBegin(nFlags);
@@ -317,7 +617,7 @@ namespace LLD
 
         /* Handle memory commits if in memory m ode. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return;
+            return true;
 
         /* Start the Logical DB transaction. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
@@ -346,27 +646,64 @@ namespace LLD
         /* Start the legacy DB transaction. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
             Legacy->TxnBegin();
+
+        return true;
     }
 
 
     /* Global handler for all LLD instances. */
     void TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
-        /* Abort the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->MemoryRelease(nFlags);
+        const TxnKind kind = KindOf(nFlags);
 
-        /* Abort the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->MemoryRelease(nFlags);
+        /* Memory overlays are process-wide. An unowned thread, or a thread that
+         * owns a different mode, must not MemoryRelease this slot. */
+        if(kind != TxnKind::PHYSICAL)
+        {
+            TxnSlot& slot = SlotFor(kind);
+            std::lock_guard<std::mutex> lk(slot.MUTEX);
+            if(!OwnedByThisThread(slot))
+            {
+                debug::error(FUNCTION, "transaction mode does not match current owner");
+                return;
+            }
 
-        /* Abort the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->MemoryRelease(nFlags);
-
-        /* Handle memory commits if in memory m ode. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+            MemoryReleaseSelected(nFlags, nInstances);
+            ReleaseSlot(slot, kind);
             return;
+        }
+
+        /* MemoryRelease(BLOCK) deletes pMemory, including the overlay created by
+         * TxnBegin(BLOCK). Do that only for the physical owner, and skip it when
+         * another thread owns the MEMPOOL slot. An unowned abort must not delete
+         * either overlay. Lock MEMPOOL before PHYSICAL. */
+        std::unique_lock<std::mutex> lkMem(MempoolSlot().MUTEX);
+        std::lock_guard<std::mutex> lkPhys(PhysicalSlot().MUTEX);
+        if(OwnedByOther(PhysicalSlot()))
+        {
+            debug::error(FUNCTION, "transaction mode does not match current owner");
+            return;
+        }
+
+        /* A thread that owns another mode and has no physical slot must not
+         * fall through to TxnRelease. An unowned call remains the recovery and
+         * post-abort no-op, which still releases a selected journal. */
+        if(!OwnedByThisThread(PhysicalSlot()) && nThreadOwnedMask != 0)
+        {
+            debug::error(FUNCTION, "transaction mode does not match current owner");
+            return;
+        }
+
+        const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
+        if(fReleasePhysical && !OwnedByOther(MempoolSlot()))
+        {
+            const bool fReleaseMempool = OwnedByThisThread(MempoolSlot());
+            MemoryReleaseSelected(nFlags, nInstances);
+            if(fReleaseMempool)
+                ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
+        }
+
+        lkMem.unlock();
 
         /* Abort the Logical DB transaction. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
@@ -395,32 +732,134 @@ namespace LLD
         /* Abort the legacy DB transaction. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
             Legacy->TxnRelease();
+
+        if(fReleasePhysical)
+            ReleaseSlot(PhysicalSlot(), TxnKind::PHYSICAL);
+    }
+
+
+    static std::recursive_mutex& LifetimeMutex()
+    {
+        static std::recursive_mutex mtx;
+        return mtx;
+    }
+
+
+    /* Abort every slot this thread still owns. Used when the owner thread exits
+     * and when LLD shuts down, so a reused thread id cannot resume the overlay
+     * and a later begin is not rejected forever. The stored begin flags and
+     * instance mask are used so a narrower begin does not release other journals. */
+    static void AbortOwnedByThisThread()
+    {
+        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
+        if(!InstancesAlive().load(std::memory_order_acquire))
+            return;
+
+        struct Pending
+        {
+            uint8_t nFlags;
+            uint16_t nInstances;
+        };
+
+        Pending vPending[4];
+        uint32_t nPending = 0;
+
+        auto Collect = [&](TxnSlot& slot)
+        {
+            std::lock_guard<std::mutex> lk(slot.MUTEX);
+            if(!OwnedByThisThread(slot) || nPending >= 4)
+                return;
+
+            vPending[nPending].nFlags = slot.nFlags;
+            vPending[nPending].nInstances = slot.nInstances;
+            ++nPending;
+        };
+
+        /* One lock at a time. TxnAbort locks MEMPOOL before PHYSICAL. */
+        Collect(MinerSlot());
+        Collect(SanitizeSlot());
+        Collect(MempoolSlot());
+        Collect(PhysicalSlot());
+
+        for(uint32_t n = 0; n < nPending; ++n)
+        {
+            debug::log(1, FUNCTION, "aborting transaction left open by this thread");
+            TxnAbort(vPending[n].nFlags, vPending[n].nInstances);
+        }
+    }
+
+
+    ThreadTxnOwnerGuard::~ThreadTxnOwnerGuard()
+    {
+        /* Instances may already have been deleted if this is the main thread
+         * exiting after Shutdown. Worker threads release their slots here. */
+        AbortOwnedByThisThread();
     }
 
 
     /* Global handler for all LLD instances. */
     bool TxnCommit(const uint8_t nFlags, const uint16_t nInstances)
     {
-        /* Special check if using MINER or SANITIZE flags — intentional short-circuit,
-         * not a failure: callers use these flags to prevent accidental commits. */
-        if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+        const TxnKind kind = KindOf(nFlags);
+
+        /* MINER and SANITIZE commits do not call MemoryCommit and do not release
+        * the owner. Decide from the requested slot, not sole ownership: MEMPOOL
+        * may coexist with this mode. Reject a foreign owner, and reject when
+        * this thread owns a different mode but not this slot. A globally
+        * unowned slot on a thread that owns nothing stays a true short-circuit. */
+        if(kind == TxnKind::MINER || kind == TxnKind::SANITIZE)
+        {
+           TxnSlot& slot = SlotFor(kind);
+           std::lock_guard<std::mutex> lk(slot.MUTEX);
+           if(OwnedByOther(slot) || (!OwnedByThisThread(slot) && nThreadOwnedMask != 0))
+               return debug::error(FUNCTION, "transaction mode does not match current owner");
+
+           return true;
+        }
+
+        /* An unowned MEMPOOL commit, or one owned by another thread, must not
+        * apply pMemory. Owning MINER or SANITIZE as well is not a conflict and
+        * does not release those slots. */
+        if(kind == TxnKind::MEMPOOL)
+        {
+           std::lock_guard<std::mutex> lk(MempoolSlot().MUTEX);
+           if(!OwnedByThisThread(MempoolSlot()))
+               return debug::error(FUNCTION, "transaction mode does not match current owner");
+
+            MemoryCommitSelected(nInstances);
+            ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
             return true;
+        }
 
-        /* Commit the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->MemoryCommit();
+        /* TxnBegin(BLOCK) creates pMemory before the physical journal. Commit that
+         * overlay only when this thread owns the physical slot, and never when
+         * another thread owns MEMPOOL. Lock MEMPOOL before PHYSICAL, then drop the
+         * MEMPOOL lock before the disk commit. */
+        std::unique_lock<std::mutex> lkMem(MempoolSlot().MUTEX);
+        std::lock_guard<std::mutex> lkPhys(PhysicalSlot().MUTEX);
+        if(!OwnedByThisThread(PhysicalSlot()))
+        {
+            /* Reject a foreign physical owner, a caller that owns a different
+             * mode, and an open journal this thread did not begin. The only
+             * retained call is the redundant commit after that journal is
+             * already gone: it returns false and does not checkpoint. */
+            if(OwnedByOther(PhysicalSlot()) || nThreadOwnedMask != 0
+            || HasOpenTransaction(nFlags, nInstances))
+                return debug::error(FUNCTION, "transaction mode does not match current owner");
 
-        /* Commit the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->MemoryCommit();
+            return false;
+        }
 
-        /* Commit the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->MemoryCommit();
+        const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
+        if(fReleasePhysical && !OwnedByOther(MempoolSlot()))
+        {
+            const bool fReleaseMempool = OwnedByThisThread(MempoolSlot());
+            MemoryCommitSelected(nInstances);
+            if(fReleaseMempool)
+                ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
+        }
 
-        /* Handle memory commits if in memory mode — intentional short-circuit, not a failure. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL)
-            return true;
+        lkMem.unlock();
 
         /* Set a checkpoint for Logical DB. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
@@ -565,6 +1004,9 @@ namespace LLD
         /* Release the legacy DB transaction. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
             Legacy->TxnRelease();
+
+        if(fReleasePhysical)
+            ReleaseSlot(PhysicalSlot(), TxnKind::PHYSICAL);
 
         return fAllSucceeded;
     }
