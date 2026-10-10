@@ -1188,7 +1188,16 @@ namespace TAO
                              * before disconnect, remove, and delete. Delete() locks
                              * again, but that is too late: IndexSigchain() can advance
                              * this genesis between Remove() and Delete(), and Delete()
-                             * then rewrites the previous/last links from stale state. */
+                             * then rewrites the previous/last links from stale state.
+                             *
+                             * This lock starts after the stale-chain decision above.
+                             * IndexSigchain() does not take mempool.MUTEX, so it can
+                             * finish indexing a confirmed tail before this lock, and
+                             * Delete() below can rewrite that tail. SanitizeUnconfirmed()
+                             * re-reads after its lock; this sweep does not. Do not take
+                             * IndexLock before MUTEX, and do not hold it across the
+                             * whole genesis sanitize. Window W2 in
+                             * docs/architecture/BUILD_CPP.md. */
                             std::unique_lock<std::recursive_mutex> INDEX_LOCK(
                                 TAO::API::Transaction::IndexLock(rTransaction.first));
 

@@ -125,7 +125,9 @@ flowchart TD
     I -->|yes| J[Remove descendants then parent]
 ```
 
-The flowchart is the rule for every caller except `Mempool::Check()`. `Check()` holds `MUTEX`, then `Transaction::IndexLock(genesis)`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, and disconnects in reverse sequence order. It is an exception to I3: if `Disconnect` throws or returns false, it aborts the memory transaction and then explicitly calls `Remove(hashTx)` to force-evict that stuck orphan so the sweep cannot loop on it forever. It does not leave the map entry in place. A disconnect that returns true is erased only after that successful disconnect, and the memory transaction is committed only if it was not aborted.
+The flowchart is the rule for every caller except `Mempool::Check()`. `Check()` holds `MUTEX`, decides the per-genesis chain is stale, **then** takes `Transaction::IndexLock(genesis)`, opens `TxnBegin(FLAGS::MEMPOOL, INSTANCES::MEMORY)`, and disconnects in reverse sequence order. It is an exception to I3: if `Disconnect` throws or returns false, it aborts the memory transaction and then explicitly calls `Remove(hashTx)` to force-evict that stuck orphan so the sweep cannot loop on it forever. It does not leave the map entry in place. A disconnect that returns true is erased only after that successful disconnect, and the memory transaction is committed only if it was not aborted.
+
+`IndexLock` on this path starts after the stale-chain decision (`hashPrevTx !=` ledger last, or a failed contract sanitize). `Indexing::IndexSigchain` does not take `mempool.MUTEX`, so it can finish indexing a confirmed tail in that gap. The following `Delete()` rewrites the predecessor's `hashNextTx` and `indexing.last` and can clobber that tail, even though the lock is held during the delete. `Notifications::SanitizeUnconfirmed` re-reads the tail after acquiring `IndexLock` and skips the delete if the tail changed. `Check()` does not. Taking `IndexLock` before the decision would hold the stripe across contract sanitization for every live genesis. That is intentionally not done. The lock still closes the narrower Remove-to-Delete gap: once held, `IndexSigchain` cannot advance the genesis between `Remove` and `Delete`. This is window W2 in [BUILD_CPP.md](BUILD_CPP.md).
 
 ---
 
@@ -152,6 +154,7 @@ flowchart TD
 - Do not call `Remove` on an `InPool` transaction without a successful MEMPOOL disconnect+commit.
 - Do not disconnect a parent while a `mapClaimed` child is still connected.
 - Do not hold `Transaction::IndexLock` and then call `Accept` / `Remove` (those take `mempool.MUTEX`). Take the pool lock first.
+- Do not treat `Check()`'s `IndexLock` as covering the stale-chain decision. The lock starts after that decision (window W2 in [BUILD_CPP.md](BUILD_CPP.md)). Do not close that window by taking `IndexLock` before `MUTEX`, or by taking `MUTEX` inside `IndexSigchain`.
 - Do not treat `Has(hash) == true` as "safe to index into SessionDB". Only `InPool` means the live overlay entry exists.
 - Do not insert conflict descendants into `mapConflicts`. Park them.
 - Do not add a `DEFERRED_LOCAL_STATE` connect failure to `mapRejected`. That blacklist would turn a stale height into a permanent wedge.

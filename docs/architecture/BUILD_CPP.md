@@ -10,7 +10,30 @@ This document is the normative description of how the API builds, accepts, index
 
 ## 1. What `BuildAndAccept` does
 
-`BuildAndAccept` turns a contract list into one or more signed transactions (batches of at most 99 contracts, plus a fee contract when required) and admits each one to the mempool.
+`BuildAndAccept` turns a contract list into one or more signed transactions and admits each one to the mempool. The batch is not a single 99-contract cap.
+
+| Path | User contracts | Extra contract |
+|------|----------------|----------------|
+| Fee required (`AddFee` returns true) | at most `nLimits` (default 99, hard cap 99) | one `OP::FEE` appended by `AddFee` |
+| No fee, the built batch already has 99 contracts, and more user contracts remain | 99 from the loop, then one more | the 100th user contract |
+| No fee, and the batch is smaller than 99 | only the contracts the loop appended | none |
+
+`nLimits` is `min(-maxcontracts, 99)`, default 99. The append loop never places more than `nLimits` contracts into `vBuild`. The 100th user contract is not part of that loop. It is appended only when all three of these are true (`build.cpp`, the `AddFee` failure branch):
+
+1. `AddFee(tx)` returns false. No fee contract was added.
+2. `nIndex < vContracts.size()`. Another user contract is waiting.
+3. `tx.Size() == 99`. The transaction already holds 99 contracts.
+
+A fee-free batch may therefore contain 100 user contracts. A fee-bearing batch may contain 99 user contracts plus the fee. A smaller `-maxcontracts` does not enable the extra append: that append checks `tx.Size() == 99`, not `nLimits`.
+
+```mermaid
+flowchart TD
+    Loop["Append up to nLimits user contracts<br/>nLimits = min of -maxcontracts and 99"] --> Fee{AddFee?}
+    Fee -->|true| FeeBatch["At most 99 user contracts<br/>plus one OP::FEE"]
+    Fee -->|false| Size{"tx.Size == 99<br/>and more contracts remain?"}
+    Size -->|yes| Hundred["Append one more user contract<br/>fee-free batch of 100"]
+    Size -->|no| Small["Fee-free batch of the<br/>contracts already appended"]
+```
 
 Per batch, after `CreateTransaction`, contract append, `AddFee`, `Build`, and `Sign`:
 
@@ -19,7 +42,7 @@ Per batch, after `CreateTransaction`, contract append, `AddFee`, `Build`, and `S
 3. If there is no active API session, return the hash. Do not index.
 4. If the session is active but `!mempool.InPool(hashTx)`, throw. `Accept` can return true for a transaction that was never inserted into `mapLedger`. Do not snapshot or index that hash.
 5. Lock `Transaction::IndexLock(tx.hashGenesis)` (pool lock already held).
-6. Snapshot the SessionDB links `Index()` can mutate.
+6. Snapshot the SessionDB links `Index()` can mutate. This snapshot is **post-accept**. It is not the state that existed before `Accept`, and it is not synchronized with merkle `IndexSigchain` (window W1 below).
 7. `TAO::API::Transaction::Index(hashTx)`.
 8. On index failure, restore the snapshot. Only if that restore succeeds, disconnect the claimed descendant chain and the parent, commit that memory transaction, then `Remove` the maps.
 9. On snapshot or restore failure, **leave the accepted mempool entries in place** and throw.
@@ -35,6 +58,7 @@ sequenceDiagram
     API->>Pool: lock if active session
     API->>Pool: Accept(tx)
     Note over Ov: Connect committed, then mapLedger.<br/>Descendants may already be live.
+    Note over API,SDB: W1: IndexSigchain may write this genesis<br/>after Accept and before IndexLock.
     alt not InPool
         API-->>API: throw, do not index
     else live
@@ -159,7 +183,68 @@ flowchart TD
 
 ---
 
-## 6. What not to do
+## 6. Residual windows
+
+The lock table closes the windows that can be closed without inverting lock order or stalling merkle indexing for an entire sweep. Two windows remain. They are normative. Do not "fix" them by taking `mempool.MUTEX` inside `IndexSigchain`, and do not acquire `IndexLock` before `mempool.MUTEX`.
+
+### W1. Accept returns before the snapshot
+
+`BuildAndAccept` holds `mempool.MUTEX` across `Accept`, then acquires `IndexLock` and captures the snapshot. `Indexing::IndexSigchain` (Tritium merkle receive, `src/LLP/tritium.cpp`, already holding `CLIENT_MUTEX`) calls `Transaction::Index` without `mempool.MUTEX`.
+
+```mermaid
+sequenceDiagram
+    participant API as BuildAndAccept
+    participant Merkle as IndexSigchain
+    participant SDB as SessionDB
+
+    API->>API: lock mempool.MUTEX
+    API->>API: Accept(tx) commits overlay
+    Note over API: IndexLock not held yet
+    Merkle->>SDB: Index(confirmed tx) under IndexLock
+    Merkle->>Merkle: release IndexLock
+    API->>API: lock IndexLock, snapshot post-race links
+    API->>SDB: Index(mempool tx) may overwrite hashNextTx / last
+    Note over SDB: A failed Index restores the post-race snapshot,<br/>not the links that existed before Accept
+```
+
+A concurrently indexed block transaction can be overwritten by the later `Index()`. A failed index restores whatever was visible after the race, not the state that preceded this API operation.
+
+The lock-order-safe close would be to acquire `IndexLock` and snapshot before `Accept()`, while `mempool.MUTEX` is already held. That change is intentionally not made. A snapshot taken before `Accept` is not the state `ProcessOrphans` may leave, and holding `IndexLock` across `Accept` stalls every merkle `Index()` on the same 256-way stripe for the whole admission, including descendant drain. Do not take `mempool.MUTEX` on the merkle path to close this window: that path already holds `CLIENT_MUTEX`, and `SanitizeUnconfirmed` / `BuildAndAccept` take the pool lock and then may need `CLIENT_MUTEX`.
+
+### W2. `Check` decides the chain is stale before `IndexLock`
+
+`Mempool::Check` holds `mempool.MUTEX`, groups `mapLedger` by genesis, reads `LedgerDB::ReadLast`, and decides `hashPrevTx != hashLast` (or that a contract failed sanitize) **before** `IndexLock`. `IndexSigchain` does not take `mempool.MUTEX`, so it can finish indexing a confirmed transaction for this genesis in that gap. Cleanup then `Delete()`s the old mempool transaction and rewrites the predecessor's `hashNextTx` and `indexing.last`, clobbering the newly indexed tail even though `IndexLock` is held during the delete.
+
+`SanitizeUnconfirmed` is the pattern that avoids this class of clobber: after reacquiring `IndexLock` it re-reads the tail and refuses to delete if the tail changed. `Check` does not re-read. Acquiring `IndexLock` before the stale decision would hold the stripe across contract sanitization for every live genesis in the sweep. That is intentionally not done.
+
+The lock `Check` does take still closes a narrower window. Once it is held, `IndexSigchain` cannot advance the genesis between `Remove` and `Delete`. It does not cover the decision that happened before the lock. See also [MEMPOOL.md](MEMPOOL.md).
+
+```mermaid
+sequenceDiagram
+    participant Check as Mempool::Check
+    participant Merkle as IndexSigchain
+    participant SDB as SessionDB
+
+    Check->>Check: MUTEX held, chain looks stale
+    Note over Check: IndexLock not held yet
+    Merkle->>SDB: Index confirmed tail
+    Check->>Check: lock IndexLock
+    Check->>SDB: Delete old mempool tx<br/>rewrites hashNextTx and indexing.last
+```
+
+### Closed. Do not reopen
+
+These earlier findings already match the code. Do not add a second lock, and do not drop the ones that are there.
+
+| Finding | Current contract |
+|---------|------------------|
+| `SanitizeUnconfirmed` versus `Accept` | Takes `mempool.MUTEX`, then `IndexLock`, before collecting the unconfirmed tail, and holds both across Disconnect / Delete / Remove. `IndexLock` is dropped only for `SanitizeContract` (`CLIENT_MUTEX`, then `IndexLock`, on the merkle path). The tail is re-read under both locks before delete. Both locks are dropped before `BuildAndAccept`. |
+| `Check` Remove-to-Delete gap | After the stale decision, `Check` takes `IndexLock` before disconnect / remove / delete. `Delete` locking internally is not a substitute for that outer lock. This does not close W2. |
+| `BroadcastUnconfirmed` Has-to-Broadcast gap | Takes `mempool.MUTEX`, then `IndexLock`, across the session read and the `Broadcast()` write. `IndexLock` is dropped before `Accept()`; the pool lock is held across that call. `Transaction::Broadcast` re-reads under `IndexLock` and writes the current record's `nModified` only. Do not enter `BroadcastUnconfirmed` while holding `IndexLock`. |
+
+---
+
+## 7. What not to do
 
 - Do not treat `ReadLast() == false` as absence. Call `HasLast()` first.
 - Do not report a successful restore when any captured key exists but was unreadable.
@@ -170,10 +255,14 @@ flowchart TD
 - Do not restore a snapshot that was taken without `IndexLock`, and do not restore one taken outside `mempool.MUTEX` on the API accept path. `Check()` and `SanitizeUnconfirmed` can otherwise delete or replace the links between the snapshot and the restore.
 - Do not acquire `mempool.MUTEX` while holding `IndexLock`.
 - Do not call `BroadcastUnconfirmed` while holding `IndexLock`. It takes the pool lock first.
+- Do not describe every batch as "at most 99 contracts". A fee-free batch may hold 100 user contracts. A fee-bearing batch holds at most 99 user contracts plus one `OP::FEE`.
+- Do not describe the `BuildAndAccept` snapshot as pre-accept. It is post-accept (W1).
+- Do not treat `Check`'s `IndexLock` as covering the stale-chain decision. The lock starts after that decision (W2).
+- Do not close W1 or W2 by taking `mempool.MUTEX` inside `IndexSigchain`, or by acquiring `IndexLock` before `mempool.MUTEX`.
 
 ---
 
-## 7. File map
+## 8. File map
 
 | Symbol | File |
 |--------|------|
@@ -184,3 +273,5 @@ flowchart TD
 | `Indexing::IndexSigchain` | `src/TAO/API/indexing/index.cpp` |
 | `Indexing::BuildIndexes` | `src/TAO/API/indexing/build.cpp` |
 | `Notifications::SanitizeUnconfirmed` | `src/TAO/API/notifications.cpp` |
+| `Indexing::BroadcastUnconfirmed` | `src/TAO/API/indexing/index.cpp` |
+| `Mempool::Check` | `src/TAO/Ledger/mempool.cpp` |

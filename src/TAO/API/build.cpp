@@ -415,7 +415,10 @@ namespace TAO::API
                 continue;
             }
 
-            /* Build our transactions in batches of 99 contracts at a time. */
+            /* Build in batches of at most 99 user contracts. AddFee may append
+             * one OP::FEE. If AddFee adds nothing and this batch already holds
+             * 99 contracts, one more user contract is appended below, so a
+             * fee-free batch may hold 100. See docs/architecture/BUILD_CPP.md. */
             const uint64_t nBatchStart = nIndex;
             std::vector<TAO::Operation::Contract> vBuild;
             for( ; vBuild.size() < nLimits && nIndex < vContracts.size(); ++nIndex)
@@ -435,8 +438,11 @@ namespace TAO::API
                 tx << rContract;
 
             /* Add the contract fees. */
-            if(!AddFee(tx) && nIndex < vContracts.size() && tx.Size() == 99) //we check +1 so we know we have an available index
-                tx << vContracts[nIndex++]; //add additional contract and iterate our index
+            /* Fee-free only: a 99-contract batch with more user contracts
+             * waiting grows to 100. Fee-bearing batches stop at 99 user
+             * contracts plus the fee. */
+            if(!AddFee(tx) && nIndex < vContracts.size() && tx.Size() == 99)
+                tx << vContracts[nIndex++];
 
             /* Execute the operations layer. */
             if(!tx.Build())
@@ -495,7 +501,15 @@ namespace TAO::API
                 /* IndexSigchain() and BuildIndexes() mutate the same SessionDB
                  * links without mempool.MUTEX. Hold the per-genesis index lock
                  * across snapshot, Index(), and restore. mempool.MUTEX is
-                 * already held; never take these locks in the other order. */
+                 * already held; never take these locks in the other order.
+                 *
+                 * The snapshot is taken after Accept() returns. IndexSigchain()
+                 * (CLIENT_MUTEX, no pool lock) can write this genesis in that
+                 * gap, so a later Index() can overwrite a confirmed tail, and a
+                 * failed Index() restores the post-race snapshot rather than
+                 * the pre-accept links. Do not move IndexLock ahead of
+                 * mempool.MUTEX to close it. Window W1 in
+                 * docs/architecture/BUILD_CPP.md. */
                 std::unique_lock<std::recursive_mutex> INDEX_LOCK(TAO::API::Transaction::IndexLock(tx.hashGenesis));
 
                 /* Capture links before Index() so a partial write can be restored. */
