@@ -304,10 +304,10 @@ namespace LLD
      *
      * NODE5 keeps MINER, SANITIZE, and MEMPOOL on distinct overlays and does not
      * serialize them with a process-wide coordinator. Ownership is tracked per
-     * thread so a commit cannot apply a different mode. A mismatched commit is
-     * rejected and does not release the owner. There is no post-acquire
-     * recovery-required flag on this branch, so the #714 coordinator release on
-     * that path has no insertion point. */
+     * thread so a commit or abort cannot apply a different mode. A mismatched
+     * request is rejected before any overlay or journal is touched and does not
+     * release the owner. There is no post-acquire recovery-required flag on this
+     * branch, so the #714 coordinator release on that path has no insertion point. */
     static thread_local bool fTxnOwner = false;
     static thread_local bool fTxnMemoryOnly = false;
     static thread_local uint8_t nTxnOwnerFlags = 0;
@@ -341,6 +341,26 @@ namespace LLD
     {
         if(fTxnOwner && nFlags == nTxnOwnerFlags)
             ReleaseTransactionOwnership();
+    }
+
+
+    /* Memory overlays are distinct modes and must match the owner exactly.
+     * Physical flag values share one journal, so a non-memory request matches
+     * a non-memory owner. A mismatch must be rejected before any overlay or
+     * journal is touched. */
+    static bool RequestedModeMatchesOwner(const uint8_t nFlags)
+    {
+        if(!fTxnOwner)
+            return true;
+
+        const bool fRequestedMemory = IsMemoryOverlay(nFlags);
+        if(fRequestedMemory != fTxnMemoryOnly)
+            return false;
+
+        if(fRequestedMemory && nFlags != nTxnOwnerFlags)
+            return false;
+
+        return true;
     }
 
 
@@ -401,6 +421,14 @@ namespace LLD
     /* Global handler for all LLD instances. */
     void TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
+        /* Validate before MemoryRelease. A MINER owner receiving MEMPOOL must
+         * not delete the process-wide pMemory overlay or any journal. */
+        if(!RequestedModeMatchesOwner(nFlags))
+        {
+            debug::error(FUNCTION, "transaction mode does not match current owner");
+            return;
+        }
+
         /* Abort the contract DB transaction. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
             Contract->MemoryRelease(nFlags);
@@ -455,26 +483,16 @@ namespace LLD
     /* Global handler for all LLD instances. */
     bool TxnCommit(const uint8_t nFlags, const uint16_t nInstances)
     {
+        /* Validate before MemoryCommit. A mode that does not own this thread's
+         * transaction is rejected and does not release that owner or another
+         * thread's process-wide overlay. */
+        if(!RequestedModeMatchesOwner(nFlags))
+            return debug::error(FUNCTION, "transaction mode does not match current owner");
+
         /* Special check if using MINER or SANITIZE flags — intentional short-circuit,
-         * not a failure: callers use these flags to prevent accidental commits.
-         * A mode that does not own the thread's transaction is rejected and does
-         * not release that owner. */
+         * not a failure: callers use these flags to prevent accidental commits. */
         if(nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-        {
-            if(fTxnOwner && nFlags != nTxnOwnerFlags)
-                return debug::error(FUNCTION, "transaction mode does not match current owner");
-
             return true;
-        }
-
-        /* Memory-overlay commits require exact mode matching. Rejected commits
-         * do not release ownership. */
-        if(fTxnOwner)
-        {
-            const bool fMemoryOnly = (nFlags == TAO::Ledger::FLAGS::MEMPOOL);
-            if(fMemoryOnly != fTxnMemoryOnly || (fMemoryOnly && nFlags != nTxnOwnerFlags))
-                return debug::error(FUNCTION, "transaction mode does not match current owner");
-        }
 
         /* Commit the contract DB transaction. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))

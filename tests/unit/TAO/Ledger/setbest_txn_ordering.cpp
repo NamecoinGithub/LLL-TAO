@@ -56,8 +56,10 @@ ________________________________________________________________________________
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unit/catch2/catch.hpp>
@@ -314,6 +316,10 @@ TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transactio
     REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
     REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
 
+    /* A mismatched abort must not release the owner or touch database state. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+
     /* Ownership is still held: another mismatched commit is still rejected. */
     REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
 
@@ -323,6 +329,97 @@ TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transactio
     /* Released owner: a new memory transaction can begin and commit. */
     LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
     REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+}
+
+
+TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay intact",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4237889625ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 77;
+
+    std::atomic<bool> fStaged{false};
+    std::atomic<bool> fMismatchedDone{false};
+    std::exception_ptr pError;
+    bool fStillStaged = false;
+    bool fCommitted = true;
+
+    std::thread mempool([&]()
+    {
+        try
+        {
+            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            if(!LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("failed to stage mempool claim");
+
+            fStaged.store(true);
+            while(!fMismatchedDone.load())
+                std::this_thread::yield();
+
+            uint64_t nRead = 0;
+            fStillStaged = LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL)
+                && nRead == nClaimed;
+
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+            nRead = 0;
+            fCommitted = LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL);
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+            fStaged.store(true);
+            fMismatchedDone.store(true);
+        }
+    });
+
+    while(!fStaged.load())
+        std::this_thread::yield();
+
+    struct MinerAbort
+    {
+        bool fActive{false};
+
+        ~MinerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        }
+    } miner;
+
+    struct JoinGuard
+    {
+        std::thread& tThread;
+        std::atomic<bool>& fDone;
+
+        ~JoinGuard()
+        {
+            fDone.store(true);
+            if(tThread.joinable())
+                tThread.join();
+        }
+    } joinGuard{mempool, fMismatchedDone};
+
+    if(!pError)
+    {
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    }
+
+    fMismatchedDone.store(true);
+    if(mempool.joinable())
+        mempool.join();
+
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE(fStillStaged);
+    REQUIRE_FALSE(fCommitted);
 }
 
 
