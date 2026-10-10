@@ -485,8 +485,8 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
-            if(fTransaction)
-                LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            if(fTransaction && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                return debug::error(FUNCTION, "failed to begin block transaction");
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())

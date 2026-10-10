@@ -107,8 +107,12 @@ namespace LLD
      *
      *  Global handler for all LLD instances.
      *
+     *  @return false if this begin was rejected because the requested mode, or
+     *          the overlay it shares, is already owned. Callers must not continue
+     *          into writes, abort, or commit of that mode.
+     *
      */
-    void TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
+    bool TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
 
 
     /** Txn Abort

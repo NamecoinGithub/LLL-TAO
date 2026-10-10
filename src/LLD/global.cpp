@@ -321,10 +321,14 @@ namespace LLD
      * when this thread owns that slot, including when MEMPOOL coexists with it.
      * Sole ownership is not required. A foreign owner, another thread holding
      * the requested slot, rejects that commit even if this thread owns nothing,
-     * and does not release the owner. A physical abort or commit owned by
-     * another thread is rejected before TxnRelease or TxnCommit.
-     * MemoryRelease/MemoryCommit of pMemory is skipped when another thread owns
-     * the MEMPOOL slot. */
+     * and does not release the owner. A physical abort or commit is rejected
+     * before TxnRelease or TxnCommit unless this thread owns the physical slot.
+     * Owning a different mode with no physical slot is a mismatch, not the
+     * unowned recovery no-op. TxnBegin returns false on rejection so callers
+     * stop before writing into the existing overlay. A redundant physical
+     * commit after the journal is already gone returns false and does not
+     * checkpoint. MemoryRelease/MemoryCommit of pMemory is skipped when
+     * another thread owns the MEMPOOL slot. */
     struct TxnSlot
     {
         std::mutex MUTEX;
@@ -482,7 +486,7 @@ namespace LLD
 
 
     /* Global handler for all LLD instances. */
-    void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
+    bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
         /* Claim the slot before creating its overlay or journal. A second begin,
          * including one from the current owner, must not reach MemoryBegin:
@@ -503,16 +507,14 @@ namespace LLD
             /* OwnedByOther misses a same-thread duplicate. slot.fOwned covers both. */
             if(slot.fOwned)
             {
-                debug::error(FUNCTION, OwnedByThisThread(slot)
+                return debug::error(FUNCTION, OwnedByThisThread(slot)
                     ? "transaction mode is already open"
                     : "transaction mode is owned by another thread");
-                return;
             }
 
             if(other.fOwned)
             {
-                debug::error(FUNCTION, "shared memory overlay is already owned");
-                return;
+                return debug::error(FUNCTION, "shared memory overlay is already owned");
             }
 
             ClaimSlot(slot, kind);
@@ -532,10 +534,9 @@ namespace LLD
              * would otherwise delete pMiner or pSanitize inside MemoryBegin. */
             if(slot.fOwned)
             {
-                debug::error(FUNCTION, OwnedByThisThread(slot)
+                return debug::error(FUNCTION, OwnedByThisThread(slot)
                     ? "transaction mode is already open"
                     : "transaction mode is owned by another thread");
-                return;
             }
 
             ClaimSlot(slot, kind);
@@ -555,7 +556,7 @@ namespace LLD
 
         /* Handle memory commits if in memory m ode. */
         if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return;
+            return true;
 
         /* Start the Logical DB transaction. */
         if(Logical && (nInstances & INSTANCES::LOGICAL))
@@ -584,6 +585,8 @@ namespace LLD
         /* Start the legacy DB transaction. */
         if(Legacy && (nInstances & INSTANCES::LEGACY))
             Legacy->TxnBegin();
+
+        return true;
     }
 
 
@@ -616,6 +619,15 @@ namespace LLD
         std::unique_lock<std::mutex> lkMem(MempoolSlot().MUTEX);
         std::lock_guard<std::mutex> lkPhys(PhysicalSlot().MUTEX);
         if(OwnedByOther(PhysicalSlot()))
+        {
+            debug::error(FUNCTION, "transaction mode does not match current owner");
+            return;
+        }
+
+        /* A thread that owns another mode and has no physical slot must not
+         * fall through to TxnRelease. An unowned call remains the recovery and
+         * post-abort no-op, which still releases a selected journal. */
+        if(!OwnedByThisThread(PhysicalSlot()) && nThreadOwnedMask != 0)
         {
             debug::error(FUNCTION, "transaction mode does not match current owner");
             return;
@@ -705,8 +717,18 @@ namespace LLD
          * MEMPOOL lock before the disk commit. */
         std::unique_lock<std::mutex> lkMem(MempoolSlot().MUTEX);
         std::lock_guard<std::mutex> lkPhys(PhysicalSlot().MUTEX);
-        if(OwnedByOther(PhysicalSlot()))
-            return debug::error(FUNCTION, "transaction mode does not match current owner");
+        if(!OwnedByThisThread(PhysicalSlot()))
+        {
+            /* Reject a foreign physical owner, a caller that owns a different
+             * mode, and an open journal this thread did not begin. The only
+             * retained call is the redundant commit after that journal is
+             * already gone: it returns false and does not checkpoint. */
+            if(OwnedByOther(PhysicalSlot()) || nThreadOwnedMask != 0
+            || HasOpenTransaction(nFlags, nInstances))
+                return debug::error(FUNCTION, "transaction mode does not match current owner");
+
+            return false;
+        }
 
         const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
         if(fReleasePhysical && !OwnedByOther(MempoolSlot()))

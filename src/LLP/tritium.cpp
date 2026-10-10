@@ -3631,7 +3631,8 @@ namespace LLP
                         /* Start our ACID transaction in case we have any failures here. */
                         { LOCK(CLIENT_MUTEX);
 
-                            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                return debug::drop(NODE, "FLAGS::LOOKUP: ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                             /* Build indexes if we don't have them. */
                             if(!LLD::Client->HasIndex(hashTx))
@@ -3687,7 +3688,8 @@ namespace LLP
                             /* Start our ACID transaction in case we have any failures here. */
                             { LOCK(CLIENT_MUTEX);
 
-                                LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                    return debug::error(FUNCTION, hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                                 /* Only write to disk and index if not completed already. */
                                 if(!LLD::Client->HasIndex(hashTx))

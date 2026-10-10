@@ -623,13 +623,15 @@ TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
         owner.fActive = true;
         REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
 
+        std::atomic<bool> fBeginRejected{false};
         std::thread attacker([&]()
         {
-            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            fBeginRejected.store(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
             if(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
                 LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
         });
         attacker.join();
+        REQUIRE(fBeginRejected.load());
 
         uint64_t nRead = 0;
         REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
@@ -646,12 +648,14 @@ TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
         REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
         REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
 
+        std::atomic<bool> fBeginRejected{false};
         std::thread attacker([&]()
         {
-            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            fBeginRejected.store(!LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
             LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
         });
         attacker.join();
+        REQUIRE(fBeginRejected.load());
 
         uint64_t nRead = 0;
         REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
@@ -665,11 +669,11 @@ TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
         OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
         OwnerAbort physical{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
 
-        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
         mempool.fActive = true;
         REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
 
-        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        REQUIRE_FALSE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
         physical.fActive = LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
 
         uint64_t nRead = 0;
@@ -722,6 +726,61 @@ TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
         LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
         miner.fActive = false;
     }
+}
+
+
+TEST_CASE("BLOCK abort and commit reject a caller that does not own the physical slot",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard guard;
+
+    struct Cleanup
+    {
+        bool fMempool{false};
+
+        ~Cleanup()
+        {
+            if(fMempool)
+                LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+            /* Unowned physical abort is the recovery no-op and releases a journal
+             * opened outside the ownership slot. */
+            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        }
+    } cleanup;
+
+    /* Open a journal without claiming PhysicalSlot, as recovery can. */
+    LLD::Ledger->TxnBegin();
+    REQUIRE(LLD::Ledger->HasTransaction());
+
+    const uint512_t hashTx(0x4238628335ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 17;
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    cleanup.fMempool = true;
+    REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+    /* Owning MEMPOOL is not physical ownership. Neither call may release or
+     * commit the journal, or drop the mempool overlay. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+
+    uint64_t nRead = 0;
+    REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(nRead == nClaimed);
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    cleanup.fMempool = false;
+
+    /* The redundant commit after a completed physical transaction stays false
+     * and must not be reported as an ownership error by mutating state. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::Ledger->HasTransaction());
 }
 
 

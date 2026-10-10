@@ -727,7 +727,8 @@ namespace TAO
             TAO::Ledger::BlockState state(*this);
 
             /* Start the database transaction. */
-            LLD::TxnBegin();
+            if(!LLD::TxnBegin())
+                return debug::error(FUNCTION, "failed to begin block transaction");
 
             /* Write the transactions. */
             for(const auto& proof : vtx)

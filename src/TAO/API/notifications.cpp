@@ -426,7 +426,8 @@ namespace TAO::API
         bool fSanitized = false;
 
         /* Start a ACID transaction (to be disposed). */
-        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+            return false;
 
         /* Temporarily disable error logging so that we don't log errors for contracts that fail to execute. */
         if(!fLogError)
@@ -542,7 +543,11 @@ namespace TAO::API
             }
 
             /* Start a ACID transaction (to be disposed). */
-            LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+            {
+                debug::error(FUNCTION, "failed to begin sanitize transaction");
+                break;
+            }
 
             /* Iterate through our contracts. */
             for(const auto& rContract : tx.Contracts())
