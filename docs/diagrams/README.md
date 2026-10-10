@@ -54,6 +54,8 @@ Diagram templates for PR descriptions and comprehensive Mermaid architecture dia
 9. **[architecture/trust-network-topology.md](architecture/trust-network-topology.md)** - Peer reputation system
 10. **[architecture/riscv-mining-protocol-diagrams.md](architecture/riscv-mining-protocol-diagrams.md)** - RISC-V mining protocol architecture diagrams
 11. **[architecture/setbest-transaction-boundary.md](architecture/setbest-transaction-boundary.md)** - RC13 `SetBest()` transactional chain-transition bug chain (PRs #651–#654)
+12. **[architecture/lld-global-transactions.md](architecture/lld-global-transactions.md)** - Per-mode process-wide LLD transaction ownership
+13. **[architecture/ledgerdb-block-reads.md](architecture/ledgerdb-block-reads.md)** - Hash-keyed `LedgerDB::ReadBlock` identity check
 
 ## Audit / recovery coordinator diagrams (2026-08-10)
 

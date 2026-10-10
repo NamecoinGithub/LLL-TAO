@@ -48,6 +48,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/state.h>
 
@@ -296,9 +297,8 @@ TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transactio
 {
     LedgerGuard guard;
 
-    /* NODE5 has no process-wide coordinator, so ownership is thread-local.
-     * A mismatched commit must be rejected without releasing the owner; abort
-     * of the owning mode is what releases it. */
+    /* Ownership is process-wide per mode. A mismatched commit must be rejected
+     * without releasing the owner; abort of the owning mode is what releases it. */
     struct OwnerAbort
     {
         uint8_t nFlags;
@@ -420,6 +420,126 @@ TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay in
 
     REQUIRE(fStillStaged);
     REQUIRE_FALSE(fCommitted);
+}
+
+
+TEST_CASE("Unowned thread cannot abort, commit, or replace another thread's mempool overlay",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4237997049ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 91;
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+    std::atomic<bool> fCommitRejected{false};
+    std::exception_ptr pError;
+
+    std::thread unowned([&]()
+    {
+        try
+        {
+            /* Never called TxnBegin. These must not delete, commit, or replace pMemory. */
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            fCommitRejected.store(!LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+
+    unowned.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE(fCommitRejected.load());
+
+    uint64_t nRead = 0;
+    REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(nRead == nClaimed);
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+
+TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identity",
+          "[lld][ledger][integrity][client]")
+{
+    LedgerGuard guard;
+
+    struct ClientModeGuard
+    {
+        bool fPrevious{false};
+        LLD::ClientDB* pPrevious{nullptr};
+        bool fOwned{false};
+
+        ClientModeGuard()
+            : fPrevious(config::fClient.load())
+            , pPrevious(LLD::Client)
+        {
+            config::fClient.store(true);
+            if(!LLD::Client)
+            {
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 77773);
+                fOwned = true;
+            }
+        }
+
+        ~ClientModeGuard()
+        {
+            config::fClient.store(fPrevious);
+            if(fOwned)
+            {
+                delete LLD::Client;
+                LLD::Client = pPrevious;
+            }
+        }
+    } clientGuard;
+
+    TAO::Ledger::ClientBlock stored;
+    stored.nVersion = 4;
+    stored.nChannel = 2;
+    stored.nHeight = 9;
+    stored.nBits = 1;
+    stored.nNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    const uint1024_t hashExpected = stored.GetHash();
+    uint1024_t hashWrongKey = hashExpected;
+    ++hashWrongKey;
+
+    struct ClientRecordDiskGuard
+    {
+        uint1024_t hash;
+
+        ~ClientRecordDiskGuard()
+        {
+            if(LLD::Client)
+                LLD::Client->EraseBlock(hash);
+        }
+    } diskGuard{hashWrongKey};
+
+    REQUIRE(LLD::Client->WriteBlock(hashWrongKey, stored));
+
+    TAO::Ledger::BlockState result;
+    result.nHeight = 42;
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
+    REQUIRE(result.nHeight == 42);
+
+    TAO::Ledger::BlockState atomicInitial;
+    atomicInitial.nHeight = 42;
+    memory::atomic<TAO::Ledger::BlockState> atomicResult;
+    atomicResult.store(atomicInitial);
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
+    REQUIRE(atomicResult.load().nHeight == 42);
 }
 
 
