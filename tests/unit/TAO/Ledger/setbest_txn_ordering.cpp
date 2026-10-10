@@ -432,6 +432,19 @@ TEST_CASE("Unowned thread cannot abort, commit, or replace another thread's memp
     const uint32_t nContract = 1;
     const uint64_t nClaimed = 91;
 
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{true};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    } owner{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+
     LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
     REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
 
@@ -442,10 +455,12 @@ TEST_CASE("Unowned thread cannot abort, commit, or replace another thread's memp
     {
         try
         {
-            /* Never called TxnBegin. These must not delete, commit, or replace pMemory. */
+            /* Never called TxnBegin. These must not delete, commit, or replace pMemory.
+             * BLOCK shares that overlay, so its begin is part of the same check. */
             LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
             fCommitRejected.store(!LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
             LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
             LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
             LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
         }
@@ -464,10 +479,98 @@ TEST_CASE("Unowned thread cannot abort, commit, or replace another thread's memp
     uint64_t nRead = 0;
     REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
     REQUIRE(nRead == nClaimed);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
 
     LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    owner.fActive = false;
     nRead = 0;
     REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+
+TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 55;
+
+    SECTION("BLOCK begin does not delete another thread's MEMPOOL overlay")
+    {
+        const uint512_t hashTx(0x4238195488ULL);
+        OwnerAbort owner{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        owner.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        std::thread attacker([&]()
+        {
+            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            if(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        });
+        attacker.join();
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("MEMPOOL begin does not delete another thread's BLOCK overlay")
+    {
+        const uint512_t hashTx(0x4238195489ULL);
+        OwnerAbort owner{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        owner.fActive = true;
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        std::thread attacker([&]()
+        {
+            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        });
+        attacker.join();
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("same thread cannot open the second shared mode")
+    {
+        const uint512_t hashTx(0x4238195490ULL);
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort physical{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        physical.fActive = LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE_FALSE(physical.fActive);
+    }
 }
 
 
@@ -489,7 +592,9 @@ TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identi
             config::fClient.store(true);
             if(!LLD::Client)
             {
-                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 77773);
+                /* Match LLD::Initialize(): production ClientDB uses 1000000 buckets.
+                 * 77773 is the client-mode LedgerDB count, not ClientDB. */
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1000000);
                 fOwned = true;
             }
         }
@@ -519,10 +624,24 @@ TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identi
     struct ClientRecordDiskGuard
     {
         uint1024_t hash;
+        bool fHadPrevious{false};
+        TAO::Ledger::ClientBlock previous;
+
+        explicit ClientRecordDiskGuard(const uint1024_t& hashIn)
+            : hash(hashIn)
+        {
+            if(LLD::Client)
+                fHadPrevious = LLD::Client->ReadBlock(hash, previous);
+        }
 
         ~ClientRecordDiskGuard()
         {
-            if(LLD::Client)
+            if(!LLD::Client)
+                return;
+
+            if(fHadPrevious)
+                LLD::Client->WriteBlock(hash, previous);
+            else
                 LLD::Client->EraseBlock(hash);
         }
     } diskGuard{hashWrongKey};

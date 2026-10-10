@@ -306,10 +306,13 @@ namespace LLD
     /* Process-wide owner of each in-flight transaction mode.
      *
      * pMemory, pMiner, pSanitize, and the physical journal are process-wide,
-     * not thread-local. MINER, SANITIZE, and MEMPOOL stay on distinct slots so
-     * they can run concurrently; there is no cross-mode coordinator and no
+     * not thread-local. MINER and SANITIZE stay on distinct slots so they can
+     * run beside MEMPOOL. MEMPOOL and physical BLOCK both map to pMemory, so
+     * those two modes are coordinated at begin time: the second begin is
+     * rejected before MemoryBegin. There is no cross-mode coordinator and no
      * post-acquire recovery-required flag. A slot mutex is held across the
-     * mutation of that slot only.
+     * mutation of that slot only. Shared-overlay checks lock MEMPOOL before
+     * PHYSICAL, matching abort and commit.
      *
      * An unowned memory abort or MEMPOOL commit is rejected and does not touch
      * the overlay. MINER and SANITIZE commits remain a no-mutation short-circuit.
@@ -482,16 +485,53 @@ namespace LLD
     void TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
         /* Claim the slot before creating its overlay or journal. A second thread
-         * must not replace a process-wide overlay it does not own. */
-        TxnSlot& slot = SlotFor(KindOf(nFlags));
-        std::lock_guard<std::mutex> lk(slot.MUTEX);
-        if(OwnedByOther(slot))
-        {
-            debug::error(FUNCTION, "transaction mode is owned by another thread");
-            return;
-        }
+         * must not replace a process-wide overlay it does not own. MEMPOOL and
+         * physical BLOCK share pMemory, so either mode being owned rejects the
+         * other begin before MemoryBegin. Lock MEMPOOL before PHYSICAL. */
+        const TxnKind kind = KindOf(nFlags);
+        std::unique_lock<std::mutex> lkPrimary;
+        std::unique_lock<std::mutex> lkSecondary;
 
-        ClaimSlot(slot, KindOf(nFlags));
+        if(kind == TxnKind::MEMPOOL || kind == TxnKind::PHYSICAL)
+        {
+            lkPrimary = std::unique_lock<std::mutex>(MempoolSlot().MUTEX);
+            lkSecondary = std::unique_lock<std::mutex>(PhysicalSlot().MUTEX);
+
+            TxnSlot& slot = (kind == TxnKind::MEMPOOL) ? MempoolSlot() : PhysicalSlot();
+            const TxnSlot& other = (kind == TxnKind::MEMPOOL) ? PhysicalSlot() : MempoolSlot();
+            if(OwnedByOther(slot))
+            {
+                debug::error(FUNCTION, "transaction mode is owned by another thread");
+                return;
+            }
+
+            if(other.fOwned)
+            {
+                debug::error(FUNCTION, "shared memory overlay is already owned");
+                return;
+            }
+
+            ClaimSlot(slot, kind);
+
+            /* The claim makes a concurrent begin of the other mode fail. Drop
+             * the unused lock before creating the overlay. */
+            if(kind == TxnKind::MEMPOOL)
+                lkSecondary.unlock();
+            else
+                lkPrimary.unlock();
+        }
+        else
+        {
+            TxnSlot& slot = SlotFor(kind);
+            lkPrimary = std::unique_lock<std::mutex>(slot.MUTEX);
+            if(OwnedByOther(slot))
+            {
+                debug::error(FUNCTION, "transaction mode is owned by another thread");
+                return;
+            }
+
+            ClaimSlot(slot, kind);
+        }
 
         /* Start the contract DB transaction. */
         if(Contract && (nInstances & INSTANCES::CONTRACT))
