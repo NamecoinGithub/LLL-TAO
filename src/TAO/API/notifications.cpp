@@ -544,10 +544,7 @@ namespace TAO::API
 
             /* Start a ACID transaction (to be disposed). */
             if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
-            {
-                debug::error(FUNCTION, "failed to begin sanitize transaction");
-                break;
-            }
+                return debug::error(FUNCTION, "failed to begin sanitize transaction");
 
             /* Iterate through our contracts. */
             for(const auto& rContract : tx.Contracts())

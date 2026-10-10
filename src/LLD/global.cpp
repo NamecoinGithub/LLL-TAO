@@ -15,6 +15,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -128,10 +129,25 @@ namespace LLD
     }
 
 
+    static void AbortOwnedByThisThread();
+    static std::atomic<bool>& InstancesAlive();
+    static std::recursive_mutex& LifetimeMutex();
+
+
     /*  Shutdown and cleanup the global LLD instances. */
     void Shutdown()
     {
         debug::log(0, FUNCTION, "Shutting down LLD");
+
+        /* Hold the lifetime lock across the owner abort, the alive flag, and
+         * instance deletion. A thread exiting at the same time waits, then sees
+         * the flag and does not touch freed databases. */
+        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
+
+        /* Drop slots this thread still owns before the instances are deleted.
+         * A thread that exits earlier releases its own slots from the owner guard. */
+        AbortOwnedByThisThread();
+        InstancesAlive().store(false, std::memory_order_release);
 
         /* Cleanup the contract database. */
         if(Contract)
@@ -328,13 +344,43 @@ namespace LLD
      * stop before writing into the existing overlay. A redundant physical
      * commit after the journal is already gone returns false and does not
      * checkpoint. MemoryRelease/MemoryCommit of pMemory is skipped when
-     * another thread owns the MEMPOOL slot. */
+     * another thread owns the MEMPOOL slot.
+     *
+     * Ownership is not a bare thread id. ClaimSlot arms a thread-local guard
+     * that aborts every slot this thread still owns when the thread exits, so
+     * fOwned cannot outlive the owner and a reused thread id cannot act on the
+     * stale overlay. Shutdown aborts slots owned by the calling thread before
+     * the instances are deleted. */
     struct TxnSlot
     {
         std::mutex MUTEX;
         bool fOwned = false;
         std::thread::id idOwner{};
+        uint8_t nFlags = 0;
+        uint16_t nInstances = 0;
     };
+
+
+    /* Defined below TxnAbort. Constructed only after a slot is claimed, and
+     * destroyed when that thread exits. */
+    struct ThreadTxnOwnerGuard
+    {
+        ~ThreadTxnOwnerGuard();
+    };
+
+
+    static std::atomic<bool>& InstancesAlive()
+    {
+        static std::atomic<bool> fAlive{true};
+        return fAlive;
+    }
+
+
+    static void ArmThreadTxnOwnerGuard()
+    {
+        static thread_local ThreadTxnOwnerGuard guard;
+        (void)guard;
+    }
 
 
     enum class TxnKind : uint8_t
@@ -441,12 +487,16 @@ namespace LLD
     }
 
 
-    /* Caller holds slot.MUTEX. */
-    static void ClaimSlot(TxnSlot& slot, const TxnKind kind)
+    /* Caller holds slot.MUTEX. Arms the exit guard so this claim cannot outlive
+     * the thread. A same-thread duplicate must not reach this function. */
+    static void ClaimSlot(TxnSlot& slot, const TxnKind kind, const uint8_t nFlags, const uint16_t nInstances)
     {
         slot.fOwned = true;
         slot.idOwner = std::this_thread::get_id();
+        slot.nFlags = nFlags;
+        slot.nInstances = nInstances;
         nThreadOwnedMask |= MaskOf(kind);
+        ArmThreadTxnOwnerGuard();
     }
 
 
@@ -455,6 +505,8 @@ namespace LLD
     {
         slot.fOwned = false;
         slot.idOwner = std::thread::id();
+        slot.nFlags = 0;
+        slot.nInstances = 0;
         nThreadOwnedMask &= static_cast<uint8_t>(~MaskOf(kind));
     }
 
@@ -482,6 +534,15 @@ namespace LLD
 
         if(Ledger && (nInstances & INSTANCES::LEDGER))
             Ledger->MemoryCommit();
+    }
+
+
+    /* True when this thread owns the process-wide slot for nFlags. */
+    bool ThreadOwnsTransaction(const uint8_t nFlags)
+    {
+        TxnSlot& slot = SlotFor(KindOf(nFlags));
+        std::lock_guard<std::mutex> lk(slot.MUTEX);
+        return OwnedByThisThread(slot);
     }
 
 
@@ -517,7 +578,7 @@ namespace LLD
                 return debug::error(FUNCTION, "shared memory overlay is already owned");
             }
 
-            ClaimSlot(slot, kind);
+            ClaimSlot(slot, kind, nFlags, nInstances);
 
             /* The claim makes a concurrent begin of the other mode fail. Drop
              * the unused lock before creating the overlay. */
@@ -539,7 +600,7 @@ namespace LLD
                     : "transaction mode is owned by another thread");
             }
 
-            ClaimSlot(slot, kind);
+            ClaimSlot(slot, kind, nFlags, nInstances);
         }
 
         /* Start the contract DB transaction. */
@@ -674,6 +735,65 @@ namespace LLD
 
         if(fReleasePhysical)
             ReleaseSlot(PhysicalSlot(), TxnKind::PHYSICAL);
+    }
+
+
+    static std::recursive_mutex& LifetimeMutex()
+    {
+        static std::recursive_mutex mtx;
+        return mtx;
+    }
+
+
+    /* Abort every slot this thread still owns. Used when the owner thread exits
+     * and when LLD shuts down, so a reused thread id cannot resume the overlay
+     * and a later begin is not rejected forever. The stored begin flags and
+     * instance mask are used so a narrower begin does not release other journals. */
+    static void AbortOwnedByThisThread()
+    {
+        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
+        if(!InstancesAlive().load(std::memory_order_acquire))
+            return;
+
+        struct Pending
+        {
+            uint8_t nFlags;
+            uint16_t nInstances;
+        };
+
+        Pending vPending[4];
+        uint32_t nPending = 0;
+
+        auto Collect = [&](TxnSlot& slot)
+        {
+            std::lock_guard<std::mutex> lk(slot.MUTEX);
+            if(!OwnedByThisThread(slot) || nPending >= 4)
+                return;
+
+            vPending[nPending].nFlags = slot.nFlags;
+            vPending[nPending].nInstances = slot.nInstances;
+            ++nPending;
+        };
+
+        /* One lock at a time. TxnAbort locks MEMPOOL before PHYSICAL. */
+        Collect(MinerSlot());
+        Collect(SanitizeSlot());
+        Collect(MempoolSlot());
+        Collect(PhysicalSlot());
+
+        for(uint32_t n = 0; n < nPending; ++n)
+        {
+            debug::log(1, FUNCTION, "aborting transaction left open by this thread");
+            TxnAbort(vPending[n].nFlags, vPending[n].nInstances);
+        }
+    }
+
+
+    ThreadTxnOwnerGuard::~ThreadTxnOwnerGuard()
+    {
+        /* Instances may already have been deleted if this is the main thread
+         * exiting after Shutdown. Worker threads release their slots here. */
+        AbortOwnedByThisThread();
     }
 
 

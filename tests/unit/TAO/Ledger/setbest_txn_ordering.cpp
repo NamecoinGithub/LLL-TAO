@@ -784,6 +784,75 @@ TEST_CASE("BLOCK abort and commit reject a caller that does not own the physical
 }
 
 
+TEST_CASE("Owner thread exit releases the process-wide transaction slot",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4239100840ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 19;
+    std::exception_ptr pError;
+
+    std::thread owner([&]()
+    {
+        try
+        {
+            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("mempool begin failed");
+            if(!LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("mempool begin did not own the slot");
+            if(!LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("failed to stage mempool claim");
+            /* Exit without abort or commit. The owner guard must release the slot. */
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+    owner.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+    uint64_t nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+
+    /* A later begin must not be rejected as foreign, and must not resume the overlay. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+    std::thread physical([&]()
+    {
+        try
+        {
+            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("block begin failed");
+            if(!LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK))
+                throw std::runtime_error("block begin did not own the slot");
+            if(!LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("block begin did not open a journal");
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+    physical.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+}
+
+
 TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identity",
           "[lld][ledger][integrity][client]")
 {
