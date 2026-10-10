@@ -55,6 +55,7 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <string>
 #include <vector>
@@ -243,6 +244,85 @@ TEST_CASE("LLD::TxnCommit returns true for MINER and SANITIZE flags",
         const bool fResult = LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE);
         REQUIRE(fResult);
     }
+}
+
+
+TEST_CASE("LedgerDB hash-keyed block reads reject mismatched record identity",
+          "[lld][ledger][integrity]")
+{
+    LedgerGuard guard;
+
+    TAO::Ledger::BlockState stored;
+    stored.nVersion = 4;
+    stored.nChannel = 2;
+    stored.nHeight = 7;
+    stored.nBits = 1;
+    stored.nNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    const uint1024_t hashExpected = stored.GetHash();
+    uint1024_t hashWrongKey = hashExpected;
+    ++hashWrongKey;
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashWrongKey));
+
+    struct BlockRecordDiskGuard
+    {
+        uint1024_t hash;
+
+        ~BlockRecordDiskGuard()
+        {
+            LLD::Ledger->EraseBlock(hash);
+        }
+    } diskGuard{hashWrongKey};
+
+    REQUIRE(LLD::Ledger->WriteBlock(hashWrongKey, stored));
+
+    TAO::Ledger::BlockState result;
+    result.nHeight = 42;
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
+    REQUIRE(result.nHeight == 42);
+
+    TAO::Ledger::BlockState atomicInitial = stored;
+    memory::atomic<TAO::Ledger::BlockState> atomicResult;
+    atomicResult.store(atomicInitial);
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
+    REQUIRE(atomicResult.load().GetHash() == hashExpected);
+}
+
+
+TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transaction",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    /* NODE5 has no process-wide coordinator, so ownership is thread-local.
+     * A mismatched commit must be rejected without releasing the owner; abort
+     * of the owning mode is what releases it. */
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{true};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    } owner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+
+    /* Ownership is still held: another mismatched commit is still rejected. */
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    owner.fActive = false;
+
+    /* Released owner: a new memory transaction can begin and commit. */
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
 }
 
 
