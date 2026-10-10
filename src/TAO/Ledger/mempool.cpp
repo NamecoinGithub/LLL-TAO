@@ -1151,7 +1151,7 @@ namespace TAO
                         if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
                         {
                             debug::error(FUNCTION, "failed to begin sanitize transaction");
-                            break;
+                            return;
                         }
                         bool fSanitizeTxnActive = true;
 
@@ -1211,7 +1211,7 @@ namespace TAO
                             if(!LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
                             {
                                 debug::error(FUNCTION, "failed to begin mempool transaction");
-                                break;
+                                return;
                             }
 
                             /* Track whether the LLD transaction is still active (not aborted). */
