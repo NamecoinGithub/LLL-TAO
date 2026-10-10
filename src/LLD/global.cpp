@@ -15,7 +15,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/enum.h> //for internal flags
 
-#include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 
@@ -130,8 +130,8 @@ namespace LLD
 
 
     static void AbortOwnedByThisThread();
-    static std::atomic<bool>& InstancesAlive();
-    static std::recursive_mutex& LifetimeMutex();
+    static void BeginTxnShutdown();
+    static void WaitAndCloseTxnLifetime();
 
 
     /*  Shutdown and cleanup the global LLD instances. */
@@ -139,15 +139,13 @@ namespace LLD
     {
         debug::log(0, FUNCTION, "Shutting down LLD");
 
-        /* Hold the lifetime lock across the owner abort, the alive flag, and
-         * instance deletion. A thread exiting at the same time waits, then sees
-         * the flag and does not touch freed databases. */
-        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
-
-        /* Drop slots this thread still owns before the instances are deleted.
-         * A thread that exits earlier releases its own slots from the owner guard. */
+        /* Stop new begins first. Abort slots this thread still owns, then wait
+         * until every other in-flight call has left and every slot is released.
+         * Deleting earlier lets a worker pass its ownership check and use a
+         * freed database, and makes an exiting owner's guard skip cleanup. */
+        BeginTxnShutdown();
         AbortOwnedByThisThread();
-        InstancesAlive().store(false, std::memory_order_release);
+        WaitAndCloseTxnLifetime();
 
         /* Cleanup the contract database. */
         if(Contract)
@@ -349,8 +347,11 @@ namespace LLD
      * Ownership is not a bare thread id. ClaimSlot arms a thread-local guard
      * that aborts every slot this thread still owns when the thread exits, so
      * fOwned cannot outlive the owner and a reused thread id cannot act on the
-     * stale overlay. Shutdown aborts slots owned by the calling thread before
-     * the instances are deleted. */
+     * stale overlay. Shutdown rejects new begins, aborts slots owned by the
+     * calling thread, then waits until in-flight transaction calls and every
+     * owned slot have finished before deleting the instances. A physical begin
+     * is rejected when a selected journal is already open and this thread does
+     * not own it, so SectorDatabase::TxnBegin cannot replace that journal. */
     struct TxnSlot
     {
         std::mutex MUTEX;
@@ -369,10 +370,113 @@ namespace LLD
     };
 
 
-    static std::atomic<bool>& InstancesAlive()
+    /* Barrier shared by TxnBegin, TxnCommit, TxnAbort, and Shutdown.
+     * nInFlight counts callers inside those functions. nOwned counts claimed
+     * slots. Shutdown sets fShuttingDown, then waits for both counters before
+     * clearing fAlive and deleting the instances. Slot mutexes are never taken
+     * while this mutex is held. */
+    struct TxnLifetime
     {
-        static std::atomic<bool> fAlive{true};
-        return fAlive;
+        std::mutex MUTEX;
+        std::condition_variable CV;
+        bool fShuttingDown = false;
+        bool fAlive = true;
+        uint32_t nInFlight = 0;
+        uint32_t nOwned = 0;
+    };
+
+
+    static TxnLifetime& Lifetime()
+    {
+        static TxnLifetime life;
+        return life;
+    }
+
+
+    enum class TxnEntry : uint8_t
+    {
+        BEGIN,
+        MUTATE
+    };
+
+
+    /* Holds an in-flight count for one transaction call. Begin is rejected once
+     * shutdown has started. Commit and abort stay allowed until the instances
+     * are deleted, so an owner can still release its slot. */
+    class TxnLifetimeGuard
+    {
+        bool fHeld;
+
+    public:
+        explicit TxnLifetimeGuard(const TxnEntry entry)
+        : fHeld(false)
+        {
+            std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+            TxnLifetime& life = Lifetime();
+            if(!life.fAlive)
+                return;
+
+            if(entry == TxnEntry::BEGIN && life.fShuttingDown)
+                return;
+
+            ++life.nInFlight;
+            fHeld = true;
+        }
+
+        ~TxnLifetimeGuard()
+        {
+            if(!fHeld)
+                return;
+
+            std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+            --Lifetime().nInFlight;
+            Lifetime().CV.notify_all();
+        }
+
+        TxnLifetimeGuard(const TxnLifetimeGuard&) = delete;
+        TxnLifetimeGuard& operator=(const TxnLifetimeGuard&) = delete;
+
+        explicit operator bool() const
+        {
+            return fHeld;
+        }
+    };
+
+
+    static void BeginTxnShutdown()
+    {
+        std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+        Lifetime().fShuttingDown = true;
+        Lifetime().CV.notify_all();
+    }
+
+
+    static void WaitAndCloseTxnLifetime()
+    {
+        std::unique_lock<std::mutex> lk(Lifetime().MUTEX);
+        Lifetime().CV.wait(lk, []
+        {
+            return Lifetime().nInFlight == 0 && Lifetime().nOwned == 0;
+        });
+        Lifetime().fAlive = false;
+    }
+
+
+    /* Caller holds slot.MUTEX. */
+    static void NoteSlotClaimed()
+    {
+        std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+        ++Lifetime().nOwned;
+    }
+
+
+    /* Caller holds slot.MUTEX. */
+    static void NoteSlotReleased()
+    {
+        std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+        if(Lifetime().nOwned > 0)
+            --Lifetime().nOwned;
+        Lifetime().CV.notify_all();
     }
 
 
@@ -496,6 +600,7 @@ namespace LLD
         slot.nFlags = nFlags;
         slot.nInstances = nInstances;
         nThreadOwnedMask |= MaskOf(kind);
+        NoteSlotClaimed();
         ArmThreadTxnOwnerGuard();
     }
 
@@ -508,6 +613,7 @@ namespace LLD
         slot.nFlags = 0;
         slot.nInstances = 0;
         nThreadOwnedMask &= static_cast<uint8_t>(~MaskOf(kind));
+        NoteSlotReleased();
     }
 
 
@@ -546,9 +652,35 @@ namespace LLD
     }
 
 
+    /* True when TxnBegin would open a physical journal that is already open.
+     * HasOpenTransaction does not cover LOGICAL or CLIENT, which a MERKLE begin
+     * still opens. The caller must not own PhysicalSlot, so an open journal has
+     * no matching owner. */
+    static bool UnownedJournalOpen(const uint16_t nInstances)
+    {
+        if(HasOpenTransaction(0, nInstances))
+            return true;
+
+        if(Logical && (nInstances & INSTANCES::LOGICAL) && Logical->HasTransaction())
+            return true;
+
+        if(Client && (nInstances & INSTANCES::CLIENT) && Client->HasTransaction())
+            return true;
+
+        return false;
+    }
+
+
     /* Global handler for all LLD instances. */
     bool TxnBegin(const uint8_t nFlags, const uint16_t nInstances)
     {
+        /* Participate in the shutdown barrier before taking a slot. A begin
+         * after Shutdown has started must not create an overlay the delete
+         * path can free out from under this thread. */
+        const TxnLifetimeGuard life(TxnEntry::BEGIN);
+        if(!life)
+            return debug::error(FUNCTION, "LLD is shutting down");
+
         /* Claim the slot before creating its overlay or journal. A second begin,
          * including one from the current owner, must not reach MemoryBegin:
          * that call deletes the existing process-wide overlay. MEMPOOL and
@@ -577,6 +709,12 @@ namespace LLD
             {
                 return debug::error(FUNCTION, "shared memory overlay is already owned");
             }
+
+            /* SectorDatabase::TxnBegin deletes an existing pTransaction. A raw
+             * recovery journal has no PhysicalSlot owner, so claim nothing and
+             * leave that journal in place. */
+            if(kind == TxnKind::PHYSICAL && UnownedJournalOpen(nInstances))
+                return debug::error(FUNCTION, "unowned journal is already open");
 
             ClaimSlot(slot, kind, nFlags, nInstances);
 
@@ -654,6 +792,12 @@ namespace LLD
     /* Global handler for all LLD instances. */
     void TxnAbort(const uint8_t nFlags, const uint16_t nInstances)
     {
+        /* Allowed through shutdown until the instances are deleted, so an owner
+         * can release its slot. After that, do not touch the databases. */
+        const TxnLifetimeGuard life(TxnEntry::MUTATE);
+        if(!life)
+            return;
+
         const TxnKind kind = KindOf(nFlags);
 
         /* Memory overlays are process-wide. An unowned thread, or a thread that
@@ -738,21 +882,15 @@ namespace LLD
     }
 
 
-    static std::recursive_mutex& LifetimeMutex()
-    {
-        static std::recursive_mutex mtx;
-        return mtx;
-    }
-
-
     /* Abort every slot this thread still owns. Used when the owner thread exits
      * and when LLD shuts down, so a reused thread id cannot resume the overlay
      * and a later begin is not rejected forever. The stored begin flags and
-     * instance mask are used so a narrower begin does not release other journals. */
+     * instance mask are used so a narrower begin does not release other journals.
+     * Once Shutdown has deleted the instances this returns without touching them. */
     static void AbortOwnedByThisThread()
     {
-        std::lock_guard<std::recursive_mutex> lk(LifetimeMutex());
-        if(!InstancesAlive().load(std::memory_order_acquire))
+        const TxnLifetimeGuard life(TxnEntry::MUTATE);
+        if(!life)
             return;
 
         struct Pending
@@ -800,6 +938,12 @@ namespace LLD
     /* Global handler for all LLD instances. */
     bool TxnCommit(const uint8_t nFlags, const uint16_t nInstances)
     {
+        /* Allowed through shutdown until the instances are deleted, so an owner
+         * can finish and release its slot. After that, do not touch the databases. */
+        const TxnLifetimeGuard life(TxnEntry::MUTATE);
+        if(!life)
+            return debug::error(FUNCTION, "LLD is shutting down");
+
         const TxnKind kind = KindOf(nFlags);
 
         /* MINER and SANITIZE commits do not call MemoryCommit and do not release

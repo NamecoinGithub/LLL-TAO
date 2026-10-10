@@ -81,6 +81,9 @@ namespace LLD
      *
      *  Shutdown and cleanup the global LLD instances.
      *
+     *  Rejects new transactions, waits until in-flight transaction calls finish
+     *  and every ownership slot is released, then deletes the instances.
+     *
      **/
     void Shutdown();
 
@@ -120,8 +123,10 @@ namespace LLD
      *  Global handler for all LLD instances.
      *
      *  @return false if this begin was rejected because the requested mode, or
-     *          the overlay it shares, is already owned. Callers must not continue
-     *          into writes, abort, or commit of that mode.
+     *          the overlay it shares, is already owned, because a selected
+     *          physical journal is already open without an owner, or because LLD
+     *          is shutting down. Callers must not continue into writes, abort,
+     *          or commit of that mode.
      *
      */
     bool TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);

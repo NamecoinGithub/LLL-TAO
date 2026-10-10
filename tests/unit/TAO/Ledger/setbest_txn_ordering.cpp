@@ -59,6 +59,7 @@ ________________________________________________________________________________
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -773,6 +774,15 @@ TEST_CASE("BLOCK abort and commit reject a caller that does not own the physical
 
     LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
     cleanup.fMempool = false;
+
+    /* A physical begin must not replace the unowned recovery journal. */
+    REQUIRE_FALSE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+
+    /* Recovery abort releases that journal without an owner. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::Ledger->HasTransaction());
 
     /* The redundant commit after a completed physical transaction stays false
      * and must not be reported as an ownership error by mutating state. */
