@@ -450,6 +450,7 @@ TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay in
 
     std::atomic<bool> fStaged{false};
     std::atomic<bool> fMismatchedDone{false};
+    std::atomic<bool> fError{false};
     std::exception_ptr pError;
     bool fStillStaged = false;
     bool fCommitted = true;
@@ -478,6 +479,7 @@ TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay in
         catch(...)
         {
             pError = std::current_exception();
+            fError.store(true);
             fStaged.store(true);
             fMismatchedDone.store(true);
         }
@@ -510,7 +512,7 @@ TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay in
         }
     } joinGuard{mempool, fMismatchedDone};
 
-    if(!pError)
+    if(!fError.load())
     {
         LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
         miner.fActive = true;
