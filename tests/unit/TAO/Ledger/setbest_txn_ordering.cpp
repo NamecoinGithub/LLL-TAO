@@ -366,11 +366,16 @@ TEST_CASE("LedgerDB hash-keyed block reads reject mismatched record identity",
     REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
     REQUIRE(result.nHeight == 42);
 
-    TAO::Ledger::BlockState atomicInitial = stored;
+    /* Sentinel must differ from the mismatched record. Copying the stored block
+     * would hide an overwrite that happens before the identity check fails. */
+    TAO::Ledger::BlockState atomicInitial;
+    atomicInitial.nHeight = 99;
+    atomicInitial.nNonce = 1;
     memory::atomic<TAO::Ledger::BlockState> atomicResult;
     atomicResult.store(atomicInitial);
     REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
-    REQUIRE(atomicResult.load().GetHash() == hashExpected);
+    REQUIRE(atomicResult.load().nHeight == 99);
+    REQUIRE(atomicResult.load().nNonce == 1);
 }
 
 

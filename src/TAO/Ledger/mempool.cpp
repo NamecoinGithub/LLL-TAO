@@ -383,6 +383,10 @@ namespace TAO
                 void Disarm(){ fActive = false; }
             } depTailGuard(this, hashTx);
 
+            /* Set only after TxnBegin succeeds. Cleared after commit or an explicit
+             * abort so the catch does not release a transaction this call no longer owns. */
+            bool fMempoolTxnActive = false;
+
             try
             {
                 /* Reset our request count if we received it. */
@@ -653,10 +657,13 @@ namespace TAO
                 if(!LLD::TxnBegin(FLAGS::MEMPOOL))
                     return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: failed to begin mempool transaction");
 
+                fMempoolTxnActive = true;
+
                 if(!tx.Connect(FLAGS::MEMPOOL))
                 {
                     /* Abort memory commits on failures. */
                     LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
 
                     /* Check if Transaction::Connect() classified this as a
                      * local-state-dependent failure (e.g. coinbase appears
@@ -683,6 +690,7 @@ namespace TAO
 
                 /* Commit new memory into database states. */
                 LLD::TxnCommit(FLAGS::MEMPOOL);
+                fMempoolTxnActive = false;
 
                 /* Set the internal memory. */
                 mapLedger[hashTx] = tx;
@@ -729,6 +737,15 @@ namespace TAO
             }
             catch(const std::exception& e)
             {
+                /* Connect or later processing can throw after begin. Release the
+                 * process-wide MEMPOOL slot before returning, or later accepts
+                 * stay rejected until this thread exits. */
+                if(fMempoolTxnActive)
+                {
+                    LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
+                }
+
                 return debug::error(FUNCTION, "REJECTED: exception encountered ", e.what());
             }
 
