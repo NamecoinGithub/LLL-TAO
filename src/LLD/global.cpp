@@ -698,7 +698,9 @@ namespace LLD
          * including one from the current owner, must not reach MemoryBegin:
          * that call deletes the existing process-wide overlay. MEMPOOL and
          * physical BLOCK share pMemory, so either mode being owned rejects the
-         * other begin before MemoryBegin. Lock MEMPOOL before PHYSICAL. */
+         * other begin before MemoryBegin. Callers that need both, including
+         * TritiumBlock::Accept producer-orphan processing, must commit and
+         * release the physical slot first. Lock MEMPOOL before PHYSICAL. */
         const TxnKind kind = KindOf(nFlags);
         std::unique_lock<std::mutex> lkPrimary;
         std::unique_lock<std::mutex> lkSecondary;

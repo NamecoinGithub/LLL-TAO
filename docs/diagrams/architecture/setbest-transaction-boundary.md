@@ -255,8 +255,13 @@ sequenceDiagram
     Idx-->>Accept: propagate result
     Accept->>LLD: HasOpenTransaction()? → false (SetBest() already committed)
     Note over Accept,LLD: Outer TxnCommit() SKIPPED (PR #654) — no false-positive error
+    Accept->>Accept: Release() the physical BLOCK guard
+    Accept->>Mem: ProcessOrphans(producer) only if disk ReadLast is that producer
+    Note over Accept,Mem: MEMPOOL and BLOCK share pMemory, so this cannot run while the guard is armed
     Accept-->>Net: Accept() returns true, block fully committed
 ```
+
+`TritiumBlock::Accept()` used to call `mempool.ProcessOrphans(hashProducer)` while the physical transaction was still open. `ProcessOrphans` accepts each descendant through `TxnBegin(FLAGS::MEMPOOL)`. MEMPOOL and BLOCK share `pMemory`, so that begin is rejected and the orphan stays queued. The call now runs only after the guard is released, and only when disk `ReadLast` for the producer genesis is the producer. A side chain that was stored but not connected does not get a false conflict.
 
 ---
 

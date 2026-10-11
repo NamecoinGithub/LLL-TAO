@@ -152,6 +152,7 @@ flowchart TD
 ## 5. What not to do
 
 - Do not call `Remove` on an `InPool` transaction without a successful MEMPOOL disconnect+commit.
+- Do not call `ProcessOrphans` or `Accept` while a physical `FLAGS::BLOCK` transaction owns the shared `pMemory` overlay. `TritiumBlock::Accept()` commits and releases that slot before `ProcessOrphans(hashProducer)`, and only when disk `ReadLast` for the producer genesis is the producer.
 - Do not disconnect a parent while a `mapClaimed` child is still connected.
 - Do not hold `Transaction::IndexLock` and then call `Accept` / `Remove` (those take `mempool.MUTEX`). Take the pool lock first.
 - Do not treat `Check()`'s `IndexLock` as covering the stale-chain decision. The lock starts after that decision (window W2 in [BUILD_CPP.md](BUILD_CPP.md)). Do not close that window by taking `IndexLock` before `MUTEX`, or by taking `MUTEX` inside `IndexSigchain`.
