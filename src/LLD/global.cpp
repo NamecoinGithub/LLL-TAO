@@ -342,7 +342,11 @@ namespace LLD
      * stop before writing into the existing overlay. A redundant physical
      * commit after the journal is already gone returns false and does not
      * checkpoint. MemoryRelease/MemoryCommit of pMemory is skipped when
-     * another thread owns the MEMPOOL slot.
+     * another thread owns the MEMPOOL slot. A commit or abort whose instance
+     * mask omits an instance opened by the matching begin is rejected before
+     * any overlay or journal mutation and does not release the owner. A
+     * covering mask, including a wider one, still applies to every opened
+     * instance. An unowned physical abort is unchanged.
      *
      * Ownership is not a bare thread id. ClaimSlot arms a thread-local guard
      * that aborts every slot this thread still owns when the thread exits, so
@@ -566,6 +570,15 @@ namespace LLD
     static bool OwnedByOther(const TxnSlot& slot)
     {
         return slot.fOwned && slot.idOwner != std::this_thread::get_id();
+    }
+
+
+    /* Caller holds slot.MUTEX. True when nInstances includes every instance
+     * this begin opened. A narrower mask must not commit or abort: releasing
+     * the owner would leave the omitted journals or overlays open and unowned. */
+    static bool CoversOwnedInstances(const TxnSlot& slot, const uint16_t nInstances)
+    {
+        return (slot.nInstances & static_cast<uint16_t>(~nInstances)) == 0;
     }
 
 
@@ -812,6 +825,14 @@ namespace LLD
                 return;
             }
 
+            /* A narrower abort would MemoryRelease only some overlays and then
+             * clear the owner, leaving the rest open with nobody to abort them. */
+            if(!CoversOwnedInstances(slot, nInstances))
+            {
+                debug::error(FUNCTION, "transaction instance mask does not cover current owner");
+                return;
+            }
+
             MemoryReleaseSelected(nFlags, nInstances);
             ReleaseSlot(slot, kind);
             return;
@@ -839,6 +860,14 @@ namespace LLD
         }
 
         const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
+        /* Same rule as a memory abort: do not TxnRelease a subset and then drop
+         * the owner while the other journals from this begin are still open. */
+        if(fReleasePhysical && !CoversOwnedInstances(PhysicalSlot(), nInstances))
+        {
+            debug::error(FUNCTION, "transaction instance mask does not cover current owner");
+            return;
+        }
+
         if(fReleasePhysical && !OwnedByOther(MempoolSlot()))
         {
             const bool fReleaseMempool = OwnedByThisThread(MempoolSlot());
@@ -970,6 +999,9 @@ namespace LLD
            if(!OwnedByThisThread(MempoolSlot()))
                return debug::error(FUNCTION, "transaction mode does not match current owner");
 
+           if(!CoversOwnedInstances(MempoolSlot(), nInstances))
+               return debug::error(FUNCTION, "transaction instance mask does not cover current owner");
+
             MemoryCommitSelected(nInstances);
             ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
             return true;
@@ -993,6 +1025,12 @@ namespace LLD
 
             return false;
         }
+
+        /* Committing a subset would TxnCommit only those journals and then
+         * ReleaseSlot, leaving the rest open with no owner. A wider mask still
+         * covers every opened instance and keeps the aggregation path. */
+        if(!CoversOwnedInstances(PhysicalSlot(), nInstances))
+            return debug::error(FUNCTION, "transaction instance mask does not cover current owner");
 
         const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
         if(fReleasePhysical && !OwnedByOther(MempoolSlot()))

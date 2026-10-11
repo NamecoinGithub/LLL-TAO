@@ -15,7 +15,10 @@ flowchart TD
     E["TxnAbort / TxnCommit(mode)"] --> F{"This thread owns that slot?"}
     F -->|memory abort or MEMPOOL, no| G["Reject. Leave overlay and owner unchanged"]
     F -->|MINER or SANITIZE, foreign owner| K["Reject. Do not release that owner"]
-    F -->|yes| H["Mutate that slot, then release only that owner"]
+    F -->|memory abort, MEMPOOL commit, or physical| M{"Mask covers instances opened by begin?"}
+    M -->|no| N["Reject. Leave owner, journals, and overlays unchanged"]
+    M -->|yes| H["Mutate those instances, then release only that owner"]
+    F -->|MINER or SANITIZE commit| P["No-mutation short-circuit. Do not release that owner"]
     F -->|physical, other owner| I["Reject before TxnRelease or TxnCommit"]
     F -->|physical, unowned| J["No-op journal path. Skip pMemory if another thread owns MEMPOOL"]
 ```
@@ -23,3 +26,5 @@ flowchart TD
 MINER and SANITIZE `TxnCommit` stays a no-mutation short-circuit. It returns true when this thread owns that mode or owns nothing. It returns false when another thread owns that slot (a foreign owner), and when this thread owns a different mode but not this slot. Neither rejection releases an owner.
 
 A physical commit applies the BLOCK-created `pMemory` only when this thread owns the physical slot and no other thread owns MEMPOOL. It does not commit or delete an overlay owned by another thread. Begin-time rejection is what keeps those two owners from being created together.
+
+The stored begin mask is part of that ownership. An owned memory abort, a MEMPOOL commit, and an owned physical commit or abort must cover every instance that begin opened. A narrower mask is rejected before `MemoryCommit`, `MemoryRelease`, `TxnCommit`, or `TxnRelease`, and the owner stays claimed. A wider mask is not a subset: it still applies to every opened instance, which is what lets a commit aggregate an extra instance that was never begun. MINER and SANITIZE commit stay a no-mutation short-circuit and do not release that owner, so a narrower mask there cannot drop the slot. An unowned physical abort does not use this check; that path is still recovery.

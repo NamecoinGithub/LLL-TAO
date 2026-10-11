@@ -227,6 +227,87 @@ TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
 }
 
 
+/* A narrower commit or abort must not release the owner while journals or
+ * overlays from the begin are still open. A covering mask still proceeds. */
+TEST_CASE("LLD commit and abort reject an instance mask narrower than the begin",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    SECTION("physical subset commit leaves the owner and the other journal")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST;
+        OwnerAbort owner{0, nOpened};
+
+        REQUIRE(LLD::TxnBegin(0, nOpened));
+        owner.fActive = true;
+
+        REQUIRE_FALSE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::TRUST));
+
+        REQUIRE(LLD::TxnCommit(0, nOpened));
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, nOpened));
+
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("physical subset abort leaves the owner")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST;
+        OwnerAbort owner{0, nOpened};
+
+        REQUIRE(LLD::TxnBegin(0, nOpened));
+        owner.fActive = true;
+
+        LLD::TxnAbort(0, LLD::INSTANCES::LEDGER);
+        REQUIRE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::TRUST));
+
+        LLD::TxnAbort(0, nOpened);
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, nOpened));
+    }
+
+    SECTION("mempool subset abort and commit leave the owner")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::MEMORY;
+        OwnerAbort owner{TAO::Ledger::FLAGS::MEMPOOL, nOpened};
+
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, nOpened));
+        owner.fActive = true;
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, nOpened));
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+    }
+}
+
+
 /* ===========================================================================
  * TEST 4 — MINER / SANITIZE early-return paths return true
  * ===========================================================================
@@ -512,6 +593,8 @@ TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay in
         }
     } joinGuard{mempool, fMismatchedDone};
 
+    /* pError is written by the worker. Decide before join with the atomic flag,
+     * and read the exception pointer only after join. */
     if(!fError.load())
     {
         LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
