@@ -865,6 +865,24 @@ namespace TAO
                 if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "failed to begin block transaction");
 
+                /* Abort only the transaction this call opened. An exception while
+                 * connecting must not TxnAbort an outer BLOCK owner. The guard
+                 * also skips the abort once TxnCommit releases the slot.
+                 * See docs/diagrams/architecture/state-cpp.md. */
+                struct SelfOwnedTxnGuard
+                {
+                    bool fArmed;
+                    ~SelfOwnedTxnGuard()
+                    {
+                        if(fArmed && LLD::ThreadOwnsTransaction(FLAGS::BLOCK))
+                            LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    }
+                    void Release()
+                    {
+                        fArmed = false;
+                    }
+                } selfTxn{fOwnedTxn};
+
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();
                 BlockState longer = *this;
@@ -1143,6 +1161,10 @@ namespace TAO
                  * instance's commit failed, so the chain transition is aborted. */
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed; aborting chain transition");
+
+                /* The durable commit released this owner. Later throws are
+                 * post-commit and must not abort a new transaction. */
+                selfTxn.Release();
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 

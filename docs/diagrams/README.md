@@ -56,6 +56,9 @@ Diagram templates for PR descriptions and comprehensive Mermaid architecture dia
 11. **[architecture/setbest-transaction-boundary.md](architecture/setbest-transaction-boundary.md)** - RC13 `SetBest()` transactional chain-transition bug chain (PRs #651–#654)
 12. **[architecture/lld-global-transactions.md](architecture/lld-global-transactions.md)** - Process-wide LLD transaction ownership, including the shared MEMPOOL/BLOCK `pMemory` overlay, begin-mask coverage on commit and abort, and producer-orphan processing after the block transaction is released
 13. **[architecture/ledgerdb-block-reads.md](architecture/ledgerdb-block-reads.md)** - Hash-keyed `LedgerDB::ReadBlock` identity check
+14. **[architecture/process-cpp.md](architecture/process-cpp.md)** - `Process.cpp` candidate activation transaction and exception unwind
+15. **[architecture/state-cpp.md](architecture/state-cpp.md)** - `State.cpp` self-owned versus outer `SetBest()` transaction
+16. **[architecture/tritium-cpp.md](architecture/tritium-cpp.md)** - `Tritium.cpp` block accept and merkle indexing transaction guards
 
 ## Audit / recovery coordinator diagrams (2026-08-10)
 

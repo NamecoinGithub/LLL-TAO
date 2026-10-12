@@ -728,7 +728,8 @@ namespace TAO
 
             /* Start the database transaction. The guard aborts on every later
              * return, including failed ReadTx/WriteTx checks, so the process-wide
-             * physical slot is not left claimed after this function exits. */
+             * physical slot is not left claimed after this function exits.
+             * See docs/diagrams/architecture/tritium-cpp.md. */
             LLD::TransactionGuard txn;
             if(!txn)
                 return debug::error(FUNCTION, "failed to begin block transaction");

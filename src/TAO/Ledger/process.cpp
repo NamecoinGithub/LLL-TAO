@@ -29,6 +29,7 @@ ________________________________________________________________________________
 
 #include <vector>
 #include <queue>
+#include <optional>
 
 /* Global TAO namespace. */
 namespace TAO
@@ -485,8 +486,17 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
-            if(fTransaction && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
-                return debug::error(FUNCTION, "failed to begin block transaction");
+            /* Abort this activation's BLOCK transaction if SetBest() throws
+             * before the slot is released. SetBest() consumes the transaction
+             * on success, so a later unwind does not abort a committed journal.
+             * See docs/diagrams/architecture/process-cpp.md. */
+            std::optional<LLD::TransactionGuard> txn;
+            if(fTransaction)
+            {
+                txn.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*txn)
+                    return debug::error(FUNCTION, "failed to begin block transaction");
+            }
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())
@@ -507,6 +517,10 @@ namespace TAO
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed for candidate activation");
             }
+
+            /* Success released the slot, either inside SetBest() or above. */
+            if(txn)
+                txn->Release();
 
             debug::log(0, FUNCTION, "activated validated candidate source=",
                 (pszSource ? pszSource : "ledger"),
