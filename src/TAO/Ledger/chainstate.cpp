@@ -249,13 +249,11 @@ namespace TAO
                             if(!txn)
                                 return debug::error(FUNCTION, "failed to begin block transaction");
 
-                            /* Bug fix (call site #4): check return value before committing.
-                             * A failed SetBest() must abort the transaction to avoid committing
-                             * partial / inconsistent disk writes. */
+                            /* A failed SetBest() can release the slot before returning.
+                             * TransactionGuard aborts only if this thread still owns it. */
                             if(!stateAncestor.SetBest())
                             {
                                 debug::error(FUNCTION, "failed to revert to hardcoded ancestor checkpoint");
-                                LLD::TxnAbort();
                                 return false;
                             }
                             /* SetBest() commits the transaction internally when it succeeds.
@@ -295,12 +293,12 @@ namespace TAO
                 if(!txn)
                     return debug::error(FUNCTION, "failed to begin block transaction");
 
-                /* Abort our transaction if we fail to rollback. */
+                /* TransactionGuard aborts if SetBest() fails while this thread
+                 * still owns the transaction slot. */
                 if(!state.SetBest())
                 {
                     /* Debug Output. */
                     debug::log(0, FUNCTION, "-revertblocks=XXX failed to remove ", nRevertBlocks, " blocks");
-                    LLD::TxnAbort();
                     return false;
                 }
                 else

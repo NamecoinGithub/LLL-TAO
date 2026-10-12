@@ -486,10 +486,9 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
-            /* Abort this activation's BLOCK transaction if SetBest() throws
-             * before the slot is released. SetBest() consumes the transaction
-             * on success, so a later unwind does not abort a committed journal.
-             * See docs/diagrams/architecture/process-cpp.md. */
+            /* Abort this activation's BLOCK transaction on unwind only while
+             * this thread still owns the slot. SetBest() may release it before
+             * returning false or throwing. See docs/diagrams/architecture/process-cpp.md. */
             std::optional<LLD::TransactionGuard> txn;
             if(fTransaction)
             {
@@ -501,8 +500,6 @@ namespace TAO
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())
             {
-                if(fTransaction)
-                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                 ChainState::fChainReorg.store(false);
                 return false;
             }

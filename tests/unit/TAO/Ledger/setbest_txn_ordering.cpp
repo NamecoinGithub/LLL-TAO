@@ -1242,20 +1242,19 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 
 
 /* ===========================================================================
- * TEST 6 — Real call-site #4 pattern: outer TxnBegin + SetBest() failure
+ * TEST 6 — Real call-site #4 pattern: guarded SetBest() failure
  * ===========================================================================
  * Mirrors the call-site #4 pattern in chainstate.cpp:
- *   LLD::TxnBegin();
- *   if(!state.SetBest()) { LLD::TxnAbort(); }
- *   else                   LLD::TxnCommit();
+ *   LLD::TransactionGuard txn;
+ *   state.SetBest();
  *
- * With the Gap-1 fix SetBest() internally calls TxnAbort() before returning
- * false, so the outer TxnAbort() becomes a safe no-op.  This test verifies:
+ * SetBest() may already release the slot before returning false, so the guard
+ * aborts only if this thread still owns it. This test verifies:
  *   (a) SetBest() returns false,
- *   (b) no index entry persists after the outer TxnAbort(),
+ *   (b) no index entry persists after guard cleanup,
  *   (c) no active transaction remains open.
  */
-TEST_CASE("Real call-site #4: outer TxnBegin + SetBest() failure → clean abort, no partial commit",
+TEST_CASE("Real call-site #4: guarded SetBest() failure → clean abort, no partial commit",
           "[ledger][chainstate][setbest_txn][real]")
 {
     RealCodeLedgerGuard ledgerGuard;
@@ -1292,12 +1291,12 @@ TEST_CASE("Real call-site #4: outer TxnBegin + SetBest() failure → clean abort
     badBlock.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fakeTxHash});
 
     /* ---- Call-site #4 pattern ---- */
-    LLD::TxnBegin();                       /* outer TxnBegin (as chainstate.cpp does) */
-    const bool fOk = badBlock.SetBest();   /* internally calls TxnAbort on failure    */
-    if(!fOk)
-        LLD::TxnAbort();                   /* outer TxnAbort — safe no-op after Gap-1 */
-    else
-        LLD::TxnCommit();
+    bool fOk = false;
+    {
+        LLD::TransactionGuard txn;
+        REQUIRE(txn);
+        fOk = badBlock.SetBest();
+    }
 
     /* (a) SetBest() must have returned false */
     REQUIRE_FALSE(fOk);

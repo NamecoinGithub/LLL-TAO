@@ -483,14 +483,6 @@ namespace LLD
 
 
     /* Caller holds slot.MUTEX. */
-    static void NoteSlotClaimed()
-    {
-        std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
-        ++Lifetime().nOwned;
-    }
-
-
-    /* Caller holds slot.MUTEX. */
     static void NoteSlotReleased()
     {
         std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
@@ -619,17 +611,25 @@ namespace LLD
     }
 
 
-    /* Caller holds slot.MUTEX. Arms the exit guard so this claim cannot outlive
-     * the thread. A same-thread duplicate must not reach this function. */
-    static void ClaimSlot(TxnSlot& slot, const TxnKind kind, const uint8_t nFlags, const uint16_t nInstances)
+    /* Caller holds slot.MUTEX. Rechecks shutdown admission while accounting for
+     * the claim, so a waiting begin cannot claim after shutdown starts. */
+    static bool ClaimSlot(TxnSlot& slot, const TxnKind kind, const uint8_t nFlags, const uint16_t nInstances)
     {
-        slot.fOwned = true;
-        slot.idOwner = std::this_thread::get_id();
-        slot.nFlags = nFlags;
-        slot.nInstances = nInstances;
+        {
+            std::lock_guard<std::mutex> lk(Lifetime().MUTEX);
+            if(!Lifetime().fAlive || Lifetime().fShuttingDown)
+                return false;
+
+            slot.fOwned = true;
+            slot.idOwner = std::this_thread::get_id();
+            slot.nFlags = nFlags;
+            slot.nInstances = nInstances;
+            ++Lifetime().nOwned;
+        }
+
         nThreadOwnedMask |= MaskOf(kind);
-        NoteSlotClaimed();
         ArmThreadTxnOwnerGuard();
+        return true;
     }
 
 
@@ -855,7 +855,8 @@ namespace LLD
             if(kind == TxnKind::PHYSICAL && UnownedJournalOpen(nInstances))
                 return debug::error(FUNCTION, "unowned journal is already open");
 
-            ClaimSlot(slot, kind, nFlags, nInstances);
+            if(!ClaimSlot(slot, kind, nFlags, nInstances))
+                return debug::error(FUNCTION, "LLD is shutting down");
 
             /* The claim makes a concurrent begin of the other mode fail. Drop
              * the unused lock before creating the overlay. */
@@ -877,7 +878,8 @@ namespace LLD
                     : "transaction mode is owned by another thread");
             }
 
-            ClaimSlot(slot, kind, nFlags, nInstances);
+            if(!ClaimSlot(slot, kind, nFlags, nInstances))
+                return debug::error(FUNCTION, "LLD is shutting down");
         }
 
         /* The slot is claimed before these calls. A throw must not return to a

@@ -18,7 +18,7 @@ flowchart TD
     H -->|yes| I["Guard aborts while this thread still owns PhysicalSlot"]
     I --> J["Process() catch marks REJECTED"]
     H -->|no| K{"SetBest returned false?"}
-    K -->|yes| L["Explicit TxnAbort, then return false"]
+    K -->|yes| L["Guard aborts if this thread still owns the slot, then return false"]
     K -->|no| M{"Journal still open?"}
     M -->|yes| N["TxnCommit. Failure leaves the guard armed"]
     M -->|no| O["SetBest already committed and released the slot"]
@@ -27,6 +27,6 @@ flowchart TD
     P --> Q["Return true"]
 ```
 
-`SetBest()` treats an open journal owned by this thread as an outer transaction and commits it internally. The guard is released only after that success path. A throw before the slot is released still aborts. A throw after `SetBest()` has consumed the transaction does not abort a journal this activation no longer owns.
+`SetBest()` treats an open journal owned by this thread as an outer transaction and commits it internally. The guard is released only after that success path. On failure or exception, the guard aborts only if this thread still owns the slot; `SetBest()` may already have aborted and released it before returning false, so the caller must not issue an unconditional abort.
 
 Sibling documents: [State.cpp](state-cpp.md), [Tritium.cpp](tritium-cpp.md), [LLD global transactions](lld-global-transactions.md).

@@ -12,7 +12,9 @@ flowchart TD
     B -->|yes, this thread or another| C["Reject. Do not replace the overlay or journal"]
     B -->|no| S{"MEMPOOL or BLOCK, and the other shared slot is owned?"}
     S -->|yes| C
-    S -->|no| D["Claim slot, then MemoryBegin or journal TxnBegin"]
+    S -->|no| A2{"Shutdown admission still open at claim?"}
+    A2 -->|no| C
+    A2 -->|yes| D["Claim slot, then MemoryBegin or journal TxnBegin"]
     D --> Q{"A started call throws?"}
     Q -->|yes| R["Release finished instances and the claimed slot, then propagate"]
     Q -->|no| T["Begin returned. Caller owns the slot"]
@@ -36,6 +38,8 @@ The stored begin mask is part of that ownership. An owned memory abort, a MEMPOO
 
 If `MemoryBegin` or a selected journal `TxnBegin` throws after the slot is claimed, `TxnBegin` releases only the instances whose begin call returned, then clears that slot, and then propagates the exception. The throwing call is not released: those begin methods allocate the replacement before deleting the previous pointer, so a failed allocation leaves that instance unchanged. `TxnRelease` is not applied to a journal this begin did not open, because that call truncates `journal.dat`. A caller catch runs only after this rollback. It must not abort a begin that did not return, and a flag set only after `TxnBegin` returns cannot see the failed begin.
 
+The final shutdown-admission check and owned-slot count happen together under the lifetime mutex when claiming: if shutdown begins first, a waiting begin is rejected without claiming a slot; if the claim wins first, shutdown waits for it to finish.
+
 `TransactionGuard` also covers physical begins whose caller returns through an exception instead of `debug::abort`. That is `ActivateCandidateBestChain()` when it opened the journal, each client MERKLE handler in `LLP/tritium.cpp` and `LLP/lookup.cpp`, and `TritiumBlock::Accept()`. The guard is released only after commit. `SetBest()` uses a separate self-owned guard so a throw aborts the journal it opened and does not abort an outer BLOCK owner. Diagrams: [Process.cpp](process-cpp.md), [State.cpp](state-cpp.md), [Tritium.cpp](tritium-cpp.md).
 
-Disposable SANITIZE and MINER work uses `TransactionGuard` so the overlay is aborted if the thread still owns it when the guard is destroyed. That includes `Notifications::SanitizeContract`, each `SanitizeUnconfirmed` transaction, `Mempool::Check`'s sanitize probe, `CheckContract`, and the Tritium half of `AddTransactions`. `AddTransactions` disarms the guard and aborts before the legacy `Connect(FLAGS::MINER)` loop, so that loop does not run inside the Tritium overlay. An exception from `Verify` or `Connect` skips the disarm and the guard aborts on unwind. `Mempool::Check` ends the sanitize guard before it begins the MEMPOOL disconnect transaction. That disconnect still uses an explicit abort only when `Disconnect` fails, then `Remove`. A later `Delete` throw is not aborted by a guard: aborting after `Remove` would restore overlay effects for entries already erased from the pool maps.
+Disposable SANITIZE and MINER work uses `TransactionGuard` so the overlay is aborted if the thread still owns it when the guard is destroyed. That includes `Notifications::SanitizeContract`, each `SanitizeUnconfirmed` transaction, `Mempool::Check`'s sanitize probe, `CheckContract`, and the Tritium half of `AddTransactions`. `AddTransactions` disarms the guard and aborts before the legacy `Connect(FLAGS::MINER)` loop, so that loop does not run inside the Tritium overlay. An exception from `Verify` or `Connect` skips the disarm and the guard aborts on unwind. `Mempool::Check` ends the sanitize guard before it begins the MEMPOOL disconnect transaction. The disconnect explicitly aborts when `Disconnect` fails, then removes the entry. Unexpected exceptions otherwise abort by default. If API-session `Delete()` throws after `Remove()` successfully erased the transaction from the pool maps, the corresponding disconnect is committed before rethrowing; exceptions before that successful removal do not commit partial overlay changes.

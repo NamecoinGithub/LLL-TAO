@@ -1233,18 +1233,14 @@ namespace TAO
                                 return;
                             }
 
-                            /* Delete() can throw after Remove(). Commit on that unwind so
-                             * the process-wide MEMPOOL slot is released and the disconnects
-                             * for already-removed pool entries stay applied. Abort only when
-                             * this sweep already requested it, or when that commit throws. */
+                            /* Abort by default on unexpected exceptions. A Delete() failure
+                             * after a successful Remove() is handled separately below. */
                             struct MempoolCheckRelease
                             {
                                 bool fActive = true;
-                                bool fAbort  = false;
 
                                 void Abort()
                                 {
-                                    fAbort = true;
                                     if(!fActive)
                                         return;
 
@@ -1268,10 +1264,7 @@ namespace TAO
 
                                     try
                                     {
-                                        if(fAbort)
-                                            LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
-                                        else
-                                            LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                        LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
                                     }
                                     catch(...)
                                     {
@@ -1343,7 +1336,7 @@ namespace TAO
                                 }
 
                                 /* Erase from the memory map. */
-                                Remove(hashTx);
+                                const bool fRemoved = Remove(hashTx);
 
                                 /* Remove the API sessions indexes if disconnecting a mempool transaction. */
                                 if(LLD::Sessions->Active(tx->hashGenesis))
@@ -1353,7 +1346,19 @@ namespace TAO
                                         TAO::API::Transaction(*tx);
 
                                     /* Make sure indexes are deleted. */
-                                    if(wtx.Delete(hashTx))
+                                    bool fDeleted = false;
+                                    try
+                                    {
+                                        fDeleted = wtx.Delete(hashTx);
+                                    }
+                                    catch(...)
+                                    {
+                                        if(fRemoved)
+                                            txn.Commit();
+                                        throw;
+                                    }
+
+                                    if(fDeleted)
                                         debug::log(0, FUNCTION, "DELETED API session indexes for ", hashTx.SubString());
                                 }
 
@@ -1365,9 +1370,7 @@ namespace TAO
                                     debug::notice(FUNCTION, "ROOT ORPHAN: disconnected root with FLAGS::ERASE: ", hashTx.SubString());
                             }
 
-                            /* Only commit if the LLD transaction was not already aborted.
-                             * A throw before this point commits from ~MempoolCheckRelease
-                             * instead, leaving already-removed pool entries removed. */
+                            /* Commit after the complete disconnect/removal sweep. */
                             txn.Commit();
 
                             break;
