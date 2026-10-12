@@ -749,6 +749,37 @@ namespace LLD
     }
 
 
+    static bool TxnReleaseSelected(const uint16_t nInstances)
+    {
+        bool fSucceeded = true;
+        auto Release = [&](auto* pDB, const uint16_t nInstance, const char* strName)
+        {
+            if(!pDB || !(nInstances & nInstance))
+                return;
+
+            try
+            {
+                pDB->TxnRelease();
+            }
+            catch(...)
+            {
+                debug::error(FUNCTION, "failed to release ", strName, " DB transaction");
+                fSucceeded = false;
+            }
+        };
+
+        Release(Logical, INSTANCES::LOGICAL, "Logical");
+        Release(Contract, INSTANCES::CONTRACT, "Contract");
+        Release(Register, INSTANCES::REGISTER, "Register");
+        Release(Ledger, INSTANCES::LEDGER, "Ledger");
+        Release(Client, INSTANCES::CLIENT, "Client");
+        Release(Trust, INSTANCES::TRUST, "Trust");
+        Release(Legacy, INSTANCES::LEGACY, "Legacy");
+
+        return fSucceeded;
+    }
+
+
     /* True when this thread owns the process-wide slot for nFlags. */
     bool ThreadOwnsTransaction(const uint8_t nFlags)
     {
@@ -1022,33 +1053,10 @@ namespace LLD
 
         lkMem.unlock();
 
-        /* Abort the Logical DB transaction. */
-        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
-            Logical->TxnRelease();
-
-        /* Abort the contract DB transaction. */
-        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
-            Contract->TxnRelease();
-
-        /* Abort the register DB transaction. */
-        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
-            Register->TxnRelease();
-
-        /* Abort the ledger DB transaction. */
-        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
-            Ledger->TxnRelease();
-
-        /* Abort the client DB transaction. */
-        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
-            Client->TxnRelease();
-
-        /* Abort the trust DB transaction. */
-        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
-            Trust->TxnRelease();
-
-        /* Abort the legacy DB transaction. */
-        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
-            Legacy->TxnRelease();
+        /* Attempt every selected journal release. If one cleanup throws, its
+         * journal remains intact for recovery while the other DBs still get
+         * cleaned up before ownership is released. */
+        TxnReleaseSelected(nOwnedInstances);
 
         if(fReleasePhysical)
             ReleaseSlot(PhysicalSlot(), TxnKind::PHYSICAL);
@@ -1305,32 +1313,8 @@ namespace LLD
          *
          * Note: TxnRelease is called for every selected instance below,
          * regardless of whether that instance's TxnCommit succeeded or failed. */
-        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
-            Logical->TxnRelease();
-
-        /* Release the contract DB transaction. */
-        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
-            Contract->TxnRelease();
-
-        /* Release the register DB transaction. */
-        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
-            Register->TxnRelease();
-
-        /* Release the ledger DB transaction. */
-        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
-            Ledger->TxnRelease();
-
-        /* Release the client DB transaction. */
-        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
-            Client->TxnRelease();
-
-        /* Release the trust DB transaction. */
-        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
-            Trust->TxnRelease();
-
-        /* Release the legacy DB transaction. */
-        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
-            Legacy->TxnRelease();
+        if(!TxnReleaseSelected(nOwnedInstances))
+            fAllSucceeded = false;
 
         if(fReleasePhysical)
             ReleaseSlot(PhysicalSlot(), TxnKind::PHYSICAL);
