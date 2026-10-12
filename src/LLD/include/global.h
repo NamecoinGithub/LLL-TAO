@@ -123,6 +123,15 @@ namespace LLD
     bool ThreadOwnsTransaction(const uint8_t nFlags = 0);
 
 
+    /** ThreadOwnsTransaction
+     *
+     *  True when this thread owns the process-wide slot for nFlags and the
+     *  transaction includes every requested instance.
+     *
+     */
+    bool ThreadOwnsTransaction(const uint8_t nFlags, const uint16_t nInstances);
+
+
     /** Txn Begin
      *
      *  Global handler for all LLD instances.

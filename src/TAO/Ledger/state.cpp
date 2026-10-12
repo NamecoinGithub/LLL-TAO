@@ -856,10 +856,14 @@ namespace TAO
                  * HasOpenTransaction is process-wide. Treat that journal as an outer
                  * transaction only when this thread owns PhysicalSlot. A foreign or
                  * unowned journal must not be written, and failure paths must not
-                 * TxnAbort it through the unowned recovery release. */
+                 * TxnAbort it through the unowned recovery release. The outer
+                 * transaction must also cover every consensus database SetBest uses. */
                 const bool fJournalOpen = LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                 if(fJournalOpen && !LLD::ThreadOwnsTransaction(FLAGS::BLOCK))
                     return debug::error(FUNCTION, "open block transaction is not owned by this thread");
+
+                if(fJournalOpen && !LLD::ThreadOwnsTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "open block transaction does not cover consensus instances");
 
                 const bool fOwnedTxn = !fJournalOpen;
                 if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))

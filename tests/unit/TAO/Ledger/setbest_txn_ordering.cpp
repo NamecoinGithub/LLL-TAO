@@ -1242,6 +1242,57 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 }
 
 
+TEST_CASE("Real SetBest(): rejects partial outer consensus transaction",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+
+    TAO::Ledger::BlockState genesis;
+    genesis.nVersion      = 4;
+    genesis.hashPrevBlock = uint1024_t(0);
+    genesis.nChannel      = 2;
+    genesis.nHeight       = 0;
+    genesis.nBits         = 1;
+    genesis.nNonce        = 79;
+
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+
+    TAO::Ledger::ChainState::tStateGenesis   = genesis;
+    TAO::Ledger::ChainState::tStateBest      = genesis;
+    TAO::Ledger::ChainState::hashBestChain   = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight     .store(0);
+    TAO::Ledger::ChainState::nBestChainTrust .store(genesis.nChainTrust);
+
+    const uint512_t fakeTxHash(0xfaceb00cULL);
+    TAO::Ledger::BlockState candidate;
+    candidate.nVersion      = 4;
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.nChannel      = 2;
+    candidate.nHeight       = 1;
+    candidate.nBits         = 1;
+    candidate.nNonce        = 56;
+    candidate.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fakeTxHash});
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(candidate.SetBest());
+
+    REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+    REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::Ledger->HasIndex(fakeTxHash));
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
+
+    LLD::Ledger->EraseBlock(hashGenesis);
+}
+
+
 /* ===========================================================================
  * TEST 6 — Real call-site #4 pattern: guarded SetBest() failure
  * ===========================================================================

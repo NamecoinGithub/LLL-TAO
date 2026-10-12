@@ -789,6 +789,16 @@ namespace LLD
     }
 
 
+    /* True when this thread owns the slot and its begin included nInstances. */
+    bool ThreadOwnsTransaction(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        TxnSlot& slot = SlotFor(KindOf(nFlags));
+        std::lock_guard<std::mutex> lk(slot.MUTEX);
+        return OwnedByThisThread(slot)
+            && (slot.nInstances & nInstances) == nInstances;
+    }
+
+
     /* True when TxnBegin would open a physical journal that is already open.
      * HasOpenTransaction does not cover LOGICAL or CLIENT, which a MERKLE begin
      * still opens. The caller must not own PhysicalSlot, so an open journal has
