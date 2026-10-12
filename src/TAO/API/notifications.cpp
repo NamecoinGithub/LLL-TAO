@@ -425,8 +425,11 @@ namespace TAO::API
         /* Return flag */
         bool fSanitized = false;
 
-        /* Start a ACID transaction (to be disposed). */
-        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+        /* Disposable overlay. The guard aborts on every exit, including an
+         * exception from Build() or Execute(), so the SANITIZE slot cannot
+         * stay claimed and reject a later sanitize. */
+        LLD::TransactionGuard txn(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+        if(!txn)
             return false;
 
         /* Temporarily disable error logging so that we don't log errors for contracts that fail to execute. */
@@ -451,9 +454,6 @@ namespace TAO::API
             /* Log the error and attempt to continue processing */
             debug::error(FUNCTION, e.what());
         }
-
-        /* Abort the mempool ACID transaction once the contract is sanitized */
-        LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
 
         return fSanitized;
     }
@@ -542,8 +542,11 @@ namespace TAO::API
                 break;
             }
 
-            /* Start a ACID transaction (to be disposed). */
-            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
+            /* Per-iteration overlay. Primitive() throws on an empty operation,
+             * and that must not leave the SANITIZE slot claimed for a later
+             * attempt. The guard aborts on every exit, including that throw. */
+            LLD::TransactionGuard txn(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+            if(!txn)
                 return debug::error(FUNCTION, "failed to begin sanitize transaction");
 
             /* Iterate through our contracts. */
@@ -577,9 +580,6 @@ namespace TAO::API
                     debug::notice(FUNCTION, "failed to sanitize contract at tx ", hashRoot.SubString());
                 }
             }
-
-            /* Abort the mempool ACID transaction once the contract is sanitized */
-            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
         }
 
         /* Check if we need to rebuild our sigchain. */

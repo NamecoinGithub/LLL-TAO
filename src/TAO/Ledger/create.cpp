@@ -758,8 +758,12 @@ namespace TAO::Ledger
 
         /* Start a ACID transaction (to be disposed). A rejected begin must
          * skip both selection paths: Tritium Verify and legacy Connect both
-         * use FLAGS::MINER and can mutate another thread's miner overlay. */
-        if(!LLD::TxnBegin(FLAGS::MINER))
+         * use FLAGS::MINER and can mutate another thread's miner overlay.
+         * Release before the explicit abort so the legacy loop below does not
+         * run against this overlay. An exception from Verify or Connect skips
+         * that release and the guard aborts the slot on unwind. */
+        LLD::TransactionGuard txn(FLAGS::MINER);
+        if(!txn)
         {
             debug::error(FUNCTION, "failed to begin miner transaction");
             return;
@@ -886,7 +890,8 @@ namespace TAO::Ledger
             setInBlock.insert(hash);
         }
 
-        /* Abort the temporary ACID transaction. */
+        /* Abort the temporary ACID transaction before legacy selection. */
+        txn.Release();
         LLD::TxnAbort(FLAGS::MINER);
 
         /* Clear for legacy. */

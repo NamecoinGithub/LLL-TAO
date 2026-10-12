@@ -177,6 +177,8 @@ flowchart TD
 
 `SanitizeUnconfirmed` must take `mempool.MUTEX`, then `IndexLock`, before it collects the unconfirmed hash list, and must still hold both across Disconnect / Delete / Remove. Otherwise a concurrent accept can append a successor during the scan, and `Delete` on the stale predecessor rewrites `indexing.last`. It drops `IndexLock` only while `SanitizeContract` takes `CLIENT_MUTEX` (that path already holds `CLIENT_MUTEX` and then `IndexLock`), then re-reads the tail under both locks and refuses to delete if the tail changed. It must drop both locks before calling `BuildAndAccept`, because `BuildAndAccept` takes the authentication lock and then `mempool.MUTEX`.
 
+Each unconfirmed transaction is sanitized under a per-iteration `TransactionGuard` for `FLAGS::SANITIZE`. `Contract::Primitive()` throws on an empty operation. The guard aborts that overlay on the throw, so the function cannot leave the SANITIZE slot claimed and cause a later sanitize begin to be rejected. `SanitizeContract` uses the same guard around `Build` / `Execute`.
+
 `IndexSigchain` must not take `mempool.MUTEX`. It already holds `CLIENT_MUTEX`. Session-index exclusion is `IndexLock`, not the pool lock.
 
 `BroadcastUnconfirmed` takes `mempool.MUTEX`, then `IndexLock`, before it reads the unconfirmed tail and before `Broadcast()` writes that tail back. It drops `IndexLock` before `Accept()` and keeps the pool lock across that call. `Transaction::Broadcast()` re-reads the SessionDB record under `IndexLock` and writes that current record's `nModified` only, so a stale `hashNextTx` cannot clobber `Index()` and a deleted record is not recreated.

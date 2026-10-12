@@ -645,12 +645,16 @@ namespace LLD
     {
         LOCK(TRANSACTION_MUTEX);
 
+        /* Allocate before replacing the journal. A failed allocation must not
+         * leave a deleted pointer for the begin rollback to release. */
+        SectorTransaction* pNext = new SectorTransaction();
+
         /* Delete a previous database transaction pointer if applicable. */
         if(pTransaction)
             delete pTransaction;
 
         /* Create the new Database Transaction Object. */
-        pTransaction = new SectorTransaction();
+        pTransaction = pNext;
     }
 
 

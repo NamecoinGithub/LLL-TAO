@@ -126,7 +126,10 @@ namespace LLD
      *          the overlay it shares, is already owned, because a selected
      *          physical journal is already open without an owner, or because LLD
      *          is shutting down. Callers must not continue into writes, abort,
-     *          or commit of that mode.
+     *          or commit of that mode. If the slot is claimed and MemoryBegin or
+     *          a selected journal TxnBegin then throws, already-started instances
+     *          are released and the slot is cleared before the exception
+     *          propagates. A caller catch cannot see a begin that did not return.
      *
      */
     bool TxnBegin(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);

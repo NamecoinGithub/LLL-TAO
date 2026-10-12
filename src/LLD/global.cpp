@@ -355,7 +355,11 @@ namespace LLD
      * calling thread, then waits until in-flight transaction calls and every
      * owned slot have finished before deleting the instances. A physical begin
      * is rejected when a selected journal is already open and this thread does
-     * not own it, so SectorDatabase::TxnBegin cannot replace that journal. */
+     * not own it, so SectorDatabase::TxnBegin cannot replace that journal.
+     * After the slot is claimed, a throw from MemoryBegin or a selected journal
+     * TxnBegin releases only the instances that finished starting, then clears
+     * that slot, before the exception leaves TxnBegin. A caller that catches
+     * the exception did not observe a successful begin and must not abort it. */
     struct TxnSlot
     {
         std::mutex MUTEX;
@@ -630,6 +634,84 @@ namespace LLD
     }
 
 
+    /* Instances whose begin calls returned. The throwing call is not included:
+     * MemoryBegin and SectorDatabase::TxnBegin allocate the replacement before
+     * deleting the previous pointer, so a throw leaves that instance unchanged. */
+    struct BeginProgress
+    {
+        bool fContractMemory = false;
+        bool fRegisterMemory = false;
+        bool fLedgerMemory = false;
+        bool fLogical = false;
+        bool fContract = false;
+        bool fRegister = false;
+        bool fLedger = false;
+        bool fClient = false;
+        bool fTrust = false;
+        bool fLegacy = false;
+    };
+
+
+    /* Caller must not hold a slot mutex. Releases finished overlays and journals,
+     * then the claimed slot. A cleanup failure still clears the slot so a later
+     * begin is not rejected forever; the original begin exception is propagated
+     * by the caller. */
+    static void ReleaseStartedBegin(const uint8_t nFlags, const TxnKind kind, const BeginProgress& started)
+    {
+        auto ReleaseMemory = [&](const bool fStarted, auto* pDB)
+        {
+            if(!fStarted || !pDB)
+                return;
+
+            try
+            {
+                pDB->MemoryRelease(nFlags);
+            }
+            catch(...)
+            {
+                debug::error(FUNCTION, "failed to release memory overlay during begin rollback");
+            }
+        };
+
+        ReleaseMemory(started.fContractMemory, Contract);
+        ReleaseMemory(started.fRegisterMemory, Register);
+        ReleaseMemory(started.fLedgerMemory, Ledger);
+
+        if(kind == TxnKind::PHYSICAL)
+        {
+            auto ReleaseJournal = [](const bool fStarted, auto* pDB)
+            {
+                if(!fStarted || !pDB)
+                    return;
+
+                try
+                {
+                    pDB->TxnRelease();
+                }
+                catch(...)
+                {
+                    debug::error(FUNCTION, "failed to release journal during begin rollback");
+                }
+            };
+
+            /* Only journals this begin opened. TxnRelease truncates journal.dat,
+             * so an instance whose TxnBegin did not return must be left alone. */
+            ReleaseJournal(started.fLogical, Logical);
+            ReleaseJournal(started.fContract, Contract);
+            ReleaseJournal(started.fRegister, Register);
+            ReleaseJournal(started.fLedger, Ledger);
+            ReleaseJournal(started.fClient, Client);
+            ReleaseJournal(started.fTrust, Trust);
+            ReleaseJournal(started.fLegacy, Legacy);
+        }
+
+        TxnSlot& slot = SlotFor(kind);
+        std::lock_guard<std::mutex> lk(slot.MUTEX);
+        if(OwnedByThisThread(slot))
+            ReleaseSlot(slot, kind);
+    }
+
+
     static void MemoryReleaseSelected(const uint8_t nFlags, const uint16_t nInstances)
     {
         if(Contract && (nInstances & INSTANCES::CONTRACT))
@@ -725,9 +807,9 @@ namespace LLD
                 return debug::error(FUNCTION, "shared memory overlay is already owned");
             }
 
-            /* SectorDatabase::TxnBegin deletes an existing pTransaction. A raw
-             * recovery journal has no PhysicalSlot owner, so claim nothing and
-             * leave that journal in place. */
+            /* SectorDatabase::TxnBegin replaces an existing pTransaction after
+             * the new journal is allocated. A raw recovery journal has no
+             * PhysicalSlot owner, so claim nothing and leave that journal in place. */
             if(kind == TxnKind::PHYSICAL && UnownedJournalOpen(nInstances))
                 return debug::error(FUNCTION, "unowned journal is already open");
 
@@ -756,49 +838,97 @@ namespace LLD
             ClaimSlot(slot, kind, nFlags, nInstances);
         }
 
-        /* Start the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->MemoryBegin(nFlags);
+        /* The slot is claimed before these calls. A throw must not return to a
+         * caller whose active flag is set only after TxnBegin returns: release
+         * finished instances and the slot, then propagate. Drop the slot locks
+         * first so the rollback can take them again. */
+        BeginProgress started;
+        try
+        {
+            /* Start the contract DB transaction. */
+            if(Contract && (nInstances & INSTANCES::CONTRACT))
+            {
+                Contract->MemoryBegin(nFlags);
+                started.fContractMemory = true;
+            }
 
-        /* Start the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->MemoryBegin(nFlags);
+            /* Start the register DB transacdtion. */
+            if(Register && (nInstances & INSTANCES::REGISTER))
+            {
+                Register->MemoryBegin(nFlags);
+                started.fRegisterMemory = true;
+            }
 
-        /* Start the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->MemoryBegin(nFlags);
+            /* Start the ledger DB transaction. */
+            if(Ledger && (nInstances & INSTANCES::LEDGER))
+            {
+                Ledger->MemoryBegin(nFlags);
+                started.fLedgerMemory = true;
+            }
 
-        /* Handle memory commits if in memory m ode. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return true;
+            /* Handle memory commits if in memory m ode. */
+            if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+                return true;
 
-        /* Start the Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
-            Logical->TxnBegin();
+            /* Start the Logical DB transaction. */
+            if(Logical && (nInstances & INSTANCES::LOGICAL))
+            {
+                Logical->TxnBegin();
+                started.fLogical = true;
+            }
 
-        /* Start the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
-            Contract->TxnBegin();
+            /* Start the contract DB transaction. */
+            if(Contract && (nInstances & INSTANCES::CONTRACT))
+            {
+                Contract->TxnBegin();
+                started.fContract = true;
+            }
 
-        /* Start the register DB transacdtion. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
-            Register->TxnBegin();
+            /* Start the register DB transacdtion. */
+            if(Register && (nInstances & INSTANCES::REGISTER))
+            {
+                Register->TxnBegin();
+                started.fRegister = true;
+            }
 
-        /* Start the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
-            Ledger->TxnBegin();
+            /* Start the ledger DB transaction. */
+            if(Ledger && (nInstances & INSTANCES::LEDGER))
+            {
+                Ledger->TxnBegin();
+                started.fLedger = true;
+            }
 
-        /* Start the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
-            Client->TxnBegin();
+            /* Start the client DB transaction. */
+            if(Client && (nInstances & INSTANCES::CLIENT))
+            {
+                Client->TxnBegin();
+                started.fClient = true;
+            }
 
-        /* Start the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
-            Trust->TxnBegin();
+            /* Start the trust DB transaction. */
+            if(Trust && (nInstances & INSTANCES::TRUST))
+            {
+                Trust->TxnBegin();
+                started.fTrust = true;
+            }
 
-        /* Start the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
-            Legacy->TxnBegin();
+            /* Start the legacy DB transaction. */
+            if(Legacy && (nInstances & INSTANCES::LEGACY))
+            {
+                Legacy->TxnBegin();
+                started.fLegacy = true;
+            }
+        }
+        catch(...)
+        {
+            if(lkPrimary.owns_lock())
+                lkPrimary.unlock();
+            if(lkSecondary.owns_lock())
+                lkSecondary.unlock();
+
+            ReleaseStartedBegin(nFlags, kind, started);
+            throw;
+        }
 
         return true;
     }

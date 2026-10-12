@@ -748,6 +748,18 @@ namespace TAO
 
                 return debug::error(FUNCTION, "REJECTED: exception encountered ", e.what());
             }
+            catch(...)
+            {
+                /* Same release as the typed catch. A non-std exception must not
+                 * leave the process-wide MEMPOOL slot claimed. */
+                if(fMempoolTxnActive)
+                {
+                    LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
+                }
+
+                return debug::error(FUNCTION, "REJECTED: exception encountered");
+            }
 
             return false;
         }
@@ -1164,18 +1176,19 @@ namespace TAO
                     /* We don't run this check on our first transaction. */
                     if(!vtx[n].IsFirst())
                     {
-                        /* Start a ACID transaction (to be disposed). */
-                        if(!LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY))
-                        {
-                            debug::error(FUNCTION, "failed to begin sanitize transaction");
-                            return;
-                        }
-                        bool fSanitizeTxnActive = true;
-
-                        /* Check the contracts for our root transaction to make sure it's valid. */
+                        /* Disposable overlay. Scope ends before the MEMPOOL disconnect
+                         * below so a throw from Sanitize() aborts this slot and
+                         * cannot reject that later begin. */
                         bool fContractInvalid = false;
-                        try
                         {
+                            LLD::TransactionGuard txn(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                            if(!txn)
+                            {
+                                debug::error(FUNCTION, "failed to begin sanitize transaction");
+                                return;
+                            }
+
+                            /* Check the contracts for our root transaction to make sure it's valid. */
                             for(const auto& rContract : vtx[n].Contracts())
                             {
                                 /* Sanitize the contract. */
@@ -1186,17 +1199,6 @@ namespace TAO
                                 }
                             }
                         }
-                        catch(...)
-                        {
-                            if(fSanitizeTxnActive)
-                                LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-
-                            throw;
-                        }
-
-                        /* Abort the mempool ACID transaction once the contract is sanitized */
-                        if(fSanitizeTxnActive)
-                            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
 
                         /* Check that transaction is in sequence. */
                         if(vtx[n].hashPrevTx != hashLast || fContractInvalid)
