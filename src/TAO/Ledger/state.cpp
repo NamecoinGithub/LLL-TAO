@@ -902,7 +902,6 @@ namespace TAO
                         longer = longer.Prev();
                         if(!longer)
                         {
-                            LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                             return debug::error(FUNCTION, "failed to find longer ancestor block");
                         }
                     }
@@ -918,7 +917,6 @@ namespace TAO
                     fork = fork.Prev();
                     if(!fork)
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to find ancestor fork block");
                     }
                 }
@@ -979,7 +977,6 @@ namespace TAO
                     /* Disconnect the block. */
                     if(!state.Disconnect())
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to disconnect ", state.GetHash().SubString());
                     }
 
@@ -1026,7 +1023,6 @@ namespace TAO
                                 TAO::Ledger::Transaction tx;
                                 if(!LLD::Ledger->ReadTx(hash, tx))
                                 {
-                                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                                     return debug::error(FUNCTION, "transaction not on disk");
                                 }
 
@@ -1057,7 +1053,6 @@ namespace TAO
                     /* Connect the block. */
                     if(!state->Connect())
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
                     }
 
@@ -1095,7 +1090,6 @@ namespace TAO
                                 TAO::Ledger::Transaction tx;
                                 if(!LLD::Ledger->ReadTx(hash, tx))
                                 {
-                                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                                     return debug::error(FUNCTION, "transaction not on disk");
                                 }
 

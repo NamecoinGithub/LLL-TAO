@@ -38,6 +38,18 @@ The stored begin mask is part of that ownership. An owned memory abort, a MEMPOO
 
 If `MemoryBegin` or a selected journal `TxnBegin` throws after the slot is claimed, `TxnBegin` releases only the instances whose begin call returned, then clears that slot, and then propagates the exception. The throwing call is not released: those begin methods allocate the replacement before deleting the previous pointer, so a failed allocation leaves that instance unchanged. `TxnRelease` is not applied to a journal this begin did not open, because that call truncates `journal.dat`. A caller catch runs only after this rollback. It must not abort a begin that did not return, and a flag set only after `TxnBegin` returns cannot see the failed begin.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Unowned
+    Unowned --> CallerOwned: caller TxnBegin(BLOCK)
+    CallerOwned --> CallerOwned: SetBest failure returns without abort
+    CallerOwned --> Unowned: SetBest commits successfully
+    CallerOwned --> Unowned: caller TxnAbort(BLOCK)
+    Unowned --> SetBestOwned: SetBest opens BLOCK transaction
+    SetBestOwned --> Unowned: failure guard aborts
+    SetBestOwned --> Unowned: successful commit
+```
+
 The final shutdown-admission check and owned-slot count happen together under the lifetime mutex when claiming: if shutdown begins first, a waiting begin is rejected without claiming a slot; if the claim wins first, shutdown waits for it to finish.
 
 `TransactionGuard` also covers physical begins whose caller returns through an exception instead of `debug::abort`. That is `ActivateCandidateBestChain()` when it opened the journal, each client MERKLE handler in `LLP/tritium.cpp` and `LLP/lookup.cpp`, and `TritiumBlock::Accept()`. The guard is released only after commit. `SetBest()` uses a separate self-owned guard so a throw aborts the journal it opened and does not abort an outer BLOCK owner. Diagrams: [Process.cpp](process-cpp.md), [State.cpp](state-cpp.md), [Tritium.cpp](tritium-cpp.md).

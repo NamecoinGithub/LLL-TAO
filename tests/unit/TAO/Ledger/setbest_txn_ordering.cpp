@@ -1092,9 +1092,9 @@ TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identi
  *   vtx writes made by Accept() callers (call sites #1/#2) before Index() is
  *   reached.  Option (b) was therefore chosen: LLD::HasOpenTransaction() was
  *   added as a lightweight check so SetBest() opens its own TxnBegin only
- *   when the caller has not already done so, and calls TxnAbort() on every
- *   failure path so that the on-disk state is always rolled back cleanly
- *   regardless of who owns the transaction.
+ *   when the caller has not already done so. Its self-owned guard aborts
+ *   failures only when SetBest() opened the transaction; an outer owner remains
+ *   responsible for deciding whether to commit or abort its journal.
  * =========================================================================== */
 namespace
 {
@@ -1165,10 +1165,10 @@ namespace
  * ===========================================================================
  * Calls the actual BlockState::SetBest().  The candidate block's vtx contains
  * a transaction hash that is NOT on disk, so Connect() fails mid-loop.  With
- * the Gap-1 fix, SetBest() calls TxnAbort() before returning false, rolling
- * back the IndexBlock write that Connect() made before detecting the missing
- * transaction.  Asserts: (a) SetBest() returns false, (b) no index entry was
- * committed to disk (TxnAbort rolled it back), (c) ChainState atomics are
+ *  the self-owned guard aborts before returning false, rolling back the
+ *  IndexBlock write that Connect() made before detecting the missing
+ *  transaction. Asserts: (a) SetBest() returns false, (b) no index entry was
+ *  committed to disk (the guard rolled it back), (c) ChainState atomics are
  * unchanged.
  */
 TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves ChainState unchanged",
@@ -1203,7 +1203,8 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
      *   IndexBlock(fakeTxHash, ...)   → writes pending index to pTransaction
      *   ReadTx(fakeTxHash, ...)       → false  (tx body missing)
      *   Connect() returns false
-     * SetBest() then calls TxnAbort(), discarding the pending IndexBlock write. */
+     * SetBest()'s self-owned guard then aborts, discarding the pending IndexBlock
+     * write. */
     const uint512_t fakeTxHash(0xdeadbeefcafeULL);
 
     TAO::Ledger::BlockState badBlock;
@@ -1228,7 +1229,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()          == 0u);
 
     /* ---- (b) Disk index for fakeTxHash must have been rolled back ----
-     * TxnAbort() deleted pTransaction before it could be flushed to disk.
+     * The self-owned guard deleted pTransaction before it could be flushed to disk.
      * HasIndex() checks the on-disk keychain only (pTransaction is null),
      * so a false result confirms the write was discarded. */
     REQUIRE_FALSE(LLD::Ledger->HasIndex(fakeTxHash));
@@ -1248,8 +1249,8 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
  *   LLD::TransactionGuard txn;
  *   state.SetBest();
  *
- * SetBest() may already release the slot before returning false, so the guard
- * aborts only if this thread still owns it. This test verifies:
+ * SetBest() leaves an outer transaction open when it fails, so the caller's
+ * guard remains responsible for rollback. This test verifies:
  *   (a) SetBest() returns false,
  *   (b) no index entry persists after guard cleanup,
  *   (c) no active transaction remains open.
@@ -1296,6 +1297,7 @@ TEST_CASE("Real call-site #4: guarded SetBest() failure → clean abort, no part
         LLD::TransactionGuard txn;
         REQUIRE(txn);
         fOk = badBlock.SetBest();
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
     }
 
     /* (a) SetBest() must have returned false */

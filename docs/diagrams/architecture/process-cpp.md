@@ -27,6 +27,6 @@ flowchart TD
     P --> Q["Return true"]
 ```
 
-`SetBest()` treats an open journal owned by this thread as an outer transaction and commits it internally. The guard is released only after that success path. On failure or exception, the guard aborts only if this thread still owns the slot; `SetBest()` may already have aborted and released it before returning false, so the caller must not issue an unconditional abort.
+`SetBest()` treats an open journal owned by this thread as an outer transaction and commits it internally on success. On failure, it leaves an outer transaction open for this caller's guard to abort; when `SetBest()` opened its own journal, its self-owned guard aborts it. On exception, either guard aborts only a transaction it still owns.
 
 Sibling documents: [State.cpp](state-cpp.md), [Tritium.cpp](tritium-cpp.md), [LLD global transactions](lld-global-transactions.md).
