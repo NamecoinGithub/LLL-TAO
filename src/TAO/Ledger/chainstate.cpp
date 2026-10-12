@@ -256,6 +256,7 @@ namespace TAO
                             {
                                 debug::error(FUNCTION, "failed to revert to hardcoded ancestor checkpoint");
                                 LLD::TxnAbort();
+                                return false;
                             }
                             /* SetBest() commits the transaction internally when it succeeds.
                              * Guard with HasOpenTransaction() so that the now-closed outer
@@ -300,6 +301,7 @@ namespace TAO
                     /* Debug Output. */
                     debug::log(0, FUNCTION, "-revertblocks=XXX failed to remove ", nRevertBlocks, " blocks");
                     LLD::TxnAbort();
+                    return false;
                 }
                 else
                 {
