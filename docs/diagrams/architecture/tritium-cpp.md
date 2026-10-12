@@ -25,10 +25,14 @@ flowchart TD
     M -->|yes| O["WriteTx, IndexBlock, IndexDependant or Connect"]
     O --> P{"Throw?"}
     P -->|yes| Q["Destructor aborts MERKLE journals and PhysicalSlot"]
-    P -->|no| R["TxnCommit, then Release"]
+    P -->|no| R{"TxnCommit succeeds?"}
+    R -->|yes| S["Release guard and acknowledge"]
+    R -->|no| T["Reject request without releasing guard"]
 ```
 
 `Accept()` must not process producer orphans while the block guard is armed. MEMPOOL and BLOCK share `pMemory`, so `TxnBegin(FLAGS::MEMPOOL)` is rejected until `Release()`. The LLP merkle handler is the same rule on `INSTANCES::MERKLE`: `IndexDependant` or a database call can throw after begin, and a persistent network thread would otherwise keep `PhysicalSlot` forever.
+
+Both MERKLE handlers reject a request when `TxnCommit()` reports failure and do not log it as accepted. The guard is released only after a successful commit; LLD releases its physical owner as part of commit cleanup even when one of the selected database commits fails.
 
 The lookup server uses the same MERKLE guard in `src/LLP/lookup.cpp`.
 
