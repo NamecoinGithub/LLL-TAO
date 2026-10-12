@@ -1233,8 +1233,60 @@ namespace TAO
                                 return;
                             }
 
-                            /* Track whether the LLD transaction is still active (not aborted). */
-                            bool fTxnActive = true;
+                            /* Delete() can throw after Remove(). Commit on that unwind so
+                             * the process-wide MEMPOOL slot is released and the disconnects
+                             * for already-removed pool entries stay applied. Abort only when
+                             * this sweep already requested it, or when that commit throws. */
+                            struct MempoolCheckRelease
+                            {
+                                bool fActive = true;
+                                bool fAbort  = false;
+
+                                void Abort()
+                                {
+                                    fAbort = true;
+                                    if(!fActive)
+                                        return;
+
+                                    LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    fActive = false;
+                                }
+
+                                void Commit()
+                                {
+                                    if(!fActive)
+                                        return;
+
+                                    LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    fActive = false;
+                                }
+
+                                ~MempoolCheckRelease()
+                                {
+                                    if(!fActive)
+                                        return;
+
+                                    try
+                                    {
+                                        if(fAbort)
+                                            LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                        else
+                                            LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    }
+                                    catch(...)
+                                    {
+                                        try
+                                        {
+                                            LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                        }
+                                        catch(...)
+                                        {
+                                        }
+                                    }
+
+                                    fActive = false;
+                                }
+                            } txn;
 
                             /* Disconnect all transactions in reverse order. */
                             for(auto tx = vtx.rbegin(); tx != vtx.rend(); ++tx)
@@ -1279,8 +1331,7 @@ namespace TAO
                                 if(!fDisconnected)
                                 {
                                     /* Revert any partial LLD ACID state changes. */
-                                    LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
-                                    fTxnActive = false;
+                                    txn.Abort();
 
                                     /* Force-evict this stuck orphan so it doesn't loop forever.
                                      * TxnAbort has already reverted any partial memory changes,
@@ -1314,9 +1365,10 @@ namespace TAO
                                     debug::notice(FUNCTION, "ROOT ORPHAN: disconnected root with FLAGS::ERASE: ", hashTx.SubString());
                             }
 
-                            /* Only commit if the LLD transaction was not already aborted. */
-                            if(fTxnActive)
-                                LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            /* Only commit if the LLD transaction was not already aborted.
+                             * A throw before this point commits from ~MempoolCheckRelease
+                             * instead, leaving already-removed pool entries removed. */
+                            txn.Commit();
 
                             break;
                         }

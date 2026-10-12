@@ -81,8 +81,9 @@ namespace LLD
      *
      *  Shutdown and cleanup the global LLD instances.
      *
-     *  Rejects new transactions, waits until in-flight transaction calls finish
-     *  and every ownership slot is released, then deletes the instances.
+     *  Rejects new transactions, waits until in-flight transaction calls
+     *  (including HasOpenTransaction) finish and every ownership slot is
+     *  released, then deletes the instances.
      *
      **/
     void Shutdown();
@@ -104,6 +105,10 @@ namespace LLD
      *
      *  This is process-wide journal state. It does not mean the calling thread
      *  owns the transaction. Use ThreadOwnsTransaction for that.
+     *
+     *  The query holds the same shutdown lifetime barrier as TxnBegin,
+     *  TxnCommit, and TxnAbort. After the instances are closed it returns
+     *  false and does not touch them.
      *
      */
     bool HasOpenTransaction(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);

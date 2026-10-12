@@ -141,8 +141,10 @@ namespace LLD
 
         /* Stop new begins first. Abort slots this thread still owns, then wait
          * until every other in-flight call has left and every slot is released.
-         * Deleting earlier lets a worker pass its ownership check and use a
-         * freed database, and makes an exiting owner's guard skip cleanup. */
+         * HasOpenTransaction holds that same barrier, so a caller inside the
+         * read cannot race these deletes. Deleting earlier lets a worker pass
+         * its ownership check and use a freed database, and makes an exiting
+         * owner's guard skip cleanup. */
         BeginTxnShutdown();
         AbortOwnedByThisThread();
         WaitAndCloseTxnLifetime();
