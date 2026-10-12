@@ -245,7 +245,8 @@ namespace TAO
                             /* Set the best to older block. A begin failure is not "no more
                              * checkpoints": the missing record was not reverted, so
                              * initialization must fail instead of continuing. */
-                            if(!LLD::TxnBegin())
+                            LLD::TransactionGuard txn;
+                            if(!txn)
                                 return debug::error(FUNCTION, "failed to begin block transaction");
 
                             /* Bug fix (call site #4): check return value before committing.
@@ -259,7 +260,9 @@ namespace TAO
                             /* SetBest() commits the transaction internally when it succeeds.
                              * Guard with HasOpenTransaction() so that the now-closed outer
                              * transaction is not misreported as a commit failure. */
-                            else if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
+                            else if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
+                                txn.Release();
+                            else
                                 debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
 
                             break;
@@ -287,7 +290,8 @@ namespace TAO
                 }
 
                 /* Set the best to older block. */
-                if(!LLD::TxnBegin())
+                LLD::TransactionGuard txn;
+                if(!txn)
                     return debug::error(FUNCTION, "failed to begin block transaction");
 
                 /* Abort our transaction if we fail to rollback. */
@@ -304,7 +308,9 @@ namespace TAO
                     /* SetBest() commits the transaction internally when it succeeds.
                      * Guard with HasOpenTransaction() so that the now-closed outer
                      * transaction is not misreported as a commit failure. */
-                    if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
+                    if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
+                        txn.Release();
+                    else
                         debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
                 }
             }
