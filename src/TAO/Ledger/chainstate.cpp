@@ -263,7 +263,7 @@ namespace TAO
                             else if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
                                 txn.Release();
                             else
-                                debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
+                                return debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
 
                             break;
                         }
@@ -311,7 +311,7 @@ namespace TAO
                     if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
                         txn.Release();
                     else
-                        debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
+                        return debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
                 }
             }
 

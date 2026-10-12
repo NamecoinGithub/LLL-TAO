@@ -144,11 +144,10 @@ namespace LLD
      *
      *  Global handler for all LLD instances.
      *
-     *  A memory abort is rejected when this thread does not own that mode, or
-     *  when nInstances omits an instance opened by the matching begin. A
-     *  rejected abort does not release the overlay or the owner. An owned
-     *  physical abort uses the same mask rule. An unowned physical abort remains
-     *  the recovery path.
+     *  Owned memory and physical aborts reject masks that omit an instance
+     *  opened by their matching begin, then release only the begin mask.
+     *  An unowned physical abort uses nInstances for recovery.
+     *  An abort is rejected when this thread does not own the requested mode.
      *
      */
     void TxnAbort(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);
@@ -158,11 +157,12 @@ namespace LLD
      *
      *  Global handler for all LLD instances.
      *
-     *  @return true if every selected per-DB commit succeeded, false if any failed.
+     *  @return true if every owned per-DB commit succeeded, false if any failed.
      *          All selected instances are attempted regardless of individual failures.
-     *          A MEMPOOL or physical commit this thread owns is rejected, without
-     *          releasing the owner, when nInstances omits an instance opened by
-     *          the matching begin. A wider mask still covers those instances.
+     *          Owned MEMPOOL and physical commits reject masks that omit an
+     *          instance opened by their matching begin and operate only on the
+     *          begin mask. Commits are rejected when this thread does not own
+     *          the requested mode.
      *
      */
     bool TxnCommit(const uint8_t nFlags = 0, const uint16_t nInstances = INSTANCES::CONSENSUS);

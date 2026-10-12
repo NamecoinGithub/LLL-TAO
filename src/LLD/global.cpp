@@ -590,8 +590,7 @@ namespace LLD
 
 
     /* Caller holds slot.MUTEX. True when nInstances includes every instance
-     * this begin opened. A narrower mask must not commit or abort: releasing
-     * the owner would leave the omitted journals or overlays open and unowned. */
+     * this begin opened; extras are harmless only when DB operations use slot.nInstances. */
     static bool CoversOwnedInstances(const TxnSlot& slot, const uint16_t nInstances)
     {
         return (slot.nInstances & static_cast<uint16_t>(~nInstances)) == 0;
@@ -969,15 +968,15 @@ namespace LLD
                 return;
             }
 
-            /* A narrower abort would MemoryRelease only some overlays and then
-             * clear the owner, leaving the rest open with nobody to abort them. */
             if(!CoversOwnedInstances(slot, nInstances))
             {
                 debug::error(FUNCTION, "transaction instance mask does not cover current owner");
                 return;
             }
 
-            MemoryReleaseSelected(nFlags, nInstances);
+            /* The begin mask is authoritative: never release overlays outside
+             * the set opened by this owner, even if the caller passes a wider mask. */
+            MemoryReleaseSelected(nFlags, slot.nInstances);
             ReleaseSlot(slot, kind);
             return;
         }
@@ -1004,18 +1003,19 @@ namespace LLD
         }
 
         const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
-        /* Same rule as a memory abort: do not TxnRelease a subset and then drop
-         * the owner while the other journals from this begin are still open. */
         if(fReleasePhysical && !CoversOwnedInstances(PhysicalSlot(), nInstances))
         {
             debug::error(FUNCTION, "transaction instance mask does not cover current owner");
             return;
         }
 
+        /* The begin mask is authoritative: do not release any unowned journal. */
+        const uint16_t nOwnedInstances = fReleasePhysical ? PhysicalSlot().nInstances : nInstances;
+
         if(fReleasePhysical && !OwnedByOther(MempoolSlot()))
         {
             const bool fReleaseMempool = OwnedByThisThread(MempoolSlot());
-            MemoryReleaseSelected(nFlags, nInstances);
+            MemoryReleaseSelected(nFlags, nOwnedInstances);
             if(fReleaseMempool)
                 ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
         }
@@ -1023,31 +1023,31 @@ namespace LLD
         lkMem.unlock();
 
         /* Abort the Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
             Logical->TxnRelease();
 
         /* Abort the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
             Contract->TxnRelease();
 
         /* Abort the register DB transaction. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
             Register->TxnRelease();
 
         /* Abort the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
             Ledger->TxnRelease();
 
         /* Abort the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
             Client->TxnRelease();
 
         /* Abort the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
             Trust->TxnRelease();
 
         /* Abort the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
             Legacy->TxnRelease();
 
         if(fReleasePhysical)
@@ -1146,7 +1146,7 @@ namespace LLD
            if(!CoversOwnedInstances(MempoolSlot(), nInstances))
                return debug::error(FUNCTION, "transaction instance mask does not cover current owner");
 
-            MemoryCommitSelected(nInstances);
+           MemoryCommitSelected(MempoolSlot().nInstances);
             ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
             return true;
         }
@@ -1170,17 +1170,18 @@ namespace LLD
             return false;
         }
 
-        /* Committing a subset would TxnCommit only those journals and then
-         * ReleaseSlot, leaving the rest open with no owner. A wider mask still
-         * covers every opened instance and keeps the aggregation path. */
         if(!CoversOwnedInstances(PhysicalSlot(), nInstances))
             return debug::error(FUNCTION, "transaction instance mask does not cover current owner");
+
+        /* Use the begin mask for every DB operation so commits and release never
+         * touch journals that this transaction did not open. */
+        const uint16_t nOwnedInstances = PhysicalSlot().nInstances;
 
         const bool fReleasePhysical = OwnedByThisThread(PhysicalSlot());
         if(fReleasePhysical && !OwnedByOther(MempoolSlot()))
         {
             const bool fReleaseMempool = OwnedByThisThread(MempoolSlot());
-            MemoryCommitSelected(nInstances);
+            MemoryCommitSelected(nOwnedInstances);
             if(fReleaseMempool)
                 ReleaseSlot(MempoolSlot(), TxnKind::MEMPOOL);
         }
@@ -1188,31 +1189,31 @@ namespace LLD
         lkMem.unlock();
 
         /* Set a checkpoint for Logical DB. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
             Logical->TxnCheckpoint();
 
         /* Set a checkpoint for contract DB. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
             Contract->TxnCheckpoint();
 
         /* Set a checkpoint for register DB. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
             Register->TxnCheckpoint();
 
         /* Set a checkpoint for ledger DB. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
             Ledger->TxnCheckpoint();
 
         /* Set a checkpoint for client DB. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
             Client->TxnCheckpoint();
 
         /* Set a checkpoint for trust DB. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
             Trust->TxnCheckpoint();
 
         /* Set a checkpoint for legacy DB. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
             Legacy->TxnCheckpoint();
 
 
@@ -1223,7 +1224,7 @@ namespace LLD
         bool fAllSucceeded = true;
 
         /* Commit Logical DB transaction. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
         {
             if(!Logical->TxnCommit())
             {
@@ -1233,7 +1234,7 @@ namespace LLD
         }
 
         /* Commit contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
         {
             if(!Contract->TxnCommit())
             {
@@ -1243,7 +1244,7 @@ namespace LLD
         }
 
         /* Commit register DB transaction. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
         {
             if(!Register->TxnCommit())
             {
@@ -1253,7 +1254,7 @@ namespace LLD
         }
 
         /* Commit ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
         {
             if(!Ledger->TxnCommit())
             {
@@ -1263,7 +1264,7 @@ namespace LLD
         }
 
         /* Commit the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
         {
             if(!Client->TxnCommit())
             {
@@ -1273,7 +1274,7 @@ namespace LLD
         }
 
         /* Commit the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
         {
             if(!Trust->TxnCommit())
             {
@@ -1283,7 +1284,7 @@ namespace LLD
         }
 
         /* Commit the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
         {
             if(!Legacy->TxnCommit())
             {
@@ -1304,31 +1305,31 @@ namespace LLD
          *
          * Note: TxnRelease is called for every selected instance below,
          * regardless of whether that instance's TxnCommit succeeded or failed. */
-        if(Logical && (nInstances & INSTANCES::LOGICAL))
+        if(Logical && (nOwnedInstances & INSTANCES::LOGICAL))
             Logical->TxnRelease();
 
         /* Release the contract DB transaction. */
-        if(Contract && (nInstances & INSTANCES::CONTRACT))
+        if(Contract && (nOwnedInstances & INSTANCES::CONTRACT))
             Contract->TxnRelease();
 
         /* Release the register DB transaction. */
-        if(Register && (nInstances & INSTANCES::REGISTER))
+        if(Register && (nOwnedInstances & INSTANCES::REGISTER))
             Register->TxnRelease();
 
         /* Release the ledger DB transaction. */
-        if(Ledger && (nInstances & INSTANCES::LEDGER))
+        if(Ledger && (nOwnedInstances & INSTANCES::LEDGER))
             Ledger->TxnRelease();
 
         /* Release the client DB transaction. */
-        if(Client && (nInstances & INSTANCES::CLIENT))
+        if(Client && (nOwnedInstances & INSTANCES::CLIENT))
             Client->TxnRelease();
 
         /* Release the trust DB transaction. */
-        if(Trust && (nInstances & INSTANCES::TRUST))
+        if(Trust && (nOwnedInstances & INSTANCES::TRUST))
             Trust->TxnRelease();
 
         /* Release the legacy DB transaction. */
-        if(Legacy && (nInstances & INSTANCES::LEGACY))
+        if(Legacy && (nOwnedInstances & INSTANCES::LEGACY))
             Legacy->TxnRelease();
 
         if(fReleasePhysical)

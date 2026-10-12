@@ -192,25 +192,26 @@ TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
     LedgerGuard ledgerGuard;
     TrustGuard  trustGuard;
 
-    SECTION("Ledger succeeds, Trust has no transaction → overall false")
+    SECTION("Ledger succeeds, released Trust transaction fails → overall false")
     {
-        /* Open a transaction only on Ledger. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        /* Open both selected transactions, then remove Trust's transaction so
+         * its commit fails while Ledger still commits successfully. */
+        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        LLD::Trust->TxnRelease();
 
-        /* Commit both Ledger and Trust. Trust has no active transaction → returns
-         * false. Ledger has an active transaction → returns true.
-         * Aggregated result must be false. */
+        /* Aggregated result must include Trust's commit failure. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
         REQUIRE_FALSE(fResult);
     }
 
-    SECTION("No short-circuit: Ledger data committed despite Trust failure")
+    SECTION("No short-circuit: Ledger commits despite the released Trust transaction")
     {
-        /* Open a transaction on Ledger and commit a write inside it. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        /* Open both selected transactions, then remove Trust's transaction so
+         * its commit fails while Ledger still commits successfully. */
+        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        LLD::Trust->TxnRelease();
 
-        /* Commit both (Trust has no active transaction → will return false,
-         * but Ledger MUST still be committed — no short-circuit allowed). */
+        /* Ledger MUST still be committed — no short-circuit allowed. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
         REQUIRE_FALSE(fResult); /* overall false because Trust failed */
 
@@ -228,7 +229,8 @@ TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
 
 
 /* A narrower commit or abort must not release the owner while journals or
- * overlays from the begin are still open. A covering mask still proceeds. */
+ * overlays from the begin are still open. Wider masks operate only on the
+ * instances opened by the matching begin. */
 TEST_CASE("LLD commit and abort reject an instance mask narrower than the begin",
           "[lld][txncommit][ownership]")
 {
@@ -304,6 +306,41 @@ TEST_CASE("LLD commit and abort reject an instance mask narrower than the begin"
         REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, nOpened));
         owner.fActive = false;
         REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+    }
+}
+
+
+TEST_CASE("LLD owned transaction masks protect unselected database journals",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    struct TrustTxnRelease
+    {
+        ~TrustTxnRelease()
+        {
+            if(LLD::Trust && LLD::Trust->HasTransaction())
+                LLD::Trust->TxnRelease();
+        }
+    } cleanup;
+
+    SECTION("a wider commit mask does not commit an unselected Trust journal")
+    {
+        LLD::Trust->TxnBegin();
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+
+        REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS));
+        REQUIRE(LLD::Trust->HasTransaction());
+    }
+
+    SECTION("a wider abort mask does not release an unselected Trust journal")
+    {
+        LLD::Trust->TxnBegin();
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::CONSENSUS);
+        REQUIRE(LLD::Trust->HasTransaction());
     }
 }
 
