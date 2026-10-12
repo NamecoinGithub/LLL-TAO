@@ -28,10 +28,10 @@ ________________________________________________________________________________
  *     a valid transaction still has its data committed after the overall return
  *     value is false.
  *
- * Tests 1-3 below use inline simulation / ordering-assertion infrastructure so
- * that they compile and run without a live LLD database or full chain state —
- * following the same pattern used in validate_vtx_consistency.cpp and
- * filter_mempool_only_predecessor.cpp.
+ * The TxnCommit return-value tests use inline simulation / ordering-assertion
+ * infrastructure so that they compile and run without a live LLD database or
+ * full chain state — following the same pattern used in
+ * validate_vtx_consistency.cpp and filter_mempool_only_predecessor.cpp.
  *
  *  4. The MINER and SANITIZE early-return paths return true (intentional
  *     short-circuit, not a failure).
@@ -48,6 +48,7 @@ ________________________________________________________________________________
 
 #include <TAO/Ledger/include/chainstate.h>
 #include <TAO/Ledger/include/enum.h>
+#include <TAO/Ledger/types/client.h>
 #include <TAO/Ledger/types/mempool.h>
 #include <TAO/Ledger/types/state.h>
 
@@ -55,8 +56,12 @@ ________________________________________________________________________________
 #include <Util/include/filesystem.h>
 
 #include <atomic>
+#include <chrono>
+#include <exception>
 #include <functional>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unit/catch2/catch.hpp>
@@ -120,6 +125,60 @@ namespace
         }
     };
 
+
+    struct LogicalGuard
+    {
+        bool ownedLogical{false};
+
+        LogicalGuard()
+        {
+            config::fTestNet.store(true);
+            config::mapArgs["-testnet"] = "1";
+
+            if(!LLD::Logical)
+            {
+                LLD::Logical = new LLD::LogicalDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLogical = true;
+            }
+        }
+
+        ~LogicalGuard()
+        {
+            if(ownedLogical)
+            {
+                delete LLD::Logical;
+                LLD::Logical = nullptr;
+            }
+        }
+    };
+
+
+    struct ClientGuard
+    {
+        bool ownedClient{false};
+
+        ClientGuard()
+        {
+            config::fTestNet.store(true);
+            config::mapArgs["-testnet"] = "1";
+
+            if(!LLD::Client)
+            {
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1000000);
+                ownedClient = true;
+            }
+        }
+
+        ~ClientGuard()
+        {
+            if(ownedClient)
+            {
+                delete LLD::Client;
+                LLD::Client = nullptr;
+            }
+        }
+    };
+
 } /* anonymous namespace */
 
 
@@ -141,6 +200,33 @@ TEST_CASE("LLD::TxnCommit returns false with no active transaction",
          * LLD::TxnCommit must return false. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER);
         REQUIRE_FALSE(fResult);
+    }
+}
+
+
+TEST_CASE("HasOpenTransaction checks Logical and Client journals",
+          "[lld][txncommit][ownership]")
+{
+    SECTION("Logical journal")
+    {
+        LogicalGuard logicalGuard;
+        LLD::TransactionGuard txn(0, LLD::INSTANCES::LOGICAL);
+        REQUIRE(txn);
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LOGICAL));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::LOGICAL);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LOGICAL));
+    }
+
+    SECTION("Client journal")
+    {
+        ClientGuard clientGuard;
+        LLD::TransactionGuard txn(0, LLD::INSTANCES::CLIENT);
+        REQUIRE(txn);
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CLIENT));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::CLIENT);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CLIENT));
     }
 }
 
@@ -187,25 +273,26 @@ TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
     LedgerGuard ledgerGuard;
     TrustGuard  trustGuard;
 
-    SECTION("Ledger succeeds, Trust has no transaction → overall false")
+    SECTION("Ledger succeeds, released Trust transaction fails → overall false")
     {
-        /* Open a transaction only on Ledger. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        /* Open both selected transactions, then remove Trust's transaction so
+         * its commit fails while Ledger still commits successfully. */
+        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        LLD::Trust->TxnRelease();
 
-        /* Commit both Ledger and Trust. Trust has no active transaction → returns
-         * false. Ledger has an active transaction → returns true.
-         * Aggregated result must be false. */
+        /* Aggregated result must include Trust's commit failure. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
         REQUIRE_FALSE(fResult);
     }
 
-    SECTION("No short-circuit: Ledger data committed despite Trust failure")
+    SECTION("No short-circuit: Ledger commits despite the released Trust transaction")
     {
-        /* Open a transaction on Ledger and commit a write inside it. */
-        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
+        /* Open both selected transactions, then remove Trust's transaction so
+         * its commit fails while Ledger still commits successfully. */
+        LLD::TxnBegin(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
+        LLD::Trust->TxnRelease();
 
-        /* Commit both (Trust has no active transaction → will return false,
-         * but Ledger MUST still be committed — no short-circuit allowed). */
+        /* Ledger MUST still be committed — no short-circuit allowed. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST);
         REQUIRE_FALSE(fResult); /* overall false because Trust failed */
 
@@ -218,6 +305,123 @@ TEST_CASE("LLD::TxnCommit aggregates results: one failure makes overall false",
         LLD::TxnBegin(0, LLD::INSTANCES::LEDGER);
         const bool fSecondCommit = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER);
         REQUIRE(fSecondCommit);
+    }
+}
+
+
+/* A narrower commit or abort must not release the owner while journals or
+ * overlays from the begin are still open. Wider masks operate only on the
+ * instances opened by the matching begin. */
+TEST_CASE("LLD commit and abort reject an instance mask narrower than the begin",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    SECTION("physical subset commit leaves the owner and the other journal")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST;
+        OwnerAbort owner{0, nOpened};
+
+        REQUIRE(LLD::TxnBegin(0, nOpened));
+        owner.fActive = true;
+
+        REQUIRE_FALSE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::TRUST));
+
+        REQUIRE(LLD::TxnCommit(0, nOpened));
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, nOpened));
+
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("physical subset abort leaves the owner")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::LEDGER | LLD::INSTANCES::TRUST;
+        OwnerAbort owner{0, nOpened};
+
+        REQUIRE(LLD::TxnBegin(0, nOpened));
+        owner.fActive = true;
+
+        LLD::TxnAbort(0, LLD::INSTANCES::LEDGER);
+        REQUIRE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::TRUST));
+
+        LLD::TxnAbort(0, nOpened);
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(0));
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, nOpened));
+    }
+
+    SECTION("mempool subset abort and commit leave the owner")
+    {
+        const uint16_t nOpened = LLD::INSTANCES::MEMORY;
+        OwnerAbort owner{TAO::Ledger::FLAGS::MEMPOOL, nOpened};
+
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, nOpened));
+        owner.fActive = true;
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, nOpened));
+        owner.fActive = false;
+        REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+    }
+}
+
+
+TEST_CASE("LLD owned transaction masks protect unselected database journals",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard ledgerGuard;
+    TrustGuard trustGuard;
+
+    struct TrustTxnRelease
+    {
+        ~TrustTxnRelease()
+        {
+            if(LLD::Trust && LLD::Trust->HasTransaction())
+                LLD::Trust->TxnRelease();
+        }
+    } cleanup;
+
+    SECTION("a wider commit mask does not commit an unselected Trust journal")
+    {
+        LLD::Trust->TxnBegin();
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+
+        REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::CONSENSUS));
+        REQUIRE(LLD::Trust->HasTransaction());
+    }
+
+    SECTION("a wider abort mask does not release an unselected Trust journal")
+    {
+        LLD::Trust->TxnBegin();
+        REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::CONSENSUS);
+        REQUIRE(LLD::Trust->HasTransaction());
     }
 }
 
@@ -246,6 +450,715 @@ TEST_CASE("LLD::TxnCommit returns true for MINER and SANITIZE flags",
 }
 
 
+TEST_CASE("LedgerDB hash-keyed block reads reject mismatched record identity",
+          "[lld][ledger][integrity]")
+{
+    LedgerGuard guard;
+
+    TAO::Ledger::BlockState stored;
+    stored.nVersion = 4;
+    stored.nChannel = 2;
+    stored.nHeight = 7;
+    stored.nBits = 1;
+    stored.nNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    const uint1024_t hashExpected = stored.GetHash();
+    uint1024_t hashWrongKey = hashExpected;
+    ++hashWrongKey;
+    REQUIRE_FALSE(LLD::Ledger->HasBlock(hashWrongKey));
+
+    struct BlockRecordDiskGuard
+    {
+        uint1024_t hash;
+
+        ~BlockRecordDiskGuard()
+        {
+            LLD::Ledger->EraseBlock(hash);
+        }
+    } diskGuard{hashWrongKey};
+
+    REQUIRE(LLD::Ledger->WriteBlock(hashWrongKey, stored));
+
+    TAO::Ledger::BlockState result;
+    result.nHeight = 42;
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
+    REQUIRE(result.nHeight == 42);
+
+    /* Sentinel must differ from the mismatched record. Copying the stored block
+     * would hide an overwrite that happens before the identity check fails. */
+    TAO::Ledger::BlockState atomicInitial;
+    atomicInitial.nHeight = 99;
+    atomicInitial.nNonce = 1;
+    memory::atomic<TAO::Ledger::BlockState> atomicResult;
+    atomicResult.store(atomicInitial);
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
+    REQUIRE(atomicResult.load().nHeight == 99);
+    REQUIRE(atomicResult.load().nNonce == 1);
+}
+
+
+TEST_CASE("LLD::TxnCommit rejects a memory mode that does not own the transaction",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    /* Ownership is process-wide per mode. A mismatched commit must be rejected
+     * without releasing the owner; abort of the owning mode is what releases it. */
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{true};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    } owner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+
+    /* A mismatched abort must not release the owner or touch database state. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+
+    /* Ownership is still held: another mismatched commit is still rejected. */
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+    owner.fActive = false;
+
+    /* Released owner: a new memory transaction can begin and commit. */
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+}
+
+
+TEST_CASE("Coexisting MEMPOOL and MINER or SANITIZE transactions can commit",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    SECTION("MINER short-circuit succeeds without releasing a coexisting MEMPOOL owner")
+    {
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+
+        const uint512_t hashTx(0x4238406082ULL);
+        const uint32_t nContract = 1;
+        const uint64_t nClaimed = 42;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, 7, TAO::Ledger::FLAGS::MINER));
+
+        /* Owning both modes must not reject either commit. MINER does not release. */
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+        REQUIRE(nRead == 7);
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+        nRead = 0;
+        REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+    }
+
+    SECTION("SANITIZE short-circuit and MEMPOOL commit succeed when begun in either order")
+    {
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort sanitize{TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER};
+
+        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        sanitize.fActive = true;
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::LEDGER);
+        sanitize.fActive = false;
+    }
+
+    SECTION("another thread cannot short-circuit commit an owned MINER slot")
+    {
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+
+        std::atomic<bool> fRejected{false};
+        std::exception_ptr pError;
+        std::thread other([&]()
+        {
+            try
+            {
+                fRejected.store(!LLD::TxnCommit(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER));
+            }
+            catch(...)
+            {
+                pError = std::current_exception();
+            }
+        });
+        other.join();
+        if(pError)
+            std::rethrow_exception(pError);
+
+        REQUIRE(fRejected.load());
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+    }
+}
+
+
+TEST_CASE("Mismatched abort and commit leave another thread's mempool overlay intact",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4237889625ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 77;
+
+    std::atomic<bool> fStaged{false};
+    std::atomic<bool> fMismatchedDone{false};
+    std::atomic<bool> fError{false};
+    std::exception_ptr pError;
+    bool fStillStaged = false;
+    bool fCommitted = true;
+
+    std::thread mempool([&]()
+    {
+        try
+        {
+            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            if(!LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("failed to stage mempool claim");
+
+            fStaged.store(true);
+            while(!fMismatchedDone.load())
+                std::this_thread::yield();
+
+            uint64_t nRead = 0;
+            fStillStaged = LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL)
+                && nRead == nClaimed;
+
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+            nRead = 0;
+            fCommitted = LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL);
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+            fError.store(true);
+            fStaged.store(true);
+            fMismatchedDone.store(true);
+        }
+    });
+
+    while(!fStaged.load())
+        std::this_thread::yield();
+
+    struct MinerAbort
+    {
+        bool fActive{false};
+
+        ~MinerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        }
+    } miner;
+
+    struct JoinGuard
+    {
+        std::thread& tThread;
+        std::atomic<bool>& fDone;
+
+        ~JoinGuard()
+        {
+            fDone.store(true);
+            if(tThread.joinable())
+                tThread.join();
+        }
+    } joinGuard{mempool, fMismatchedDone};
+
+    /* pError is written by the worker. Decide before join with the atomic flag,
+     * and read the exception pointer only after join. */
+    if(!fError.load())
+    {
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    }
+
+    fMismatchedDone.store(true);
+    if(mempool.joinable())
+        mempool.join();
+
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE(fStillStaged);
+    REQUIRE_FALSE(fCommitted);
+}
+
+
+TEST_CASE("Unowned thread cannot abort, commit, or replace another thread's mempool overlay",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4237997049ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 91;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{true};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    } owner{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+
+    LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+    std::atomic<bool> fCommitRejected{false};
+    std::exception_ptr pError;
+
+    std::thread unowned([&]()
+    {
+        try
+        {
+            /* Never called TxnBegin. These must not delete, commit, or replace pMemory.
+             * BLOCK shares that overlay, so its begin is part of the same check. */
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            fCommitRejected.store(!LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+            LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+            LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+
+    unowned.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE(fCommitRejected.load());
+
+    uint64_t nRead = 0;
+    REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(nRead == nClaimed);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    owner.fActive = false;
+    nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+}
+
+
+TEST_CASE("MEMPOOL and BLOCK begins cannot replace each other's shared overlay",
+          "[lld][txncommit][concurrency]")
+{
+    LedgerGuard guard;
+
+    struct OwnerAbort
+    {
+        uint8_t nFlags;
+        uint16_t nInstances;
+        bool fActive{false};
+
+        ~OwnerAbort()
+        {
+            if(fActive)
+                LLD::TxnAbort(nFlags, nInstances);
+        }
+    };
+
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 55;
+
+    SECTION("BLOCK begin does not delete another thread's MEMPOOL overlay")
+    {
+        const uint512_t hashTx(0x4238195488ULL);
+        OwnerAbort owner{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        owner.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        std::atomic<bool> fBeginRejected{false};
+        std::thread attacker([&]()
+        {
+            fBeginRejected.store(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+            if(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        });
+        attacker.join();
+        REQUIRE(fBeginRejected.load());
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("MEMPOOL begin does not delete another thread's BLOCK overlay")
+    {
+        const uint512_t hashTx(0x4238195489ULL);
+        OwnerAbort owner{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        owner.fActive = true;
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        std::atomic<bool> fBeginRejected{false};
+        std::thread attacker([&]()
+        {
+            fBeginRejected.store(!LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+            LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        });
+        attacker.join();
+        REQUIRE(fBeginRejected.load());
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    }
+
+    SECTION("same thread cannot open the second shared mode")
+    {
+        const uint512_t hashTx(0x4238195490ULL);
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        OwnerAbort physical{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+
+        REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+        REQUIRE_FALSE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        physical.fActive = LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE_FALSE(physical.fActive);
+    }
+
+    SECTION("same thread cannot begin an owned mode again")
+    {
+        const uint512_t hashMempool(0x4238514288ULL);
+        const uint512_t hashBlock(0x4238514289ULL);
+        const uint512_t hashMiner(0x4238514290ULL);
+
+        OwnerAbort mempool{TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+        mempool.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashMempool, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+        uint64_t nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashMempool, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::TxnCommit(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+        mempool.fActive = false;
+
+        OwnerAbort physical{TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        physical.fActive = true;
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        REQUIRE(LLD::Ledger->WriteClaimed(hashBlock, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashBlock, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+        REQUIRE(nRead == nClaimed);
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+        LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        physical.fActive = false;
+
+        OwnerAbort miner{TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER};
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = true;
+        REQUIRE(LLD::Ledger->WriteClaimed(hashMiner, nContract, nClaimed, TAO::Ledger::FLAGS::MINER));
+        LLD::TxnBegin(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+
+        nRead = 0;
+        REQUIRE(LLD::Ledger->ReadClaimed(hashMiner, nContract, nRead, TAO::Ledger::FLAGS::MINER));
+        REQUIRE(nRead == nClaimed);
+        LLD::TxnAbort(TAO::Ledger::FLAGS::MINER, LLD::INSTANCES::LEDGER);
+        miner.fActive = false;
+    }
+}
+
+
+TEST_CASE("BLOCK abort and commit reject a caller that does not own the physical slot",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard guard;
+
+    struct Cleanup
+    {
+        bool fMempool{false};
+
+        ~Cleanup()
+        {
+            if(fMempool)
+                LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+            /* Unowned physical abort is the recovery no-op and releases a journal
+             * opened outside the ownership slot. */
+            LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+        }
+    } cleanup;
+
+    /* Open a journal without claiming PhysicalSlot, as recovery can. */
+    LLD::Ledger->TxnBegin();
+    REQUIRE(LLD::Ledger->HasTransaction());
+
+    const uint512_t hashTx(0x4238628335ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 17;
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    cleanup.fMempool = true;
+    REQUIRE(LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL));
+
+    /* Owning MEMPOOL is not physical ownership. Neither call may release or
+     * commit the journal, or drop the mempool overlay. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE_FALSE(LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+
+    uint64_t nRead = 0;
+    REQUIRE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    REQUIRE(nRead == nClaimed);
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+    cleanup.fMempool = false;
+
+    /* A physical begin must not replace the unowned recovery journal. */
+    REQUIRE_FALSE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::Ledger->HasTransaction());
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+
+    /* Recovery abort releases that journal without an owner. */
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::Ledger->HasTransaction());
+
+    /* The redundant commit after a completed physical transaction stays false
+     * and must not be reported as an ownership error by mutating state. */
+    REQUIRE(LLD::TxnBegin(0, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::TxnCommit(0, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::Ledger->HasTransaction());
+}
+
+
+TEST_CASE("Owner thread exit releases the process-wide transaction slot",
+          "[lld][txncommit][ownership]")
+{
+    LedgerGuard guard;
+
+    const uint512_t hashTx(0x4239100840ULL);
+    const uint32_t nContract = 1;
+    const uint64_t nClaimed = 19;
+    std::exception_ptr pError;
+
+    std::thread owner([&]()
+    {
+        try
+        {
+            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("mempool begin failed");
+            if(!LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("mempool begin did not own the slot");
+            if(!LLD::Ledger->WriteClaimed(hashTx, nContract, nClaimed, TAO::Ledger::FLAGS::MEMPOOL))
+                throw std::runtime_error("failed to stage mempool claim");
+            /* Exit without abort or commit. The owner guard must release the slot. */
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+    owner.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::MEMPOOL));
+    uint64_t nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+
+    /* A later begin must not be rejected as foreign, and must not resume the overlay. */
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER));
+    nRead = 0;
+    REQUIRE_FALSE(LLD::Ledger->ReadClaimed(hashTx, nContract, nRead, TAO::Ledger::FLAGS::MEMPOOL));
+    LLD::TxnAbort(TAO::Ledger::FLAGS::MEMPOOL, LLD::INSTANCES::LEDGER);
+
+    std::thread physical([&]()
+    {
+        try
+        {
+            if(!LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("block begin failed");
+            if(!LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK))
+                throw std::runtime_error("block begin did not own the slot");
+            if(!LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER))
+                throw std::runtime_error("block begin did not open a journal");
+        }
+        catch(...)
+        {
+            pError = std::current_exception();
+        }
+    });
+    physical.join();
+    if(pError)
+        std::rethrow_exception(pError);
+
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+}
+
+
+TEST_CASE("LedgerDB client-mode hash-keyed reads reject mismatched record identity",
+          "[lld][ledger][integrity][client]")
+{
+    LedgerGuard guard;
+
+    struct ClientModeGuard
+    {
+        bool fPrevious{false};
+        LLD::ClientDB* pPrevious{nullptr};
+        bool fOwned{false};
+
+        ClientModeGuard()
+            : fPrevious(config::fClient.load())
+            , pPrevious(LLD::Client)
+        {
+            config::fClient.store(true);
+            if(!LLD::Client)
+            {
+                /* Match LLD::Initialize(): production ClientDB uses 1000000 buckets.
+                 * 77773 is the client-mode LedgerDB count, not ClientDB. */
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1000000);
+                fOwned = true;
+            }
+        }
+
+        ~ClientModeGuard()
+        {
+            config::fClient.store(fPrevious);
+            if(fOwned)
+            {
+                delete LLD::Client;
+                LLD::Client = pPrevious;
+            }
+        }
+    } clientGuard;
+
+    TAO::Ledger::ClientBlock stored;
+    stored.nVersion = 4;
+    stored.nChannel = 2;
+    stored.nHeight = 9;
+    stored.nBits = 1;
+    stored.nNonce = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    const uint1024_t hashExpected = stored.GetHash();
+    uint1024_t hashWrongKey = hashExpected;
+    ++hashWrongKey;
+
+    struct ClientRecordDiskGuard
+    {
+        uint1024_t hash;
+        bool fHadPrevious{false};
+        TAO::Ledger::ClientBlock previous;
+
+        explicit ClientRecordDiskGuard(const uint1024_t& hashIn)
+            : hash(hashIn)
+        {
+            if(LLD::Client)
+                fHadPrevious = LLD::Client->ReadBlock(hash, previous);
+        }
+
+        ~ClientRecordDiskGuard()
+        {
+            if(!LLD::Client)
+                return;
+
+            if(fHadPrevious)
+                LLD::Client->WriteBlock(hash, previous);
+            else
+                LLD::Client->EraseBlock(hash);
+        }
+    } diskGuard{hashWrongKey};
+
+    REQUIRE(LLD::Client->WriteBlock(hashWrongKey, stored));
+
+    TAO::Ledger::BlockState result;
+    result.nHeight = 42;
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, result));
+    REQUIRE(result.nHeight == 42);
+
+    TAO::Ledger::BlockState atomicInitial;
+    atomicInitial.nHeight = 42;
+    memory::atomic<TAO::Ledger::BlockState> atomicResult;
+    atomicResult.store(atomicInitial);
+    REQUIRE_FALSE(LLD::Ledger->ReadBlock(hashWrongKey, atomicResult));
+    REQUIRE(atomicResult.load().nHeight == 42);
+}
+
+
 /* ===========================================================================
  * Real-code test infrastructure (Gap 2)
  * ===========================================================================
@@ -260,9 +1173,9 @@ TEST_CASE("LLD::TxnCommit returns true for MINER and SANITIZE flags",
  *   vtx writes made by Accept() callers (call sites #1/#2) before Index() is
  *   reached.  Option (b) was therefore chosen: LLD::HasOpenTransaction() was
  *   added as a lightweight check so SetBest() opens its own TxnBegin only
- *   when the caller has not already done so, and calls TxnAbort() on every
- *   failure path so that the on-disk state is always rolled back cleanly
- *   regardless of who owns the transaction.
+ *   when the caller has not already done so. Its self-owned guard aborts
+ *   failures only when SetBest() opened the transaction; an outer owner remains
+ *   responsible for deciding whether to commit or abort its journal.
  * =========================================================================== */
 namespace
 {
@@ -333,10 +1246,10 @@ namespace
  * ===========================================================================
  * Calls the actual BlockState::SetBest().  The candidate block's vtx contains
  * a transaction hash that is NOT on disk, so Connect() fails mid-loop.  With
- * the Gap-1 fix, SetBest() calls TxnAbort() before returning false, rolling
- * back the IndexBlock write that Connect() made before detecting the missing
- * transaction.  Asserts: (a) SetBest() returns false, (b) no index entry was
- * committed to disk (TxnAbort rolled it back), (c) ChainState atomics are
+ *  the self-owned guard aborts before returning false, rolling back the
+ *  IndexBlock write that Connect() made before detecting the missing
+ *  transaction. Asserts: (a) SetBest() returns false, (b) no index entry was
+ *  committed to disk (the guard rolled it back), (c) ChainState atomics are
  * unchanged.
  */
 TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves ChainState unchanged",
@@ -371,7 +1284,8 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
      *   IndexBlock(fakeTxHash, ...)   → writes pending index to pTransaction
      *   ReadTx(fakeTxHash, ...)       → false  (tx body missing)
      *   Connect() returns false
-     * SetBest() then calls TxnAbort(), discarding the pending IndexBlock write. */
+     * SetBest()'s self-owned guard then aborts, discarding the pending IndexBlock
+     * write. */
     const uint512_t fakeTxHash(0xdeadbeefcafeULL);
 
     TAO::Ledger::BlockState badBlock;
@@ -396,7 +1310,7 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
     REQUIRE(TAO::Ledger::ChainState::nBestHeight.load()          == 0u);
 
     /* ---- (b) Disk index for fakeTxHash must have been rolled back ----
-     * TxnAbort() deleted pTransaction before it could be flushed to disk.
+     * The self-owned guard deleted pTransaction before it could be flushed to disk.
      * HasIndex() checks the on-disk keychain only (pTransaction is null),
      * so a false result confirms the write was discarded. */
     REQUIRE_FALSE(LLD::Ledger->HasIndex(fakeTxHash));
@@ -409,21 +1323,71 @@ TEST_CASE("Real SetBest(): Connect() failure rolls back disk index and leaves Ch
 }
 
 
+TEST_CASE("Real SetBest(): rejects partial outer consensus transaction",
+          "[ledger][setbest_txn][real]")
+{
+    RealCodeLedgerGuard ledgerGuard;
+    ChainStateGuard     chainGuard;
+
+    TAO::Ledger::BlockState genesis;
+    genesis.nVersion      = 4;
+    genesis.hashPrevBlock = uint1024_t(0);
+    genesis.nChannel      = 2;
+    genesis.nHeight       = 0;
+    genesis.nBits         = 1;
+    genesis.nNonce        = 79;
+
+    const uint1024_t hashGenesis = genesis.GetHash();
+    REQUIRE(LLD::Ledger->WriteBlock(hashGenesis, genesis));
+
+    TAO::Ledger::ChainState::tStateGenesis   = genesis;
+    TAO::Ledger::ChainState::tStateBest      = genesis;
+    TAO::Ledger::ChainState::hashBestChain   = hashGenesis;
+    TAO::Ledger::ChainState::nBestHeight     .store(0);
+    TAO::Ledger::ChainState::nBestChainTrust .store(genesis.nChainTrust);
+
+    const uint512_t fakeTxHash(0xfaceb00cULL);
+    TAO::Ledger::BlockState candidate;
+    candidate.nVersion      = 4;
+    candidate.hashPrevBlock = hashGenesis;
+    candidate.nChannel      = 2;
+    candidate.nHeight       = 1;
+    candidate.nBits         = 1;
+    candidate.nNonce        = 56;
+    candidate.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fakeTxHash});
+
+    REQUIRE(LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(candidate.SetBest());
+
+    REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK));
+    REQUIRE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::ThreadOwnsTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+    REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+
+    LLD::TxnAbort(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER);
+
+    REQUIRE_FALSE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::LEDGER));
+    REQUIRE_FALSE(LLD::Ledger->HasIndex(fakeTxHash));
+    REQUIRE(TAO::Ledger::ChainState::tStateBest.load().GetHash() == hashGenesis);
+
+    LLD::Ledger->EraseBlock(hashGenesis);
+}
+
+
 /* ===========================================================================
- * TEST 6 — Real call-site #4 pattern: outer TxnBegin + SetBest() failure
+ * TEST 6 — Real call-site #4 pattern: guarded SetBest() failure
  * ===========================================================================
  * Mirrors the call-site #4 pattern in chainstate.cpp:
- *   LLD::TxnBegin();
- *   if(!state.SetBest()) { LLD::TxnAbort(); }
- *   else                   LLD::TxnCommit();
+ *   LLD::TransactionGuard txn;
+ *   state.SetBest();
  *
- * With the Gap-1 fix SetBest() internally calls TxnAbort() before returning
- * false, so the outer TxnAbort() becomes a safe no-op.  This test verifies:
+ * SetBest() leaves an outer transaction open when it fails, so the caller's
+ * guard remains responsible for rollback. This test verifies:
  *   (a) SetBest() returns false,
- *   (b) no index entry persists after the outer TxnAbort(),
+ *   (b) no index entry persists after guard cleanup,
  *   (c) no active transaction remains open.
  */
-TEST_CASE("Real call-site #4: outer TxnBegin + SetBest() failure → clean abort, no partial commit",
+TEST_CASE("Real call-site #4: guarded SetBest() failure → clean abort, no partial commit",
           "[ledger][chainstate][setbest_txn][real]")
 {
     RealCodeLedgerGuard ledgerGuard;
@@ -460,12 +1424,13 @@ TEST_CASE("Real call-site #4: outer TxnBegin + SetBest() failure → clean abort
     badBlock.vtx.push_back({TAO::Ledger::TRANSACTION::TRITIUM, fakeTxHash});
 
     /* ---- Call-site #4 pattern ---- */
-    LLD::TxnBegin();                       /* outer TxnBegin (as chainstate.cpp does) */
-    const bool fOk = badBlock.SetBest();   /* internally calls TxnAbort on failure    */
-    if(!fOk)
-        LLD::TxnAbort();                   /* outer TxnAbort — safe no-op after Gap-1 */
-    else
-        LLD::TxnCommit();
+    bool fOk = false;
+    {
+        LLD::TransactionGuard txn;
+        REQUIRE(txn);
+        fOk = badBlock.SetBest();
+        REQUIRE(LLD::HasOpenTransaction(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS));
+    }
 
     /* (a) SetBest() must have returned false */
     REQUIRE_FALSE(fOk);

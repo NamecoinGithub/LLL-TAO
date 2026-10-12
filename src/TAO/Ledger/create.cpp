@@ -756,8 +756,18 @@ namespace TAO::Ledger
         std::vector<uint512_t> vMempool;
         mempool.List(vMempool);
 
-        /* Start a ACID transaction (to be disposed). */
-        LLD::TxnBegin(FLAGS::MINER);
+        /* Start a ACID transaction (to be disposed). A rejected begin must
+         * skip both selection paths: Tritium Verify and legacy Connect both
+         * use FLAGS::MINER and can mutate another thread's miner overlay.
+         * Release before the explicit abort so the legacy loop below does not
+         * run against this overlay. An exception from Verify or Connect skips
+         * that release and the guard aborts the slot on unwind. */
+        LLD::TransactionGuard txn(FLAGS::MINER);
+        if(!txn)
+        {
+            debug::error(FUNCTION, "failed to begin miner transaction");
+            return;
+        }
 
         /* Loop through the list of transactions. */
         std::set<uint512_t> setDependents;
@@ -880,7 +890,8 @@ namespace TAO::Ledger
             setInBlock.insert(hash);
         }
 
-        /* Abort the temporary ACID transaction. */
+        /* Abort the temporary ACID transaction before legacy selection. */
+        txn.Release();
         LLD::TxnAbort(FLAGS::MINER);
 
         /* Clear for legacy. */

@@ -242,22 +242,27 @@ namespace TAO
                             debug::log(0, ANSI_COLOR_BRIGHT_YELLOW, "WARNING: ", ANSI_COLOR_RESET,
                                 " REVERTING TO HARDCODED Ancestor ", iAncestor->first, " Hash ", iAncestor->second.SubString());
 
-                            /* Set the best to older block. */
-                            LLD::TxnBegin();
+                            /* Set the best to older block. A begin failure is not "no more
+                             * checkpoints": the missing record was not reverted, so
+                             * initialization must fail instead of continuing. */
+                            LLD::TransactionGuard txn;
+                            if(!txn)
+                                return debug::error(FUNCTION, "failed to begin block transaction");
 
-                            /* Bug fix (call site #4): check return value before committing.
-                             * A failed SetBest() must abort the transaction to avoid committing
-                             * partial / inconsistent disk writes. */
+                            /* A failed SetBest() can release the slot before returning.
+                             * TransactionGuard aborts only if this thread still owns it. */
                             if(!stateAncestor.SetBest())
                             {
                                 debug::error(FUNCTION, "failed to revert to hardcoded ancestor checkpoint");
-                                LLD::TxnAbort();
+                                return false;
                             }
                             /* SetBest() commits the transaction internally when it succeeds.
                              * Guard with HasOpenTransaction() so that the now-closed outer
                              * transaction is not misreported as a commit failure. */
-                            else if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
-                                debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
+                            else if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
+                                txn.Release();
+                            else
+                                return debug::error(FUNCTION, "disk commit failed after reverting to hardcoded ancestor checkpoint");
 
                             break;
                         }
@@ -284,14 +289,17 @@ namespace TAO
                 }
 
                 /* Set the best to older block. */
-                LLD::TxnBegin();
+                LLD::TransactionGuard txn;
+                if(!txn)
+                    return debug::error(FUNCTION, "failed to begin block transaction");
 
-                /* Abort our transaction if we fail to rollback. */
+                /* TransactionGuard aborts if SetBest() fails while this thread
+                 * still owns the transaction slot. */
                 if(!state.SetBest())
                 {
                     /* Debug Output. */
                     debug::log(0, FUNCTION, "-revertblocks=XXX failed to remove ", nRevertBlocks, " blocks");
-                    LLD::TxnAbort();
+                    return false;
                 }
                 else
                 {
@@ -300,8 +308,10 @@ namespace TAO
                     /* SetBest() commits the transaction internally when it succeeds.
                      * Guard with HasOpenTransaction() so that the now-closed outer
                      * transaction is not misreported as a commit failure. */
-                    if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
-                        debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
+                    if(!LLD::HasOpenTransaction() || LLD::TxnCommit())
+                        txn.Release();
+                    else
+                        return debug::error(FUNCTION, "disk commit failed after -revertblocks rewind");
                 }
             }
 

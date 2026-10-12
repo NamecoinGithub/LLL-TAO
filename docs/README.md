@@ -39,6 +39,11 @@ This directory contains the active Nexus node documentation. Historical notes an
 ## Architecture and design
 
 - [RC13: Transactional chain-transition bug chain (SetBest teaching doc)](release/rc13-transactional-chain-transition-fixes.md)
+- [LLD global transaction ownership](diagrams/architecture/lld-global-transactions.md) - MEMPOOL and BLOCK share `pMemory`; the second begin is rejected, and producer orphans are processed only after the block transaction is released
+- [Process.cpp activation transaction](diagrams/architecture/process-cpp.md)
+- [State.cpp SetBest ownership](diagrams/architecture/state-cpp.md)
+- [Tritium.cpp transaction guards](diagrams/architecture/tritium-cpp.md)
+- [LedgerDB hash-keyed block reads](diagrams/architecture/ledgerdb-block-reads.md)
 - [Blockchain flow alignment](BLOCKCHAIN_FLOW_ALIGNMENT.md)
 - [Block production flow](architecture/BLOCK_PRODUCTION_FLOW.md)
 - [Mempool semantics](architecture/MEMPOOL.md)

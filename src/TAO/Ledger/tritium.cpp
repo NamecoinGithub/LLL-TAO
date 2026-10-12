@@ -726,8 +726,13 @@ namespace TAO
             /* Process the block state. */
             TAO::Ledger::BlockState state(*this);
 
-            /* Start the database transaction. */
-            LLD::TxnBegin();
+            /* Start the database transaction. The guard aborts on every later
+             * return, including failed ReadTx/WriteTx checks, so the process-wide
+             * physical slot is not left claimed after this function exits.
+             * See docs/diagrams/architecture/tritium-cpp.md. */
+            LLD::TransactionGuard txn;
+            if(!txn)
+                return debug::error(FUNCTION, "failed to begin block transaction");
 
             /* Write the transactions. */
             for(const auto& proof : vtx)
@@ -794,16 +799,12 @@ namespace TAO
             if(!LLD::Ledger->WriteTx(hashProducer, producer))
                 return debug::error(FUNCTION, "failed to write producer to disk");
 
-            /* Make sure we don't have any orphans to process from the producer. */
-            mempool.ProcessOrphans(hashProducer);
-
-            /* Accept the block state. */
+            /* Accept the block state. Index() failure returns with the guard still
+             * armed, which aborts unless SetBest already released the slot.
+             * Do not ProcessOrphans while this guard is armed: that path begins
+             * FLAGS::MEMPOOL, and MEMPOOL shares pMemory with this BLOCK slot. */
             if(!state.Index())
-            {
-                LLD::TxnAbort();
-
                 return false;
-            }
 
             /* Commit the transaction to database.
              * Case A (block became new best chain): SetBest() committed the
@@ -815,6 +816,18 @@ namespace TAO
              * from TxnCommit() is a genuine failure signal in this path. */
             if(LLD::HasOpenTransaction() && !LLD::TxnCommit())
                 return debug::error(FUNCTION, "disk transaction commit failed for block acceptance");
+
+            /* Commit, or SetBest's internal commit, already released the slot. */
+            txn.Release();
+
+            /* The physical slot is free, so a descendant Accept can begin
+             * FLAGS::MEMPOOL. Only do that once Connect has published this
+             * producer as the sigchain tip. A stored side chain has not updated
+             * ReadLast; processing those orphans would record a false conflict
+             * and must leave them queued. */
+            uint512_t hashLast = 0;
+            if(LLD::Ledger->ReadLast(producer.hashGenesis, hashLast) && hashLast == hashProducer)
+                mempool.ProcessOrphans(hashProducer);
 
             /* Check for best chain. */
             if(GetHash() == ChainState::hashBestChain.load() && !ChainState::Synchronizing())

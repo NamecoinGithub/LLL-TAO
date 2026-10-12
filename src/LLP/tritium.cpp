@@ -3631,7 +3631,10 @@ namespace LLP
                         /* Start our ACID transaction in case we have any failures here. */
                         { LOCK(CLIENT_MUTEX);
 
-                            LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            /* Abort this MERKLE journal if indexing throws on this network thread. */
+                            LLD::TransactionGuard txn(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!txn)
+                                return debug::drop(NODE, "FLAGS::LOOKUP: ", hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                             /* Build indexes if we don't have them. */
                             if(!LLD::Client->HasIndex(hashTx))
@@ -3649,7 +3652,9 @@ namespace LLP
                             TAO::API::Indexing::IndexDependant(hashTx, tx);
 
                             /* Commit our ACID transaction across LLD instances. */
-                            LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                            if(!LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                return debug::error(FUNCTION, hashTx.SubString(), " REJECTED: failed to commit merkle transaction");
+                            txn.Release();
                         }
 
                         /* Verbose=3 dumps transaction data. */
@@ -3687,7 +3692,10 @@ namespace LLP
                             /* Start our ACID transaction in case we have any failures here. */
                             { LOCK(CLIENT_MUTEX);
 
-                                LLD::TxnBegin(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                /* Abort this MERKLE journal if connect or indexing throws after begin. */
+                                LLD::TransactionGuard txn(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                if(!txn)
+                                    return debug::error(FUNCTION, hashTx.SubString(), " REJECTED: ", debug::GetLastError());
 
                                 /* Only write to disk and index if not completed already. */
                                 if(!LLD::Client->HasIndex(hashTx))
@@ -3715,7 +3723,9 @@ namespace LLP
                                 }
 
                                 /* Commit our ACID transaction across LLD instances. */
-                                LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE);
+                                if(!LLD::TxnCommit(TAO::Ledger::FLAGS::BLOCK, LLD::INSTANCES::MERKLE))
+                                    return debug::error(FUNCTION, hashTx.SubString(), " REJECTED: failed to commit merkle transaction");
+                                txn.Release();
                             }
 
                             /* Write Success to log. */

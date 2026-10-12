@@ -29,6 +29,7 @@ ________________________________________________________________________________
 
 #include <vector>
 #include <queue>
+#include <optional>
 
 /* Global TAO namespace. */
 namespace TAO
@@ -485,14 +486,20 @@ namespace TAO
             if(nValidated != nConnectDepth)
                 return debug::error(FUNCTION, "candidate ancestry depth mismatch");
 
+            /* Abort this activation's BLOCK transaction on unwind only while
+             * this thread still owns the slot. SetBest() may release it before
+             * returning false or throwing. See docs/diagrams/architecture/process-cpp.md. */
+            std::optional<LLD::TransactionGuard> txn;
             if(fTransaction)
-                LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+            {
+                txn.emplace(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(!*txn)
+                    return debug::error(FUNCTION, "failed to begin block transaction");
+            }
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
             if(!stateActivation.SetBest())
             {
-                if(fTransaction)
-                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                 ChainState::fChainReorg.store(false);
                 return false;
             }
@@ -507,6 +514,10 @@ namespace TAO
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed for candidate activation");
             }
+
+            /* Success released the slot, either inside SetBest() or above. */
+            if(txn)
+                txn->Release();
 
             debug::log(0, FUNCTION, "activated validated candidate source=",
                 (pszSource ? pszSource : "ledger"),

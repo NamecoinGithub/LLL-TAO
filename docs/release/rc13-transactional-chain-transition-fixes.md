@@ -380,8 +380,8 @@ the transaction ownership model introduced in PR #653/#654.
 
 All tests live in `tests/unit/TAO/Ledger/setbest_txn_ordering.cpp`:
 
-1. **Call site #4 abort-on-failure** (PR #651) — `TxnCommit` never reached when
-   `SetBest()` fails; `TxnAbort` called instead.
+1. **Call site #4 abort-on-failure** (PR #651) — `TxnCommit` is not reached when
+   `SetBest()` fails; the caller's transaction guard performs the rollback.
 2. **Mempool ordering** (PR #651) — resurrect/remove only fire after `TxnCommit`;
    untouched when the disk phase fails.
 3. **`ChainState` atomics ordering** (PR #651) — only published post-`TxnCommit`;
@@ -395,12 +395,12 @@ All tests live in `tests/unit/TAO/Ledger/setbest_txn_ordering.cpp`:
    transaction still committed.
 7. **`TxnCommit()` MINER/SANITIZE case** (PR #652) — returns `true` for these guard
    flags.
-8. **Real-code Test 4** (PR #653) — real `SetBest()` on a block with a missing vtx
-   transaction: asserts `HasIndex()` is `false` (rolled back by `TxnAbort`), `ChainState`
-   atomics unchanged, no transaction left open.
-9. **Real-code Test 5** (PR #653) — mirrors the real call-site #4 pattern
-   (`TxnBegin()` → `SetBest()` → outer `TxnAbort()`); confirms the outer abort is a safe
-   no-op after the self-containment fix.
+8. **Real-code Test 4** (PR #653) — standalone `SetBest()` on a block with a missing
+   vtx transaction: asserts `HasIndex()` is `false` (rolled back by its self-owned
+   guard), `ChainState` atomics unchanged, and no transaction left open.
+9. **Real-code Test 5** (PR #653) — mirrors the real call-site #4 pattern with an
+   outer transaction; confirms failed `SetBest()` leaves it open for the caller's
+   guard to abort and roll back pending writes.
 10. **Real-code Test 6** (PR #653) — `mempool.Size()` is identical before/after a
     failing `SetBest()` call, confirming mempool is never touched when the disk phase
     fails.

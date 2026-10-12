@@ -383,6 +383,10 @@ namespace TAO
                 void Disarm(){ fActive = false; }
             } depTailGuard(this, hashTx);
 
+            /* Set only after TxnBegin succeeds. Cleared after commit or an explicit
+             * abort so the catch does not release a transaction this call no longer owns. */
+            bool fMempoolTxnActive = false;
+
             try
             {
                 /* Reset our request count if we received it. */
@@ -650,11 +654,16 @@ namespace TAO
                 }
 
                 /* Connect transaction in memory. */
-                LLD::TxnBegin(FLAGS::MEMPOOL);
+                if(!LLD::TxnBegin(FLAGS::MEMPOOL))
+                    return debug::error(FUNCTION, "tx ", hashTx.SubString(), " REJECTED: failed to begin mempool transaction");
+
+                fMempoolTxnActive = true;
+
                 if(!tx.Connect(FLAGS::MEMPOOL))
                 {
                     /* Abort memory commits on failures. */
                     LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
 
                     /* Check if Transaction::Connect() classified this as a
                      * local-state-dependent failure (e.g. coinbase appears
@@ -681,6 +690,7 @@ namespace TAO
 
                 /* Commit new memory into database states. */
                 LLD::TxnCommit(FLAGS::MEMPOOL);
+                fMempoolTxnActive = false;
 
                 /* Set the internal memory. */
                 mapLedger[hashTx] = tx;
@@ -727,7 +737,28 @@ namespace TAO
             }
             catch(const std::exception& e)
             {
+                /* Connect or later processing can throw after begin. Release the
+                 * process-wide MEMPOOL slot before returning, or later accepts
+                 * stay rejected until this thread exits. */
+                if(fMempoolTxnActive)
+                {
+                    LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
+                }
+
                 return debug::error(FUNCTION, "REJECTED: exception encountered ", e.what());
+            }
+            catch(...)
+            {
+                /* Same release as the typed catch. A non-std exception must not
+                 * leave the process-wide MEMPOOL slot claimed. */
+                if(fMempoolTxnActive)
+                {
+                    LLD::TxnAbort(FLAGS::MEMPOOL);
+                    fMempoolTxnActive = false;
+                }
+
+                return debug::error(FUNCTION, "REJECTED: exception encountered");
             }
 
             return false;
@@ -1145,14 +1176,19 @@ namespace TAO
                     /* We don't run this check on our first transaction. */
                     if(!vtx[n].IsFirst())
                     {
-                        /* Start a ACID transaction (to be disposed). */
-                        LLD::TxnBegin(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-                        bool fSanitizeTxnActive = true;
-
-                        /* Check the contracts for our root transaction to make sure it's valid. */
+                        /* Disposable overlay. Scope ends before the MEMPOOL disconnect
+                         * below so a throw from Sanitize() aborts this slot and
+                         * cannot reject that later begin. */
                         bool fContractInvalid = false;
-                        try
                         {
+                            LLD::TransactionGuard txn(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
+                            if(!txn)
+                            {
+                                debug::error(FUNCTION, "failed to begin sanitize transaction");
+                                return;
+                            }
+
+                            /* Check the contracts for our root transaction to make sure it's valid. */
                             for(const auto& rContract : vtx[n].Contracts())
                             {
                                 /* Sanitize the contract. */
@@ -1163,17 +1199,6 @@ namespace TAO
                                 }
                             }
                         }
-                        catch(...)
-                        {
-                            if(fSanitizeTxnActive)
-                                LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
-
-                            throw;
-                        }
-
-                        /* Abort the mempool ACID transaction once the contract is sanitized */
-                        if(fSanitizeTxnActive)
-                            LLD::TxnAbort(TAO::Ledger::FLAGS::SANITIZE, LLD::INSTANCES::MEMORY);
 
                         /* Check that transaction is in sequence. */
                         if(vtx[n].hashPrevTx != hashLast || fContractInvalid)
@@ -1202,10 +1227,59 @@ namespace TAO
                                 TAO::API::Transaction::IndexLock(rTransaction.first));
 
                             /* Begin the memory transaction. */
-                            LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            if(!LLD::TxnBegin(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY))
+                            {
+                                debug::error(FUNCTION, "failed to begin mempool transaction");
+                                return;
+                            }
 
-                            /* Track whether the LLD transaction is still active (not aborted). */
-                            bool fTxnActive = true;
+                            /* Abort by default on unexpected exceptions. A Delete() failure
+                             * after a successful Remove() is handled separately below. */
+                            struct MempoolCheckRelease
+                            {
+                                bool fActive = true;
+
+                                void Abort()
+                                {
+                                    if(!fActive)
+                                        return;
+
+                                    LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    fActive = false;
+                                }
+
+                                void Commit()
+                                {
+                                    if(!fActive)
+                                        return;
+
+                                    LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    fActive = false;
+                                }
+
+                                ~MempoolCheckRelease()
+                                {
+                                    if(!fActive)
+                                        return;
+
+                                    try
+                                    {
+                                        LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                    }
+                                    catch(...)
+                                    {
+                                        try
+                                        {
+                                            LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                                        }
+                                        catch(...)
+                                        {
+                                        }
+                                    }
+
+                                    fActive = false;
+                                }
+                            } txn;
 
                             /* Disconnect all transactions in reverse order. */
                             for(auto tx = vtx.rbegin(); tx != vtx.rend(); ++tx)
@@ -1250,8 +1324,7 @@ namespace TAO
                                 if(!fDisconnected)
                                 {
                                     /* Revert any partial LLD ACID state changes. */
-                                    LLD::TxnAbort(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
-                                    fTxnActive = false;
+                                    txn.Abort();
 
                                     /* Force-evict this stuck orphan so it doesn't loop forever.
                                      * TxnAbort has already reverted any partial memory changes,
@@ -1263,7 +1336,7 @@ namespace TAO
                                 }
 
                                 /* Erase from the memory map. */
-                                Remove(hashTx);
+                                const bool fRemoved = Remove(hashTx);
 
                                 /* Remove the API sessions indexes if disconnecting a mempool transaction. */
                                 if(LLD::Sessions->Active(tx->hashGenesis))
@@ -1273,7 +1346,19 @@ namespace TAO
                                         TAO::API::Transaction(*tx);
 
                                     /* Make sure indexes are deleted. */
-                                    if(wtx.Delete(hashTx))
+                                    bool fDeleted = false;
+                                    try
+                                    {
+                                        fDeleted = wtx.Delete(hashTx);
+                                    }
+                                    catch(...)
+                                    {
+                                        if(fRemoved)
+                                            txn.Commit();
+                                        throw;
+                                    }
+
+                                    if(fDeleted)
                                         debug::log(0, FUNCTION, "DELETED API session indexes for ", hashTx.SubString());
                                 }
 
@@ -1285,9 +1370,8 @@ namespace TAO
                                     debug::notice(FUNCTION, "ROOT ORPHAN: disconnected root with FLAGS::ERASE: ", hashTx.SubString());
                             }
 
-                            /* Only commit if the LLD transaction was not already aborted. */
-                            if(fTxnActive)
-                                LLD::TxnCommit(FLAGS::MEMPOOL, LLD::INSTANCES::MEMORY);
+                            /* Commit after the complete disconnect/removal sweep. */
+                            txn.Commit();
 
                             break;
                         }

@@ -851,10 +851,41 @@ namespace TAO
                  * caller has not already opened one (call sites #1/#2 in legacy.cpp/tritium.cpp
                  * and #3-#5 in chainstate.cpp all open a TxnBegin before calling SetBest()).
                  * A future caller that forgets to open a transaction is self-healed here
-                 * instead of silently hitting TxnCommit with no active transaction. */
-                const bool fOwnedTxn = !LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
-                if(fOwnedTxn)
-                    LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                 * instead of silently hitting TxnCommit with no active transaction.
+                 *
+                 * HasOpenTransaction is process-wide. Treat that journal as an outer
+                 * transaction only when this thread owns PhysicalSlot. A foreign or
+                 * unowned journal must not be written, and failure paths must not
+                 * TxnAbort it through the unowned recovery release. The outer
+                 * transaction must also cover every consensus database SetBest uses. */
+                const bool fJournalOpen = LLD::HasOpenTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                if(fJournalOpen && !LLD::ThreadOwnsTransaction(FLAGS::BLOCK))
+                    return debug::error(FUNCTION, "open block transaction is not owned by this thread");
+
+                if(fJournalOpen && !LLD::ThreadOwnsTransaction(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "open block transaction does not cover consensus instances");
+
+                const bool fOwnedTxn = !fJournalOpen;
+                if(fOwnedTxn && !LLD::TxnBegin(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
+                    return debug::error(FUNCTION, "failed to begin block transaction");
+
+                /* Abort only the transaction this call opened. An exception while
+                 * connecting must not TxnAbort an outer BLOCK owner. The guard
+                 * also skips the abort once TxnCommit releases the slot.
+                 * See docs/diagrams/architecture/state-cpp.md. */
+                struct SelfOwnedTxnGuard
+                {
+                    bool fArmed;
+                    ~SelfOwnedTxnGuard()
+                    {
+                        if(fArmed && LLD::ThreadOwnsTransaction(FLAGS::BLOCK))
+                            LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
+                    }
+                    void Release()
+                    {
+                        fArmed = false;
+                    }
+                } selfTxn{fOwnedTxn};
 
                 /* Get initial block states. */
                 BlockState fork   = ChainState::tStateBest.load();
@@ -875,7 +906,6 @@ namespace TAO
                         longer = longer.Prev();
                         if(!longer)
                         {
-                            LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                             return debug::error(FUNCTION, "failed to find longer ancestor block");
                         }
                     }
@@ -891,7 +921,6 @@ namespace TAO
                     fork = fork.Prev();
                     if(!fork)
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to find ancestor fork block");
                     }
                 }
@@ -952,7 +981,6 @@ namespace TAO
                     /* Disconnect the block. */
                     if(!state.Disconnect())
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to disconnect ", state.GetHash().SubString());
                     }
 
@@ -999,7 +1027,6 @@ namespace TAO
                                 TAO::Ledger::Transaction tx;
                                 if(!LLD::Ledger->ReadTx(hash, tx))
                                 {
-                                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                                     return debug::error(FUNCTION, "transaction not on disk");
                                 }
 
@@ -1030,7 +1057,6 @@ namespace TAO
                     /* Connect the block. */
                     if(!state->Connect())
                     {
-                        LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                         return debug::error(FUNCTION, "failed to connect ", state->GetHash().SubString());
                     }
 
@@ -1068,7 +1094,6 @@ namespace TAO
                                 TAO::Ledger::Transaction tx;
                                 if(!LLD::Ledger->ReadTx(hash, tx))
                                 {
-                                    LLD::TxnAbort(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS);
                                     return debug::error(FUNCTION, "transaction not on disk");
                                 }
 
@@ -1134,6 +1159,10 @@ namespace TAO
                  * instance's commit failed, so the chain transition is aborted. */
                 if(!LLD::TxnCommit(FLAGS::BLOCK, LLD::INSTANCES::CONSENSUS))
                     return debug::error(FUNCTION, "disk transaction commit failed; aborting chain transition");
+
+                /* The durable commit released this owner. Later throws are
+                 * post-commit and must not abort a new transaction. */
+                selfTxn.Release();
 
                 /* -- POST-COMMIT: mempool mutations (safe now that disk is durable) -- */
 
