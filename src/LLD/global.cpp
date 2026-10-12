@@ -295,30 +295,6 @@ namespace LLD
     }
 
 
-    /* Global handler for all LLD instances. */
-    bool HasOpenTransaction(const uint8_t nFlags, const uint16_t nInstances)
-    {
-        /* Memory-only flag modes do not use physical SectorDatabase transactions. */
-        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
-            return false;
-
-        /* Check each database instance that would be opened by TxnBegin(nFlags, nInstances).
-         * Any single instance having pTransaction != nullptr means a transaction is open. */
-        if(Ledger   && (nInstances & INSTANCES::LEDGER)   && Ledger->HasTransaction())
-            return true;
-        if(Contract && (nInstances & INSTANCES::CONTRACT) && Contract->HasTransaction())
-            return true;
-        if(Register && (nInstances & INSTANCES::REGISTER) && Register->HasTransaction())
-            return true;
-        if(Trust    && (nInstances & INSTANCES::TRUST)    && Trust->HasTransaction())
-            return true;
-        if(Legacy   && (nInstances & INSTANCES::LEGACY)   && Legacy->HasTransaction())
-            return true;
-
-        return false;
-    }
-
-
     /* Process-wide owner of each in-flight transaction mode.
      *
      * pMemory, pMiner, pSanitize, and the physical journal are process-wide,
@@ -354,8 +330,9 @@ namespace LLD
      * that aborts every slot this thread still owns when the thread exits, so
      * fOwned cannot outlive the owner and a reused thread id cannot act on the
      * stale overlay. Shutdown rejects new begins, aborts slots owned by the
-     * calling thread, then waits until in-flight transaction calls and every
-     * owned slot have finished before deleting the instances. A physical begin
+     * calling thread, then waits until in-flight transaction calls, including
+     * HasOpenTransaction, and every owned slot have finished before deleting
+     * the instances. A physical begin
      * is rejected when a selected journal is already open and this thread does
      * not own it, so SectorDatabase::TxnBegin cannot replace that journal.
      * After the slot is claimed, a throw from MemoryBegin or a selected journal
@@ -380,11 +357,13 @@ namespace LLD
     };
 
 
-    /* Barrier shared by TxnBegin, TxnCommit, TxnAbort, and Shutdown.
-     * nInFlight counts callers inside those functions. nOwned counts claimed
-     * slots. Shutdown sets fShuttingDown, then waits for both counters before
-     * clearing fAlive and deleting the instances. Slot mutexes are never taken
-     * while this mutex is held. */
+    /* Barrier shared by TxnBegin, TxnCommit, TxnAbort, HasOpenTransaction, and
+     * Shutdown. nInFlight counts callers inside those functions. nOwned counts
+     * claimed slots. Shutdown sets fShuttingDown, then waits for both counters
+     * before clearing fAlive and deleting the instances. Slot mutexes are never
+     * taken while this mutex is held. HasOpenTransaction uses the mutate entry
+     * so an in-progress read finishes before deletion, and a closed instance
+     * set returns false without being touched. */
     struct TxnLifetime
     {
         std::mutex MUTEX;
@@ -451,6 +430,37 @@ namespace LLD
             return fHeld;
         }
     };
+
+
+    /* Global handler for all LLD instances. */
+    bool HasOpenTransaction(const uint8_t nFlags, const uint16_t nInstances)
+    {
+        /* Memory-only flag modes do not use physical SectorDatabase transactions. */
+        if(nFlags == TAO::Ledger::FLAGS::MEMPOOL || nFlags == TAO::Ledger::FLAGS::MINER || nFlags == TAO::Ledger::FLAGS::SANITIZE)
+            return false;
+
+        /* Same barrier as TxnBegin, TxnCommit, and TxnAbort. Shutdown waits for
+         * this read before deleting the instances. After they are closed, do
+         * not touch the pointers. */
+        const TxnLifetimeGuard life(TxnEntry::MUTATE);
+        if(!life)
+            return false;
+
+        /* Check each database instance that would be opened by TxnBegin(nFlags, nInstances).
+         * Any single instance having pTransaction != nullptr means a transaction is open. */
+        if(Ledger   && (nInstances & INSTANCES::LEDGER)   && Ledger->HasTransaction())
+            return true;
+        if(Contract && (nInstances & INSTANCES::CONTRACT) && Contract->HasTransaction())
+            return true;
+        if(Register && (nInstances & INSTANCES::REGISTER) && Register->HasTransaction())
+            return true;
+        if(Trust    && (nInstances & INSTANCES::TRUST)    && Trust->HasTransaction())
+            return true;
+        if(Legacy   && (nInstances & INSTANCES::LEGACY)   && Legacy->HasTransaction())
+            return true;
+
+        return false;
+    }
 
 
     static void BeginTxnShutdown()
