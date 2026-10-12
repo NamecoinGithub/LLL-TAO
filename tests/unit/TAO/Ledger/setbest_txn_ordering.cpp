@@ -28,10 +28,10 @@ ________________________________________________________________________________
  *     a valid transaction still has its data committed after the overall return
  *     value is false.
  *
- * Tests 1-3 below use inline simulation / ordering-assertion infrastructure so
- * that they compile and run without a live LLD database or full chain state —
- * following the same pattern used in validate_vtx_consistency.cpp and
- * filter_mempool_only_predecessor.cpp.
+ * The TxnCommit return-value tests use inline simulation / ordering-assertion
+ * infrastructure so that they compile and run without a live LLD database or
+ * full chain state — following the same pattern used in
+ * validate_vtx_consistency.cpp and filter_mempool_only_predecessor.cpp.
  *
  *  4. The MINER and SANITIZE early-return paths return true (intentional
  *     short-circuit, not a failure).
@@ -125,6 +125,60 @@ namespace
         }
     };
 
+
+    struct LogicalGuard
+    {
+        bool ownedLogical{false};
+
+        LogicalGuard()
+        {
+            config::fTestNet.store(true);
+            config::mapArgs["-testnet"] = "1";
+
+            if(!LLD::Logical)
+            {
+                LLD::Logical = new LLD::LogicalDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE);
+                ownedLogical = true;
+            }
+        }
+
+        ~LogicalGuard()
+        {
+            if(ownedLogical)
+            {
+                delete LLD::Logical;
+                LLD::Logical = nullptr;
+            }
+        }
+    };
+
+
+    struct ClientGuard
+    {
+        bool ownedClient{false};
+
+        ClientGuard()
+        {
+            config::fTestNet.store(true);
+            config::mapArgs["-testnet"] = "1";
+
+            if(!LLD::Client)
+            {
+                LLD::Client = new LLD::ClientDB(LLD::FLAGS::CREATE | LLD::FLAGS::FORCE, 1000000);
+                ownedClient = true;
+            }
+        }
+
+        ~ClientGuard()
+        {
+            if(ownedClient)
+            {
+                delete LLD::Client;
+                LLD::Client = nullptr;
+            }
+        }
+    };
+
 } /* anonymous namespace */
 
 
@@ -146,6 +200,33 @@ TEST_CASE("LLD::TxnCommit returns false with no active transaction",
          * LLD::TxnCommit must return false. */
         const bool fResult = LLD::TxnCommit(0, LLD::INSTANCES::LEDGER);
         REQUIRE_FALSE(fResult);
+    }
+}
+
+
+TEST_CASE("HasOpenTransaction checks Logical and Client journals",
+          "[lld][txncommit][ownership]")
+{
+    SECTION("Logical journal")
+    {
+        LogicalGuard logicalGuard;
+        LLD::TransactionGuard txn(0, LLD::INSTANCES::LOGICAL);
+        REQUIRE(txn);
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LOGICAL));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::LOGICAL);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::LOGICAL));
+    }
+
+    SECTION("Client journal")
+    {
+        ClientGuard clientGuard;
+        LLD::TransactionGuard txn(0, LLD::INSTANCES::CLIENT);
+        REQUIRE(txn);
+        REQUIRE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CLIENT));
+
+        LLD::TxnAbort(0, LLD::INSTANCES::CLIENT);
+        REQUIRE_FALSE(LLD::HasOpenTransaction(0, LLD::INSTANCES::CLIENT));
     }
 }
 

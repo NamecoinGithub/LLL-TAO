@@ -454,6 +454,10 @@ namespace LLD
             return true;
         if(Register && (nInstances & INSTANCES::REGISTER) && Register->HasTransaction())
             return true;
+        if(Logical  && (nInstances & INSTANCES::LOGICAL)  && Logical->HasTransaction())
+            return true;
+        if(Client   && (nInstances & INSTANCES::CLIENT)   && Client->HasTransaction())
+            return true;
         if(Trust    && (nInstances & INSTANCES::TRUST)    && Trust->HasTransaction())
             return true;
         if(Legacy   && (nInstances & INSTANCES::LEGACY)   && Legacy->HasTransaction())
@@ -800,21 +804,11 @@ namespace LLD
 
 
     /* True when TxnBegin would open a physical journal that is already open.
-     * HasOpenTransaction does not cover LOGICAL or CLIENT, which a MERKLE begin
-     * still opens. The caller must not own PhysicalSlot, so an open journal has
-     * no matching owner. */
+     * The caller must not own PhysicalSlot, so an open journal has no matching
+     * owner. */
     static bool UnownedJournalOpen(const uint16_t nInstances)
     {
-        if(HasOpenTransaction(0, nInstances))
-            return true;
-
-        if(Logical && (nInstances & INSTANCES::LOGICAL) && Logical->HasTransaction())
-            return true;
-
-        if(Client && (nInstances & INSTANCES::CLIENT) && Client->HasTransaction())
-            return true;
-
-        return false;
+        return HasOpenTransaction(0, nInstances);
     }
 
 
