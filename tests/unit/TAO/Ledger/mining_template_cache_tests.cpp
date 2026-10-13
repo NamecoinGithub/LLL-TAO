@@ -20,6 +20,7 @@ ________________________________________________________________________________
 #include <LLD/include/global.h>
 #include <LLC/include/random.h>
 #include <Legacy/types/transaction.h>
+#include <Util/include/debug.h>
 #include <Util/include/runtime.h>
 
 #include <atomic>
@@ -166,9 +167,12 @@ TEST_CASE("Mining templates skip spent legacy inputs and reconsider them after r
     REQUIRE(containsCandidate());
 
     REQUIRE(LLD::Legacy->WriteSpend(guard.hashFunding, 0));
+    debug::strLastError.clear();
     TAO::Ledger::AddTransactions(block);
     REQUIRE_FALSE(containsCandidate());
     REQUIRE(TAO::Ledger::mempool.Has(guard.hashLegacy));
+    REQUIRE(debug::GetLastError().find("prev tx " + guard.hashFunding.SubString()
+        + " is already spent") == std::string::npos);
 
     REQUIRE(LLD::Legacy->EraseSpend(guard.hashFunding, 0));
     TAO::Ledger::AddTransactions(block);
