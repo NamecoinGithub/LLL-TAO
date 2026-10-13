@@ -48,7 +48,8 @@ namespace TAO
          *  @param[out] tx The transaction object being created
          *  @param[in] nScheme The key scheme to be used.
          *  @param[in] pKnownLast Optional authoritative predecessor transaction for this
-         *             sigchain, already selected into the block's vtx by AddTransactions().
+         *             sigchain, selected from the block's vtx or committed ledger.
+         *             A default transaction explicitly selects a new sigchain.
          *             When supplied, this is used verbatim as the chaining predecessor
          *             instead of independently re-querying sessions/mempool/disk, which
          *             closes a TOCTOU race where a newer sigchain transaction submitted
@@ -81,6 +82,8 @@ namespace TAO
          *  @param[in] pKnownLast Optional authoritative predecessor transaction for the
          *             producer's sigchain, forwarded to CreateTransaction(). See that
          *             function's documentation for why this closes a sequencing race.
+         *             When null, the committed BLOCK ledger tail is used (never
+         *             Sessions or an unselected mempool tail).
          *
          **/
         bool CreateProducer(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
@@ -110,12 +113,18 @@ namespace TAO
          *  @param[in] block The block whose vtx has already been populated by AddTransactions().
          *  @param[in] hashGenesis The sigchain genesis to search for.
          *  @param[out] txOut The matching transaction, if found.
+         *  @param[out] fComplete False if any Tritium vtx entry could not be read
+         *              from the mempool or ledger (vtx stores only hashes). A missing
+         *              match then does not prove that no predecessor was selected, so
+         *              callers must fail or retry instead of falling back to the
+         *              committed ledger tail.
          *
          *  @return true if a matching transaction was found in vtx.
          *
          **/
         bool FindProducerGenesisTxInVtx(const TAO::Ledger::TritiumBlock& block,
-                                        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut);
+                                        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut,
+                                        bool& fComplete);
 
 
 
@@ -284,14 +293,15 @@ namespace TAO
 
             SingleflightToken BeginOrJoinMiningTemplateInFlight(const uint32_t nChannel,
                                                                 const uint256_t& hashDynamicGenesis,
-                                                                bool& fIsOwner);
+                                                                bool& fIsOwner,
+                                                                const uint1024_t& hashBuildTip = uint1024_t(0));
 
             bool WaitForMiningTemplateInFlight(const uint32_t nChannel,
                                                const SingleflightToken nToken,
                                                const std::chrono::milliseconds nTimeout,
                                                uint256_t& hashOut);
 
-            void CompleteMiningTemplateInFlight(const SingleflightToken nToken,
+            bool CompleteMiningTemplateInFlight(const SingleflightToken nToken,
                                                 const uint32_t nChannel,
                                                 const uint256_t& hashDynamicGenesis,
                                                 const uint64_t nExtraNonce);
@@ -299,9 +309,12 @@ namespace TAO
             void AbandonMiningTemplateInFlight(const SingleflightToken nToken,
                                                const uint32_t nChannel);
 
-            void StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
+            bool StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
                                                          const uint256_t& hashDynamicGenesis,
-                                                         const uint64_t nExtraNonce);
+                                                         const uint64_t nExtraNonce,
+                                                         const uint1024_t& hashBuildTip = uint1024_t(0));
+
+            std::size_t MiningTemplateCacheSizeForTesting(const uint32_t nChannel);
 
             void ClearMiningTemplateCacheForTesting(const uint32_t nChannel);
             std::size_t MiningTemplateInFlightCountForTesting(const uint32_t nChannel);

@@ -194,13 +194,23 @@ namespace TAO::Ledger
          *  is evicted once the capacity is exceeded.  Takes an exclusive
          *  (writer) lock; the new entry is allocated outside the lock to
          *  keep the critical section minimal.
+         *
+         *  When hashBuildTip is non-zero the committed tip is revalidated
+         *  under the writer lock.  SetBest() publishes hashBestChain before
+         *  ClearMiningTemplateCaches() takes this lock, so a publish ordered
+         *  after the clear always observes the new tip and is rejected,
+         *  while a publish ordered before the clear is erased by it.
+         *  Returns false when the entry was rejected as stale.
          **/
-        void Store(const MiningTemplateCacheEntry& entry)
+        bool Store(const MiningTemplateCacheEntry& entry, const uint1024_t& hashBuildTip = uint1024_t(0))
         {
             const std::size_t cap = Capacity();
             auto pNew = std::make_shared<const MiningTemplateCacheEntry>(entry);
 
             std::unique_lock<std::shared_mutex> lock(m_mutex);
+            if(!TipCurrent(hashBuildTip))
+                return false;
+
             for(auto it = m_entries.begin(); it != m_entries.end(); ++it)
             {
                 if(*it && (*it)->hashDynamicGenesis == entry.hashDynamicGenesis)
@@ -208,12 +218,14 @@ namespace TAO::Ledger
                     *it = pNew;
                     if(it != m_entries.begin())
                         m_entries.splice(m_entries.begin(), m_entries, it);
-                    return;
+                    return true;
                 }
             }
             m_entries.push_front(pNew);
             while(m_entries.size() > cap)
                 m_entries.pop_back();
+
+            return true;
         }
 
         /** Test/diag: number of entries currently cached. */
@@ -318,33 +330,43 @@ namespace TAO::Ledger
             return pHandle->pResult;
         }
 
-        void CompleteInFlightBuild(const InFlightPtr& pHandle, const MiningTemplateCacheEntry& finalEntry)
+        /* Publishes the owner's result and wakes waiters.  The handle's build tip is
+         * revalidated under the writer lock (see Store()); a build whose tip was
+         * superseded is not inserted into the cache and its waiters receive no
+         * result.  Returns false when the result was rejected as stale. */
+        bool CompleteInFlightBuild(const InFlightPtr& pHandle, const MiningTemplateCacheEntry& finalEntry)
         {
             if(!pHandle)
-                return;
+                return false;
 
             const std::size_t cap = Capacity();
             auto pNew = std::make_shared<const MiningTemplateCacheEntry>(finalEntry);
 
+            bool fPublished = false;
             {
                 std::unique_lock<std::shared_mutex> lock(m_mutex);
-                bool fReplaced = false;
-                for(auto it = m_entries.begin(); it != m_entries.end(); ++it)
+                fPublished = TipCurrent(pHandle->hashBuildTip);
+
+                if(fPublished)
                 {
-                    if(*it && (*it)->hashDynamicGenesis == finalEntry.hashDynamicGenesis)
+                    bool fReplaced = false;
+                    for(auto it = m_entries.begin(); it != m_entries.end(); ++it)
                     {
-                        *it = pNew;
-                        if(it != m_entries.begin())
-                            m_entries.splice(m_entries.begin(), m_entries, it);
-                        fReplaced = true;
-                        break;
+                        if(*it && (*it)->hashDynamicGenesis == finalEntry.hashDynamicGenesis)
+                        {
+                            *it = pNew;
+                            if(it != m_entries.begin())
+                                m_entries.splice(m_entries.begin(), m_entries, it);
+                            fReplaced = true;
+                            break;
+                        }
                     }
-                }
-                if(!fReplaced)
-                {
-                    m_entries.push_front(pNew);
-                    while(m_entries.size() > cap)
-                        m_entries.pop_back();
+                    if(!fReplaced)
+                    {
+                        m_entries.push_front(pNew);
+                        while(m_entries.size() > cap)
+                            m_entries.pop_back();
+                    }
                 }
 
                 const auto itInflight = m_inflight.find(pHandle->hashDynamicGenesis);
@@ -354,10 +376,12 @@ namespace TAO::Ledger
 
             {
                 std::lock_guard<std::mutex> lock(pHandle->mutex);
-                pHandle->pResult = pNew;
+                pHandle->pResult = fPublished ? pNew : nullptr;
                 pHandle->fComplete = true;
             }
             pHandle->cv.notify_all();
+
+            return fPublished;
         }
 
         void AbandonInFlightBuild(const InFlightPtr& pHandle)
@@ -408,6 +432,12 @@ namespace TAO::Ledger
         }
 
     private:
+        /* Caller must hold m_mutex exclusively.  hashBuildTip == 0 opts out. */
+        static bool TipCurrent(const uint1024_t& hashBuildTip)
+        {
+            return hashBuildTip == 0 || ChainState::hashBestChain.load() == hashBuildTip;
+        }
+
         mutable std::shared_mutex m_mutex;
         /* Front = most recent.  std::list provides O(1) splice-to-front
          * for LRU bookkeeping and stable iterators under concurrent
@@ -440,7 +470,8 @@ namespace TAO::Ledger
         const std::string strReason =
             pszReason ? debug::safe_printstr(" reason=", pszReason) : std::string();
 
-        debug::log(0, FUNCTION, "cleared PRIME/HASH mining template caches", strReason);
+        debug::log(ChainState::Synchronizing() ? 1 : 0, FUNCTION,
+            "cleared PRIME/HASH mining template caches", strReason);
     }
 
 
@@ -464,9 +495,10 @@ namespace TAO::Ledger
 
     /* Scans a block's already-selected vtx entries for the producer genesis. */
     bool FindProducerGenesisTxInVtx(const TAO::Ledger::TritiumBlock& block,
-        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut)
+        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut, bool& fComplete)
     {
         bool fFound = false;
+        fComplete = true;
 
         for(const auto& vtx : block.vtx)
         {
@@ -480,7 +512,12 @@ namespace TAO::Ledger
             TAO::Ledger::Transaction tx;
             bool fHasConflict = false;
             if(!mempool.Get(vtx.second, tx) && !LLD::Ledger->ReadTx(vtx.second, tx, fHasConflict, FLAGS::MEMPOOL))
+            {
+                /* vtx only stores hashes. An unreadable entry may be this genesis'
+                 * selected tail, so the scan cannot prove there is no predecessor. */
+                fComplete = false;
                 continue;
+            }
 
             if(tx.hashGenesis != hashGenesis)
                 continue;
@@ -513,7 +550,12 @@ namespace TAO::Ledger
     static bool ValidateProducerAgainstVtx(const TAO::Ledger::TritiumBlock& block)
     {
         TAO::Ledger::Transaction txExpected;
-        if(!FindProducerGenesisTxInVtx(block, block.producer.hashGenesis, txExpected))
+        bool fComplete = true;
+        const bool fFound = FindProducerGenesisTxInVtx(block, block.producer.hashGenesis, txExpected, fComplete);
+        if(!fComplete)
+            return debug::error(FUNCTION, "could not read every block vtx entry to validate producer sequencing");
+
+        if(!fFound)
             return true; // No dependent transaction for this genesis in the block: nothing to check.
 
         if(block.producer.hashPrevTx != txExpected.GetHash())
@@ -529,15 +571,48 @@ namespace TAO::Ledger
 
 
     /* Looks up the authoritative sigchain predecessor for a producer genesis from the
-     * block's already-selected vtx, returning a pointer usable as CreateTransaction()'s/
-     * CreateProducer()'s pKnownLast argument. The returned pointer aliases txOut, which
-     * must outlive the call site (txOut is caller-owned storage). Factored out because
-     * this exact lookup+pointer pattern is needed at every CreateBlock()/CreateStakeBlock()
+     * block's already-selected vtx, setting pKnownLast to a pointer usable as
+     * CreateTransaction()'s/CreateProducer()'s pKnownLast argument, or nullptr when no
+     * same-genesis transaction was selected. The pointer aliases txOut, which must
+     * outlive the call site (txOut is caller-owned storage). Returns false when a
+     * selected vtx entry can no longer be read (e.g. it was removed from the mempool
+     * after selection): a missing match would then not prove that no predecessor was
+     * selected, and falling back to the committed ledger tail could chain the producer
+     * behind a transaction that is still in vtx. Factored out because this exact
+     * lookup+pointer pattern is needed at every CreateBlock()/CreateStakeBlock()
      * producer-build call site. */
-    static const TAO::Ledger::Transaction* ResolveKnownLastFromVtx(const TAO::Ledger::TritiumBlock& block,
-        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut)
+    static bool ResolveKnownLastFromVtx(const TAO::Ledger::TritiumBlock& block,
+        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut, const TAO::Ledger::Transaction*& pKnownLast)
     {
-        return FindProducerGenesisTxInVtx(block, hashGenesis, txOut) ? &txOut : nullptr;
+        bool fComplete = true;
+        const bool fFound = FindProducerGenesisTxInVtx(block, hashGenesis, txOut, fComplete);
+        if(!fComplete)
+        {
+            pKnownLast = nullptr;
+            return debug::error(FUNCTION, "selected block vtx entry is no longer readable;",
+                " cannot resolve producer predecessor for genesis=", hashGenesis.SubString());
+        }
+
+        pKnownLast = fFound ? &txOut : nullptr;
+        return true;
+    }
+
+
+    /* Resolves the committed BLOCK ledger tail for a sigchain into txOut. Leaves txOut
+     * default-constructed (selecting a new sigchain) when the genesis has no committed
+     * tail. Used when no same-genesis predecessor was selected into the block: Sessions
+     * may still name a disconnected transaction, and a mempool tail may not have been
+     * selected into this block. */
+    static bool ResolveCommittedLast(const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut)
+    {
+        txOut = TAO::Ledger::Transaction();
+
+        uint512_t hashLast = 0;
+        if(LLD::Ledger->ReadLast(hashGenesis, hashLast, FLAGS::BLOCK)
+            && !LLD::Ledger->ReadTx(hashLast, txOut, FLAGS::BLOCK))
+            return debug::error(FUNCTION, "Failed to read producer predecessor.");
+
+        return true;
     }
 
 
@@ -574,12 +649,14 @@ namespace TAO::Ledger
          * agree by construction.  This also aligns with upstream Nexusoft/LLL-TAO's simpler,
          * single-source sequencing contract instead of layering cascading fallbacks on top
          * of a second live query. */
-        if(pKnownLast != nullptr && pKnownLast->hashGenesis == hashGenesis)
+        if(pKnownLast != nullptr)
         {
+            if(pKnownLast->hashGenesis != 0 && pKnownLast->hashGenesis != hashGenesis)
+                return debug::error(FUNCTION, "predecessor belongs to a different sigchain");
+
             txPrev       = *pKnownLast;
-            hashLast     = pKnownLast->GetHash();
-            strSeqSource = "block_vtx";
-            fUsedMempool = true;
+            hashLast     = txPrev.hashGenesis == 0 ? uint512_t(0) : txPrev.GetHash();
+            strSeqSource = "known_predecessor";
         }
         else if(LLD::Sessions->ReadLast(hashGenesis, hashLast))
         {
@@ -924,6 +1001,21 @@ namespace TAO::Ledger
                 continue;
             }
 
+            /* A confirmed conflicting spend can leave a legacy candidate in the
+             * pool. Keep it for possible reorg recovery, but do not retry Connect
+             * on its spent inputs for every new mining template. */
+            bool fSpent = false;
+            for(const auto& input : tx.vin)
+            {
+                if(LLD::Legacy->IsSpent(input.prevout.hash, input.prevout.n))
+                {
+                    fSpent = true;
+                    break;
+                }
+            }
+            if(fSpent)
+                continue;
+
             /* Check transaction for finality. */
             if(!tx.IsFinal())
             {
@@ -1192,8 +1284,9 @@ namespace TAO::Ledger
              * rebuild racing against a transaction that never made it into the block.
              * Using vtx as the single source of truth for both decisions closes that gap. */
             TAO::Ledger::Transaction txVtxLast;
-            const TAO::Ledger::Transaction* pKnownLast =
-                ResolveKnownLastFromVtx(rBlockRet, rBlockRet.producer.hashGenesis, txVtxLast);
+            const TAO::Ledger::Transaction* pKnownLast = nullptr;
+            if(!ResolveKnownLastFromVtx(rBlockRet, rBlockRet.producer.hashGenesis, txVtxLast, pKnownLast))
+                return debug::error(FUNCTION, "Failed to resolve producer predecessor from block vtx.");
 
             const bool fProducerFinalizationRequired =
                 CachedMiningTemplateRequiresProducerFinalization(
@@ -1277,7 +1370,12 @@ namespace TAO::Ledger
                 tNewEntry.block              = rBlockRet;
                 tNewEntry.hashDynamicGenesis = hashDynamicGenesis;
                 tNewEntry.nExtraNonce        = nExtraNonce;
-                tBlockCache[nChannel].Store(tNewEntry);
+                if(!tBlockCache[nChannel].Store(tNewEntry, tStateBest.GetHash()))
+                {
+                    if(pfTipRaceRetry != nullptr)
+                        *pfTipRaceRetry = true;
+                    return false;
+                }
             }
         }
         else //block not cached, set up new block
@@ -1379,7 +1477,9 @@ namespace TAO::Ledger
              * CreateTransaction() independently re-query mempool/disk afterwards. See
              * FindProducerGenesisTxInVtx() for the full rationale. */
             TAO::Ledger::Transaction txVtxLast;
-            const TAO::Ledger::Transaction* pKnownLast = ResolveKnownLastFromVtx(rBlockRet, hashGenesis, txVtxLast);
+            const TAO::Ledger::Transaction* pKnownLast = nullptr;
+            if(!ResolveKnownLastFromVtx(rBlockRet, hashGenesis, txVtxLast, pKnownLast))
+                return debug::error(FUNCTION, "Failed to resolve producer predecessor from block vtx.");
 
             /* Create the new producer transaction for given block.
              * Pass hashDynamicGenesis (miner reward address) so coinbase is routed
@@ -1404,13 +1504,16 @@ namespace TAO::Ledger
                 return debug::error(FUNCTION, "Fresh producer failed vtx sequencing validation.");
 
 
-            /* Follow-up #2: tip-advance abandonment.  Falcon signing took
-             * nProducerMs; if the chain tip moved during that window, the
-             * block we built has a stale hashPrevBlock and cannot be mined.
+            /* Include signing and metadata construction in the tip-race window. */
+            UpdateProducerTimestamp(rBlockRet.producer);
+            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
+            AddBlockData(tStateBest, nChannel, rBlockRet);
+
+            /* Follow-up #2: tip-advance abandonment. If the chain tip moved
+             * during creation/signing, the block has a stale hashPrevBlock.
              * Abandon the in-flight handle so any pre-orphan waiters fall
              * through to a fresh build for the new tip, and return failure
              * so the caller retries with the current tStateBest. */
-            if(fSingleflightOwner)
             {
                 const uint1024_t hashCurrentTip = ChainState::hashBestChain.load();
                 if(hashCurrentTip != hashBuildTip)
@@ -1421,23 +1524,17 @@ namespace TAO::Ledger
                                " current_tip=", hashCurrentTip.SubString(),
                                " reward=", strDynamicReward,
                                " producer_ms=", nProducerMs);
-                    tBlockCache[nChannel].AbandonInFlightBuild(pInFlight);
-                    guard.fCompleted = true; // prevent guard dtor from re-abandoning
+                    if(fSingleflightOwner)
+                    {
+                        tBlockCache[nChannel].AbandonInFlightBuild(pInFlight);
+                        guard.fCompleted = true; // prevent guard dtor from re-abandoning
+                    }
                     if(pfTipRaceRetry != nullptr)
                         *pfTipRaceRetry = true;
                     return debug::error(FUNCTION, "Tip advanced during template build, retry required.");
                 }
             }
 
-            /* Update the producer timestamp */
-            UpdateProducerTimestamp(rBlockRet.producer);
-
-            /* Sign the producer transaction. */
-            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
-
-            /* Populate the block metadata */
-            AddBlockData(tStateBest, nChannel, rBlockRet);
-            
             /* Diagnostic logging for template validation */
             debug::log(2, FUNCTION, "Created new block template for channel ", nChannel);
             debug::log(2, FUNCTION, "  nChannel verified: ", rBlockRet.nChannel);
@@ -1451,11 +1548,19 @@ namespace TAO::Ledger
                 tNewEntry.block              = rBlockRet;
                 tNewEntry.hashDynamicGenesis = hashDynamicGenesis;
                 tNewEntry.nExtraNonce        = nExtraNonce;
-                if(fSingleflightOwner)
-                    tBlockCache[nChannel].CompleteInFlightBuild(pInFlight, tNewEntry);
-                else
-                    tBlockCache[nChannel].Store(tNewEntry);
+                const bool fPublished = fSingleflightOwner
+                    ? tBlockCache[nChannel].CompleteInFlightBuild(pInFlight, tNewEntry)
+                    : tBlockCache[nChannel].Store(tNewEntry, hashBuildTip);
                 guard.fCompleted = true;
+
+                /* A committed tip change between the check above and publication
+                 * makes this template stale; never return or cache it. */
+                if(!fPublished)
+                {
+                    if(pfTipRaceRetry != nullptr)
+                        *pfTipRaceRetry = true;
+                    return debug::error(FUNCTION, "Tip advanced while publishing template, retry required.");
+                }
             }
         }
 
@@ -1484,12 +1589,13 @@ namespace TAO::Ledger
     {
         SingleflightToken BeginOrJoinMiningTemplateInFlight(const uint32_t nChannel,
                                                             const uint256_t& hashDynamicGenesis,
-                                                            bool& fIsOwner)
+                                                            bool& fIsOwner,
+                                                            const uint1024_t& hashBuildTip)
         {
             if(nChannel >= 4)
                 return 0;
 
-            auto pHandle = tBlockCache[nChannel].BeginOrJoinInFlightBuild(hashDynamicGenesis, fIsOwner);
+            auto pHandle = tBlockCache[nChannel].BeginOrJoinInFlightBuild(hashDynamicGenesis, hashBuildTip, fIsOwner);
             const std::uint64_t nToken = g_nextInFlightToken.fetch_add(1, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lock(g_inFlightHandleMutex);
             g_inFlightHandles[nToken] = pHandle;
@@ -1525,20 +1631,20 @@ namespace TAO::Ledger
             return true;
         }
 
-        void CompleteMiningTemplateInFlight(const SingleflightToken nToken,
+        bool CompleteMiningTemplateInFlight(const SingleflightToken nToken,
                                             const uint32_t nChannel,
                                             const uint256_t& hashDynamicGenesis,
                                             const uint64_t nExtraNonce)
         {
             if(nChannel >= 4)
-                return;
+                return false;
 
             MiningTemplateCacheTable::InFlightPtr pHandle;
             {
                 std::lock_guard<std::mutex> lock(g_inFlightHandleMutex);
                 const auto it = g_inFlightHandles.find(nToken);
                 if(it == g_inFlightHandles.end())
-                    return;
+                    return false;
                 pHandle = it->second;
                 g_inFlightHandles.erase(it);
             }
@@ -1546,7 +1652,7 @@ namespace TAO::Ledger
             MiningTemplateCacheEntry tEntry;
             tEntry.hashDynamicGenesis = hashDynamicGenesis;
             tEntry.nExtraNonce = nExtraNonce;
-            tBlockCache[nChannel].CompleteInFlightBuild(pHandle, tEntry);
+            return tBlockCache[nChannel].CompleteInFlightBuild(pHandle, tEntry);
         }
 
         void AbandonMiningTemplateInFlight(const SingleflightToken nToken,
@@ -1568,17 +1674,25 @@ namespace TAO::Ledger
             tBlockCache[nChannel].AbandonInFlightBuild(pHandle);
         }
 
-        void StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
+        bool StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
                                                      const uint256_t& hashDynamicGenesis,
-                                                     const uint64_t nExtraNonce)
+                                                     const uint64_t nExtraNonce,
+                                                     const uint1024_t& hashBuildTip)
         {
             if(nChannel >= 4)
-                return;
+                return false;
 
             MiningTemplateCacheEntry tEntry;
             tEntry.hashDynamicGenesis = hashDynamicGenesis;
             tEntry.nExtraNonce = nExtraNonce;
-            tBlockCache[nChannel].Store(tEntry);
+            return tBlockCache[nChannel].Store(tEntry, hashBuildTip);
+        }
+
+        std::size_t MiningTemplateCacheSizeForTesting(const uint32_t nChannel)
+        {
+            if(nChannel >= 4)
+                return 0;
+            return tBlockCache[nChannel].Size();
         }
 
         void ClearMiningTemplateCacheForTesting(const uint32_t nChannel)
@@ -1636,6 +1750,18 @@ namespace TAO::Ledger
          *    a freshly SetNull()'d block, so the reset is a no-op.
          */
         rProducer = TAO::Ledger::Transaction();
+
+        /* Without an in-block predecessor, only the committed ledger tip is
+         * authoritative. Sessions may still name a disconnected transaction,
+         * and a mempool tail may not have been selected into this template. */
+        TAO::Ledger::Transaction txLedgerLast;
+        if(pKnownLast == nullptr)
+        {
+            if(!ResolveCommittedLast(user->Genesis(), txLedgerLast))
+                return debug::error(FUNCTION, "Failed to create producer transactions.");
+
+            pKnownLast = &txLedgerLast;
+        }
 
         /* Setup the producer transaction. */
         if(!CreateTransaction(user, pin, rProducer, TAO::Ledger::SIGNATURE::BRAINPOOL, pKnownLast))
@@ -1847,7 +1973,20 @@ namespace TAO::Ledger
          * CreateTransaction() independently re-query mempool/disk afterwards. See
          * FindProducerGenesisTxInVtx() for the full rationale. */
         TAO::Ledger::Transaction txVtxLast;
-        const TAO::Ledger::Transaction* pKnownLast = ResolveKnownLastFromVtx(block, user->Genesis(), txVtxLast);
+        const TAO::Ledger::Transaction* pKnownLast = nullptr;
+        if(!ResolveKnownLastFromVtx(block, user->Genesis(), txVtxLast, pKnownLast))
+            return debug::error(FUNCTION, "failed to resolve producer predecessor from block vtx");
+
+        /* Without an in-block predecessor, only the committed ledger tip is
+         * authoritative, matching CreateProducer(). */
+        TAO::Ledger::Transaction txLedgerLast;
+        if(pKnownLast == nullptr)
+        {
+            if(!ResolveCommittedLast(user->Genesis(), txLedgerLast))
+                return debug::error(FUNCTION, "failed to create producer transactions");
+
+            pKnownLast = &txLedgerLast;
+        }
 
         /* Create the producer transaction. */
         TAO::Ledger::Transaction rProducer;

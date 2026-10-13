@@ -43,6 +43,7 @@ ________________________________________________________________________________
 #include <TAO/Ledger/include/constants.h>
 #include <TAO/Ledger/include/difficulty.h>
 #include <TAO/Ledger/include/dispatch.h>
+#include <TAO/Ledger/include/create.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/process.h>
 #include <TAO/Ledger/include/prime.h>
@@ -1280,6 +1281,8 @@ namespace TAO
                 ChainState::hashBestChain      = hash;
                 ChainState::nBestChainTrust    = nChainTrust;
                 ChainState::nBestHeight        = nHeight;
+
+                ClearMiningTemplateCaches("committed best-chain change");
 
                 /* Capture whether this SetBest invocation was completing a chain reorganization.
                  * Must be read before fChainReorg is cleared so the value is preserved for the
