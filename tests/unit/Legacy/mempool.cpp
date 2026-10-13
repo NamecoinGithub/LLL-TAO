@@ -29,6 +29,8 @@ ________________________________________________________________________________
 #include <TAO/Register/types/address.h>
 
 #include <TAO/Ledger/types/mempool.h>
+#include <TAO/Ledger/types/tritium.h>
+#include <TAO/Ledger/include/create.h>
 #include <TAO/Ledger/include/enum.h>
 #include <TAO/Ledger/include/constants.h>
 #include <TAO/Ledger/include/chainstate.h>
@@ -441,4 +443,70 @@ TEST_CASE( "Legacy mempool and memory sequencing tests", "[legacy]")
         REQUIRE(TAO::Ledger::mempool.Accept(wtx));
         REQUIRE(TAO::Ledger::mempool.Has(wtx.GetHash()));
     }
+}
+
+
+TEST_CASE( "Template build evicts legacy mempool tx whose input is spent on chain", "[legacy][mempool][miner]")
+{
+    /* A legacy transaction can sit in mapLegacy after a conflicting spend of its input
+     * confirms (e.g. AddUnchecked during sync, or resurrection around a reorg). Block
+     * connect only removes the block's own transactions, so before this fix every
+     * AddTransactions() call logged "Connect : prev tx ... is already spent" forever. */
+    auto MakeLegacyTx = [](const uint512_t& hashPrev)
+    {
+        Legacy::Transaction tx;
+        tx.nTime = runtime::unifiedtimestamp();
+        tx.vin.push_back(Legacy::TxIn(Legacy::OutPoint(hashPrev, 0)));
+        tx.vout.push_back(Legacy::TxOut(1000, Legacy::Script()));
+        return tx;
+    };
+
+    uint512_t hashSpentPrev = LLC::GetRand512();
+    hashSpentPrev.SetType(TAO::Ledger::LEGACY);
+
+    uint512_t hashUnspentPrev = LLC::GetRand512();
+    hashUnspentPrev.SetType(TAO::Ledger::LEGACY);
+
+    /* Conflicting spend already confirmed on chain. */
+    REQUIRE(LLD::Legacy->WriteSpend(hashSpentPrev, 0));
+    REQUIRE(LLD::Legacy->IsSpent(hashSpentPrev, 0));
+    REQUIRE_FALSE(LLD::Legacy->IsSpent(hashUnspentPrev, 0));
+
+    const Legacy::Transaction txStale   = MakeLegacyTx(hashSpentPrev);
+    const Legacy::Transaction txPending = MakeLegacyTx(hashUnspentPrev);
+
+    REQUIRE_FALSE(txStale.IsCoinBase());
+    REQUIRE_FALSE(txStale.IsCoinStake());
+
+    REQUIRE(TAO::Ledger::mempool.AddUnchecked(txStale));
+    REQUIRE(TAO::Ledger::mempool.AddUnchecked(txPending));
+    REQUIRE(TAO::Ledger::mempool.Has(txStale.GetHash()));
+    REQUIRE(TAO::Ledger::mempool.Has(txPending.GetHash()));
+
+    /* Build the template transaction set twice: the stale tx must be excluded and
+     * evicted on the first pass so successive templates do not re-reject it. */
+    for(uint32_t nPass = 0; nPass < 2; ++nPass)
+    {
+        TAO::Ledger::TritiumBlock block;
+        TAO::Ledger::AddTransactions(block);
+
+        for(const auto& entry : block.vtx)
+        {
+            REQUIRE(entry.second != txStale.GetHash());
+            REQUIRE(entry.second != txPending.GetHash());
+        }
+
+        REQUIRE_FALSE(TAO::Ledger::mempool.Has(txStale.GetHash()));
+
+        /* A tx failing for a recoverable reason (inputs not yet available) is kept. */
+        REQUIRE(TAO::Ledger::mempool.Has(txPending.GetHash()));
+    }
+
+    /* Spend protection is untouched by the eviction. */
+    REQUIRE(LLD::Legacy->IsSpent(hashSpentPrev, 0));
+    REQUIRE_FALSE(LLD::Legacy->IsSpent(hashUnspentPrev, 0));
+
+    /* Cleanup shared state for later tests. */
+    TAO::Ledger::mempool.Remove(txPending.GetHash());
+    REQUIRE(LLD::Legacy->EraseSpend(hashSpentPrev, 0));
 }

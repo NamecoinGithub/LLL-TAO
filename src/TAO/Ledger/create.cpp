@@ -901,6 +901,9 @@ namespace TAO::Ledger
          * legacy block, rather than pulling entire pool if it is very large. */
         TAO::Ledger::mempool.List(vMempool, 100, true);
 
+        /* Legacy transactions with an input already spent on chain can never connect. */
+        std::vector<uint512_t> vRemove;
+
         /* Loop through the list of transactions. */
         TAO::Ledger::BlockState tStateBest = TAO::Ledger::ChainState::tStateBest.load();
         for(const auto& hash : vMempool)
@@ -935,6 +938,30 @@ namespace TAO::Ledger
             if(tx.nTime > runtime::unifiedtimestamp() + runtime::maxdrift())
                 continue;
 
+            /* Evict transactions conflicting with a confirmed spend. Neither block
+             * connect (which removes only the block's own transactions) nor
+             * Mempool::Check() (Tritium only) drops these, so without eviction
+             * every template rebuild re-rejects them in Connect(). Connect()
+             * still performs the authoritative double-spend check below. */
+            bool fSpent = false;
+            for(const auto& txin : tx.vin)
+            {
+                if(LLD::Legacy->IsSpent(txin.prevout.hash, txin.prevout.n))
+                {
+                    debug::log(0, FUNCTION, "Evicting legacy tx ", hash.SubString(10), " from mempool: input ",
+                        txin.prevout.hash.SubString(), ":", txin.prevout.n, " already spent on chain");
+
+                    fSpent = true;
+                    break;
+                }
+            }
+
+            if(fSpent)
+            {
+                vRemove.push_back(hash);
+                continue;
+            }
+
             /* Retrieve tx inputs */
             std::map<uint512_t, std::pair<uint8_t, DataStream> > mapInputs;
             if(!tx.FetchInputs(mapInputs))
@@ -965,6 +992,10 @@ namespace TAO::Ledger
             /* Add the transaction to the block. */
             block.vtx.push_back(std::make_pair(TRANSACTION::LEGACY, hash));
         }
+
+        /* Legacy mempool entries own no overlay state (FLAGS::MEMPOOL Connect writes nothing), so Remove() is complete. */
+        for(const auto& hash : vRemove)
+            mempool.Remove(hash);
     }
 
 
