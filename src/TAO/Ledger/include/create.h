@@ -293,14 +293,15 @@ namespace TAO
 
             SingleflightToken BeginOrJoinMiningTemplateInFlight(const uint32_t nChannel,
                                                                 const uint256_t& hashDynamicGenesis,
-                                                                bool& fIsOwner);
+                                                                bool& fIsOwner,
+                                                                const uint1024_t& hashBuildTip = uint1024_t(0));
 
             bool WaitForMiningTemplateInFlight(const uint32_t nChannel,
                                                const SingleflightToken nToken,
                                                const std::chrono::milliseconds nTimeout,
                                                uint256_t& hashOut);
 
-            void CompleteMiningTemplateInFlight(const SingleflightToken nToken,
+            bool CompleteMiningTemplateInFlight(const SingleflightToken nToken,
                                                 const uint32_t nChannel,
                                                 const uint256_t& hashDynamicGenesis,
                                                 const uint64_t nExtraNonce);
@@ -308,9 +309,12 @@ namespace TAO
             void AbandonMiningTemplateInFlight(const SingleflightToken nToken,
                                                const uint32_t nChannel);
 
-            void StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
+            bool StoreMiningTemplateCacheEntryForTesting(const uint32_t nChannel,
                                                          const uint256_t& hashDynamicGenesis,
-                                                         const uint64_t nExtraNonce);
+                                                         const uint64_t nExtraNonce,
+                                                         const uint1024_t& hashBuildTip = uint1024_t(0));
+
+            std::size_t MiningTemplateCacheSizeForTesting(const uint32_t nChannel);
 
             void ClearMiningTemplateCacheForTesting(const uint32_t nChannel);
             std::size_t MiningTemplateInFlightCountForTesting(const uint32_t nChannel);

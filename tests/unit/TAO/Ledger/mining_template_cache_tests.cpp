@@ -415,3 +415,48 @@ TEST_CASE("Mining template cache singleflight isolates different rewards", "[tao
 
     REQUIRE(TAO::Ledger::Testing::MiningTemplateInFlightCountForTesting(CHANNEL) == 0);
 }
+
+
+TEST_CASE("Mining template cache rejects publication after a committed tip change",
+    "[tao][ledger][singleflight][template_freshness]")
+{
+    constexpr uint32_t CHANNEL = 1;
+    const uint256_t hashReward = MakeReward(0x31);
+
+    TemplateStateGuard guard;
+    TAO::Ledger::Testing::ClearMiningTemplateCacheForTesting(CHANNEL);
+
+    TAO::Ledger::BlockState tipOld;
+    tipOld.nChannel = 1;
+    tipOld.nHeight = 1;
+    guard.Publish(tipOld);
+    const uint1024_t hashOldTip = tipOld.GetHash();
+
+    /* In-flight owner and joined waiter pass their tip check on the old tip. */
+    bool fOwner = false;
+    const auto nOwnerToken = TAO::Ledger::Testing::BeginOrJoinMiningTemplateInFlight(CHANNEL, hashReward, fOwner, hashOldTip);
+    REQUIRE(fOwner);
+    bool fWaiterOwner = true;
+    const auto nWaiterToken = TAO::Ledger::Testing::BeginOrJoinMiningTemplateInFlight(CHANNEL, hashReward, fWaiterOwner, hashOldTip);
+    REQUIRE_FALSE(fWaiterOwner);
+
+    /* SetBest() commits a new tip and clears the caches before publication. */
+    TAO::Ledger::BlockState tipNew = tipOld;
+    tipNew.nHeight++;
+    tipNew.nNonce++;
+    guard.Publish(tipNew);
+    TAO::Ledger::ClearMiningTemplateCaches("test committed tip change");
+
+    REQUIRE_FALSE(TAO::Ledger::Testing::CompleteMiningTemplateInFlight(nOwnerToken, CHANNEL, hashReward, 1));
+    REQUIRE_FALSE(TAO::Ledger::Testing::StoreMiningTemplateCacheEntryForTesting(CHANNEL, hashReward, 2, hashOldTip));
+    REQUIRE(TAO::Ledger::Testing::MiningTemplateCacheSizeForTesting(CHANNEL) == 0);
+    REQUIRE(TAO::Ledger::Testing::MiningTemplateInFlightCountForTesting(CHANNEL) == 0);
+
+    uint256_t hashOut = 0;
+    REQUIRE_FALSE(TAO::Ledger::Testing::WaitForMiningTemplateInFlight(
+        CHANNEL, nWaiterToken, std::chrono::milliseconds(50), hashOut));
+
+    /* Builds against the current tip still publish normally. */
+    REQUIRE(TAO::Ledger::Testing::StoreMiningTemplateCacheEntryForTesting(CHANNEL, hashReward, 3, tipNew.GetHash()));
+    REQUIRE(TAO::Ledger::Testing::MiningTemplateCacheSizeForTesting(CHANNEL) == 1);
+}
