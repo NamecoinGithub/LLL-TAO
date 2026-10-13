@@ -48,7 +48,8 @@ namespace TAO
          *  @param[out] tx The transaction object being created
          *  @param[in] nScheme The key scheme to be used.
          *  @param[in] pKnownLast Optional authoritative predecessor transaction for this
-         *             sigchain, already selected into the block's vtx by AddTransactions().
+         *             sigchain, selected from the block's vtx or committed ledger.
+         *             A default transaction explicitly selects a new sigchain.
          *             When supplied, this is used verbatim as the chaining predecessor
          *             instead of independently re-querying sessions/mempool/disk, which
          *             closes a TOCTOU race where a newer sigchain transaction submitted

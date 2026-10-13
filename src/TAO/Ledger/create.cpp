@@ -574,12 +574,14 @@ namespace TAO::Ledger
          * agree by construction.  This also aligns with upstream Nexusoft/LLL-TAO's simpler,
          * single-source sequencing contract instead of layering cascading fallbacks on top
          * of a second live query. */
-        if(pKnownLast != nullptr && pKnownLast->hashGenesis == hashGenesis)
+        if(pKnownLast != nullptr)
         {
+            if(pKnownLast->hashGenesis != 0 && pKnownLast->hashGenesis != hashGenesis)
+                return debug::error(FUNCTION, "predecessor belongs to a different sigchain");
+
             txPrev       = *pKnownLast;
-            hashLast     = pKnownLast->GetHash();
-            strSeqSource = "block_vtx";
-            fUsedMempool = true;
+            hashLast     = txPrev.hashGenesis == 0 ? uint512_t(0) : txPrev.GetHash();
+            strSeqSource = "known_predecessor";
         }
         else if(LLD::Sessions->ReadLast(hashGenesis, hashLast))
         {
@@ -923,6 +925,21 @@ namespace TAO::Ledger
                 debug::log(2, FUNCTION, "Mempool transaction is Coinbase/Coinstake ", hash.SubString(10));
                 continue;
             }
+
+            /* A confirmed conflicting spend can leave a legacy candidate in the
+             * pool. Keep it for possible reorg recovery, but do not retry Connect
+             * on its spent inputs for every new mining template. */
+            bool fSpent = false;
+            for(const auto& input : tx.vin)
+            {
+                if(LLD::Legacy->IsSpent(input.prevout.hash, input.prevout.n))
+                {
+                    fSpent = true;
+                    break;
+                }
+            }
+            if(fSpent)
+                continue;
 
             /* Check transaction for finality. */
             if(!tx.IsFinal())
@@ -1277,6 +1294,12 @@ namespace TAO::Ledger
                 tNewEntry.block              = rBlockRet;
                 tNewEntry.hashDynamicGenesis = hashDynamicGenesis;
                 tNewEntry.nExtraNonce        = nExtraNonce;
+                if(ChainState::hashBestChain.load() != tStateBest.GetHash())
+                {
+                    if(pfTipRaceRetry != nullptr)
+                        *pfTipRaceRetry = true;
+                    return false;
+                }
                 tBlockCache[nChannel].Store(tNewEntry);
             }
         }
@@ -1404,13 +1427,16 @@ namespace TAO::Ledger
                 return debug::error(FUNCTION, "Fresh producer failed vtx sequencing validation.");
 
 
-            /* Follow-up #2: tip-advance abandonment.  Falcon signing took
-             * nProducerMs; if the chain tip moved during that window, the
-             * block we built has a stale hashPrevBlock and cannot be mined.
+            /* Include signing and metadata construction in the tip-race window. */
+            UpdateProducerTimestamp(rBlockRet.producer);
+            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
+            AddBlockData(tStateBest, nChannel, rBlockRet);
+
+            /* Follow-up #2: tip-advance abandonment. If the chain tip moved
+             * during creation/signing, the block has a stale hashPrevBlock.
              * Abandon the in-flight handle so any pre-orphan waiters fall
              * through to a fresh build for the new tip, and return failure
              * so the caller retries with the current tStateBest. */
-            if(fSingleflightOwner)
             {
                 const uint1024_t hashCurrentTip = ChainState::hashBestChain.load();
                 if(hashCurrentTip != hashBuildTip)
@@ -1421,23 +1447,17 @@ namespace TAO::Ledger
                                " current_tip=", hashCurrentTip.SubString(),
                                " reward=", strDynamicReward,
                                " producer_ms=", nProducerMs);
-                    tBlockCache[nChannel].AbandonInFlightBuild(pInFlight);
-                    guard.fCompleted = true; // prevent guard dtor from re-abandoning
+                    if(fSingleflightOwner)
+                    {
+                        tBlockCache[nChannel].AbandonInFlightBuild(pInFlight);
+                        guard.fCompleted = true; // prevent guard dtor from re-abandoning
+                    }
                     if(pfTipRaceRetry != nullptr)
                         *pfTipRaceRetry = true;
                     return debug::error(FUNCTION, "Tip advanced during template build, retry required.");
                 }
             }
 
-            /* Update the producer timestamp */
-            UpdateProducerTimestamp(rBlockRet.producer);
-
-            /* Sign the producer transaction. */
-            rBlockRet.producer.Sign(user->Generate(rBlockRet.producer.nSequence, pin));
-
-            /* Populate the block metadata */
-            AddBlockData(tStateBest, nChannel, rBlockRet);
-            
             /* Diagnostic logging for template validation */
             debug::log(2, FUNCTION, "Created new block template for channel ", nChannel);
             debug::log(2, FUNCTION, "  nChannel verified: ", rBlockRet.nChannel);
@@ -1636,6 +1656,20 @@ namespace TAO::Ledger
          *    a freshly SetNull()'d block, so the reset is a no-op.
          */
         rProducer = TAO::Ledger::Transaction();
+
+        /* Without an in-block predecessor, only the committed ledger tip is
+         * authoritative. Sessions may still name a disconnected transaction,
+         * and a mempool tail may not have been selected into this template. */
+        TAO::Ledger::Transaction txLedgerLast;
+        if(pKnownLast == nullptr)
+        {
+            uint512_t hashLast = 0;
+            if(LLD::Ledger->ReadLast(user->Genesis(), hashLast, FLAGS::BLOCK)
+                && !LLD::Ledger->ReadTx(hashLast, txLedgerLast, FLAGS::BLOCK))
+                return debug::error(FUNCTION, "Failed to read producer predecessor.");
+
+            pKnownLast = &txLedgerLast;
+        }
 
         /* Setup the producer transaction. */
         if(!CreateTransaction(user, pin, rProducer, TAO::Ledger::SIGNATURE::BRAINPOOL, pKnownLast))
