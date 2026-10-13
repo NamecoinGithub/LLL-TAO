@@ -135,6 +135,21 @@ TEST_CASE("Mining templates use the committed producer predecessor after tip cha
         1, 0, nullptr, uint256_t(0), &unselected));
     REQUIRE(producer.hashPrevTx == unselected.GetHash());
     REQUIRE(producer.nSequence == unselected.nSequence + 1);
+
+    /* A selected vtx hash that can no longer be read must not look like "no
+     * in-block predecessor", which would fall back to the older ledger tail. */
+    TAO::Ledger::TritiumBlock selected;
+    selected.vtx.emplace_back(TAO::Ledger::TRANSACTION::TRITIUM, guard.hashUnselected);
+    TAO::Ledger::Transaction txFound;
+    bool fComplete = false;
+    REQUIRE(TAO::Ledger::FindProducerGenesisTxInVtx(selected, user->Genesis(), txFound, fComplete));
+    REQUIRE(fComplete);
+    REQUIRE(txFound.GetHash() == unselected.GetHash());
+
+    REQUIRE(TAO::Ledger::mempool.Remove(guard.hashUnselected));
+    guard.hashUnselected = 0;
+    REQUIRE_FALSE(TAO::Ledger::FindProducerGenesisTxInVtx(selected, user->Genesis(), txFound, fComplete));
+    REQUIRE_FALSE(fComplete);
 }
 
 TEST_CASE("Mining templates skip spent legacy inputs and reconsider them after reorg",

@@ -82,6 +82,8 @@ namespace TAO
          *  @param[in] pKnownLast Optional authoritative predecessor transaction for the
          *             producer's sigchain, forwarded to CreateTransaction(). See that
          *             function's documentation for why this closes a sequencing race.
+         *             When null, the committed BLOCK ledger tail is used (never
+         *             Sessions or an unselected mempool tail).
          *
          **/
         bool CreateProducer(const memory::encrypted_ptr<TAO::Ledger::Credentials>& user, const SecureString& pin,
@@ -111,12 +113,18 @@ namespace TAO
          *  @param[in] block The block whose vtx has already been populated by AddTransactions().
          *  @param[in] hashGenesis The sigchain genesis to search for.
          *  @param[out] txOut The matching transaction, if found.
+         *  @param[out] fComplete False if any Tritium vtx entry could not be read
+         *              from the mempool or ledger (vtx stores only hashes). A missing
+         *              match then does not prove that no predecessor was selected, so
+         *              callers must fail or retry instead of falling back to the
+         *              committed ledger tail.
          *
          *  @return true if a matching transaction was found in vtx.
          *
          **/
         bool FindProducerGenesisTxInVtx(const TAO::Ledger::TritiumBlock& block,
-                                        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut);
+                                        const uint256_t& hashGenesis, TAO::Ledger::Transaction& txOut,
+                                        bool& fComplete);
 
 
 
