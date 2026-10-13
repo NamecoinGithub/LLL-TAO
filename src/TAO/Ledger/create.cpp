@@ -440,7 +440,8 @@ namespace TAO::Ledger
         const std::string strReason =
             pszReason ? debug::safe_printstr(" reason=", pszReason) : std::string();
 
-        debug::log(0, FUNCTION, "cleared PRIME/HASH mining template caches", strReason);
+        debug::log(ChainState::Synchronizing() ? 1 : 0, FUNCTION,
+            "cleared PRIME/HASH mining template caches", strReason);
     }
 
 
