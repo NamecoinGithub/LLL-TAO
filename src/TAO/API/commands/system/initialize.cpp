@@ -360,7 +360,8 @@ namespace TAO
             jRet["mining_readiness"] = {
                 {"ready", mining.ready}, {"reason", mining.reason},
                 {"epoch", mining.epoch}, {"fresh_peers", mining.peers},
-                {"required_peers", mining.required}, {"local_bypass", mining.bypass}
+                {"required_peers", mining.required}, {"local_bypass", mining.bypass},
+                {"ignored_unresolved_peers", mining.ignored}
             };
 
             /* Populate our sync related data. */
