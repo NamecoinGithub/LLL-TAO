@@ -21,6 +21,7 @@ namespace TAO::Ledger::ChainState
         uint64_t epoch{0};
         uint32_t peers{0};
         uint32_t required{2};
+        uint32_t ignored{0};
         std::string reason;
     };
 
@@ -63,6 +64,12 @@ namespace TAO::Ledger::ChainState
         using Clock = std::chrono::steady_clock;
         static constexpr auto MAX_AGE = std::chrono::seconds(90);
 
+        /* An unresolved peer tip may pause mining only while it can still be
+         * resolved by normal block relay or branch recovery. Past this bound it
+         * stops vetoing (it never supports), so one stale, forked or lying peer
+         * cannot stall template delivery indefinitely. */
+        static constexpr auto UNRESOLVED_VETO_MAX = std::chrono::seconds(90);
+
         void Observe(const void* peer, const std::string& address,
                      const uint1024_t& hash, uint32_t height,
                      Clock::time_point now = Clock::now())
@@ -74,7 +81,13 @@ namespace TAO::Ledger::ChainState
             || it->second.height != height || it->second.address != address
             || it->second.uncertain)
                 cacheValid = false;
-            observations[peer] = {address, hash, height, now, false};
+
+            /* Re-announcing (or churning) an unresolved tip must not restart
+             * the veto bound; only resolved evidence clears it. */
+            Observation observation{address, hash, height, now, false};
+            if(it != observations.end() && it->second.address == address)
+                observation.unresolvedSince = it->second.unresolvedSince;
+            observations[peer] = observation;
         }
 
         /* A contradictory unpaired field cannot refresh or continue to
@@ -163,14 +176,37 @@ namespace TAO::Ledger::ChainState
             std::set<std::string> supporting;
             if(!bypass)
             {
-                for(const auto& item : observations)
+                for(auto& item : observations)
                 {
-                    const auto evidence = item.second.uncertain ? MiningPeerEvidence::UNRESOLVED
-                        : resolve(item.second.hash, item.second.height);
-                    if(evidence == MiningPeerEvidence::UNRESOLVED)
+                    auto& observation = item.second;
+                    const auto evidence = observation.uncertain ? MiningPeerEvidence::UNRESOLVED
+                        : resolve(observation.hash, observation.height);
+                    if(evidence != MiningPeerEvidence::UNRESOLVED)
+                    {
+                        observation.unresolvedSince = Clock::time_point{};
+                        observation.vetoExpiredLogged = false;
+                        if(evidence == MiningPeerEvidence::SUPPORTING)
+                            supporting.insert(observation.address);
+                        continue;
+                    }
+
+                    if(observation.unresolvedSince == Clock::time_point{})
+                        observation.unresolvedSince = now;
+                    if(now - observation.unresolvedSince < UNRESOLVED_VETO_MAX)
+                    {
                         unresolved = true;
-                    else if(evidence == MiningPeerEvidence::SUPPORTING)
-                        supporting.insert(item.second.address);
+                        continue;
+                    }
+
+                    ++status.ignored;
+                    if(!observation.vetoExpiredLogged)
+                    {
+                        observation.vetoExpiredLogged = true;
+                        debug::log(0, "MiningPeerTracker: ignoring unresolved tip from ",
+                                   observation.address, " height=", observation.height,
+                                   " hash=", observation.hash.SubString(),
+                                   " after veto bound expired");
+                    }
                 }
             }
             status.peers = supporting.size();
@@ -201,6 +237,8 @@ namespace TAO::Ledger::ChainState
             uint32_t height;
             Clock::time_point observed;
             bool uncertain;
+            Clock::time_point unresolvedSince{};
+            bool vetoExpiredLogged{false};
         };
 
         void Expire(Clock::time_point now)

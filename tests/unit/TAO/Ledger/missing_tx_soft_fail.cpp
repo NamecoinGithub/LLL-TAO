@@ -812,6 +812,60 @@ TEST_CASE("Contradictory partial peer reports pause readiness even with a quorum
     REQUIRE(check().epoch == ready.epoch);
 }
 
+TEST_CASE("An unresolvable peer tip cannot veto readiness indefinitely",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    MiningPeerTracker tracker;
+    const auto now = MiningPeerTracker::Clock::now();
+    const auto bound = MiningPeerTracker::UNRESOLVED_VETO_MAX;
+    int a, b, c;
+    auto evidence = [](const uint1024_t& hash, uint32_t)
+    {
+        return hash == 1 ? MiningPeerEvidence::SUPPORTING : MiningPeerEvidence::UNRESOLVED;
+    };
+    auto check = [&](auto time)
+    {
+        return tracker.CheckCached(1, 2, false, true, false, false, evidence, time);
+    };
+
+    /* Peer evidence is refreshed periodically (e.g. by SUBSCRIBE retries). */
+    auto refresh = [&](auto time, const uint1024_t& stale)
+    {
+        tracker.Observe(&a, "one", 1, 100, time);
+        tracker.Observe(&b, "two", 1, 100, time);
+        tracker.Observe(&c, "three", stale, 99, time);
+    };
+
+    refresh(now, 0xDEAD);
+    REQUIRE(check(now).reason == "unresolved-peer-tip");
+
+    /* Re-announcing or churning the unresolved tip does not restart the bound. */
+    refresh(now + bound / 2, 0xBEEF);
+    REQUIRE(check(now + bound / 2).reason == "unresolved-peer-tip");
+    refresh(now + bound - std::chrono::seconds(1), 0xDEAD);
+    REQUIRE(check(now + bound - std::chrono::seconds(1)).reason == "unresolved-peer-tip");
+
+    refresh(now + bound, 0xDEAD);
+    const auto expired = check(now + bound);
+    REQUIRE(expired.ready);
+    REQUIRE(expired.peers == 2);
+    REQUIRE(expired.ignored == 1);
+
+    /* Ignored evidence never supports the quorum. */
+    tracker.Remove(&b);
+    REQUIRE(check(now + bound).reason == "insufficient-fresh-peers");
+    tracker.Observe(&b, "two", 1, 100, now + bound);
+    REQUIRE(check(now + bound).ready);
+
+    /* Resolution resets the bound so a later unresolved tip vetoes again. */
+    const auto later = now + bound + std::chrono::seconds(1);
+    tracker.Observe(&c, "three", 1, 100, later);
+    REQUIRE(check(later).ignored == 0);
+    tracker.Observe(&c, "three", 0xDEAD, 101, later);
+    REQUIRE(check(later).reason == "unresolved-peer-tip");
+}
+
 TEST_CASE("Split peer catch-up gates readiness without changing committed work",
     "[ledger][mining-readiness][template_freshness]")
 {

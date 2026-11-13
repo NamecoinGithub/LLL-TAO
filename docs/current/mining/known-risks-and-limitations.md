@@ -138,13 +138,22 @@ after that point can still race with a write, and bytes already sent or buffered
 cannot be recalled. There
 is no miner-side cancellation message, so a template issued while current may
 later be rejected if its epoch is revoked. `system/get/info` includes `mining_readiness` with `ready`,
-`reason`, `epoch`, `fresh_peers` (supporting distinct IPs), `required_peers`, and
-`local_bypass`. Existing `synchronized`/`syncing` fields are unchanged and need
+`reason`, `epoch`, `fresh_peers` (supporting distinct IPs), `required_peers`,
+`local_bypass`, and `ignored_unresolved_peers`. Existing `synchronized`/`syncing` fields are unchanged and need
 not agree with mining readiness; no Interface display change is included.
 
 Distinct IPs are not proof of independent peers or the global best chain.
-An unresolved minority report can deliberately pause mining, an availability
-tradeoff. Admission uses a final point-in-time check, not an atomic guarantee
+An unresolved minority report can pause mining, an availability tradeoff, but
+only for **90 seconds** (`UNRESOLVED_VETO_MAX`) of continuously unresolved
+evidence per peer. Real tips resolve well within that bound through block relay
+or peer-best recovery; after it, the peer's evidence stops vetoing (it never
+counts toward the supporting quorum) and is reported in
+`ignored_unresolved_peers`. Re-announcing or changing the unresolved hash does
+not restart the bound; only evidence that resolves locally does. Without this
+bound a single peer stuck on an unknown fork tip, or one advertising a heavier
+block that never activates, kept every GET_BLOCK answering
+`TEMPLATE_NOT_READY` indefinitely because 30-second report refreshes kept its
+evidence fresh. Admission uses a final point-in-time check, not an atomic guarantee
 against connectivity changing immediately afterward.
 
 Sync completion uses the greatest recent `BESTHEIGHT` advertised by connected
