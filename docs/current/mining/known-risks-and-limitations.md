@@ -156,6 +156,11 @@ block that never activates, kept every GET_BLOCK answering
 evidence fresh. Admission uses a final point-in-time check, not an atomic guarantee
 against connectivity changing immediately afterward.
 
+The timeout applies only to peer evidence; it does not clear a reorganization
+veto after an exception. A post-commit exception may leave persisted and published
+chain state inconsistent and requires investigation and recovery. Existing
+best-chain failure and recovery behavior is unchanged by this timeout.
+
 Sync completion uses the greatest recent `BESTHEIGHT` advertised by connected
 peers. Observations are removed on disconnect and
 expire 30 minutes after their last height notification. Periodic report

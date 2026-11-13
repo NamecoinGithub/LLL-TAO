@@ -499,19 +499,7 @@ namespace TAO
             }
 
             TAO::Ledger::BlockState stateActivation = stateCandidate;
-            bool fActivated = false;
-            try
-            {
-                fActivated = stateActivation.SetBest();
-            }
-            catch(...)
-            {
-                /* A throw must not leave mining readiness pinned at chain-reorganization. */
-                ChainState::fChainReorg.store(false);
-                throw;
-            }
-
-            if(!fActivated)
+            if(!stateActivation.SetBest())
             {
                 ChainState::fChainReorg.store(false);
                 return false;
