@@ -59,6 +59,7 @@ ________________________________________________________________________________
 #include <Util/templates/datastream.h>
 
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -864,6 +865,78 @@ TEST_CASE("An unresolvable peer tip cannot veto readiness indefinitely",
     REQUIRE(check(later).ignored == 0);
     tracker.Observe(&c, "three", 0xDEAD, 101, later);
     REQUIRE(check(later).reason == "unresolved-peer-tip");
+}
+
+TEST_CASE("Unresolved peer veto expiry is logged once per unresolved period",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    MiningPeerTracker tracker;
+    const auto now = MiningPeerTracker::Clock::now();
+    const auto bound = MiningPeerTracker::UNRESOLVED_VETO_MAX;
+    int peer;
+    const auto resolve = [](const uint1024_t& hash, uint32_t)
+    {
+        return hash == 1 ? MiningPeerEvidence::SUPPORTING : MiningPeerEvidence::UNRESOLVED;
+    };
+    const auto check = [&](auto time)
+    {
+        return tracker.Check(1, false, true, false, false, resolve, time);
+    };
+    std::ostringstream output;
+    std::string firstPeriodLogs;
+    struct OutputCapture
+    {
+        std::streambuf* previous;
+        explicit OutputCapture(std::ostream& out)
+        {
+            std::lock_guard<std::mutex> lock(debug::DEBUG_MUTEX);
+            previous = std::cout.rdbuf(out.rdbuf());
+        }
+        ~OutputCapture()
+        {
+            std::lock_guard<std::mutex> lock(debug::DEBUG_MUTEX);
+            std::cout.rdbuf(previous);
+        }
+    };
+    {
+        OutputCapture capture(output);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, now);
+        check(now);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, now + bound / 2);
+        check(now + bound / 2);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, now + bound);
+        check(now + bound);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, now + bound + std::chrono::seconds(1));
+        check(now + bound + std::chrono::seconds(1));
+        tracker.Observe(&peer, "expiry-log-test", 3, 101, now + bound + std::chrono::seconds(2));
+        check(now + bound + std::chrono::seconds(2));
+        {
+            std::lock_guard<std::mutex> lock(debug::DEBUG_MUTEX);
+            firstPeriodLogs = output.str();
+        }
+
+        const auto resolved = now + bound + std::chrono::seconds(3);
+        tracker.Observe(&peer, "expiry-log-test", 1, 100, resolved);
+        check(resolved);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, resolved);
+        check(resolved);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, resolved + bound / 2);
+        check(resolved + bound / 2);
+        tracker.Observe(&peer, "expiry-log-test", 2, 100, resolved + bound);
+        check(resolved + bound);
+    }
+
+    const std::string message = "MiningPeerTracker: ignoring unresolved tip from expiry-log-test";
+    const std::string logs = output.str();
+    const auto first = logs.find(message);
+    REQUIRE(first != std::string::npos);
+    REQUIRE(firstPeriodLogs.find(message) != std::string::npos);
+    REQUIRE(firstPeriodLogs.find(message, firstPeriodLogs.find(message) + message.size())
+            == std::string::npos);
+    const auto second = logs.find(message, first + message.size());
+    REQUIRE(second != std::string::npos);
+    REQUIRE(logs.find(message, second + message.size()) == std::string::npos);
 }
 
 TEST_CASE("Split peer catch-up gates readiness without changing committed work",

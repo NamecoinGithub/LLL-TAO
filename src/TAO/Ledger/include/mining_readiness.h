@@ -86,7 +86,10 @@ namespace TAO::Ledger::ChainState
              * the veto bound; only resolved evidence clears it. */
             Observation observation{address, hash, height, now, false};
             if(it != observations.end() && it->second.address == address)
+            {
                 observation.unresolvedSince = it->second.unresolvedSince;
+                observation.vetoExpiredLogged = it->second.vetoExpiredLogged;
+            }
             observations[peer] = observation;
         }
 
