@@ -134,7 +134,7 @@ sudo apt-get install libssl-dev
 ## Code Modification Guidelines
 
 ### When Adding New Dependencies
-1. Update `.devcontainer/setup.sh` with new package
+1. Update `contrib/devtools/install-build-deps.sh` with new package
 2. Update this document's dependency table
 3. Update README.md installation instructions
 4. Test in clean DevContainer environment
