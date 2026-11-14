@@ -122,15 +122,6 @@ sudo apt-get install libdb5.3++-dev
 bash .devcontainer/setup.sh
 ```
 
-### Boost Version Mismatch
-**Error:** `Boost version too old`
-
-**Solution:**
-```bash
-sudo apt-get install libboost-all-dev
-# Minimum version: 1.71
-```
-
 ### OpenSSL Linking Error
 **Error:** `undefined reference to EVP_*`
 
