@@ -83,7 +83,6 @@ make -f makefile.cli VERBOSE=1 -j$(nproc)
 - `config/` - Configuration files
 
 ### Important Files
-- `Makefile` - Main build configuration
 - `makefile.cli` - Command-line build targets
 - `.devcontainer/` - DevContainer configuration for consistent builds
 
