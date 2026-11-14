@@ -153,10 +153,9 @@ Build and test workflows run automatically for changes matching their path filte
 - Pull request creation
 - Pull request updates
 
-### DevContainer Testing
+### Copilot Setup
 Copilot Coding Agent uses the Copilot setup workflow plus the shared devcontainer bootstrap to:
 - Check for dependency issues
-- Validate code changes before merge
 
 Copilot code review uses `.github/workflows/copilot-code-review.yml` for its
 runner and build dependency setup. This configures its environment, not
