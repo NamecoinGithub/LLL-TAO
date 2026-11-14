@@ -90,6 +90,7 @@ make -f makefile.cli VERBOSE=1 -j$(nproc)
 
 ### Run All Tests
 ```bash
+make -f makefile.cli clean
 make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 ```
 
