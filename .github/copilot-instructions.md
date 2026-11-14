@@ -148,7 +148,7 @@ sudo apt-get install libssl-dev
 ## Continuous Integration
 
 ### GitHub Actions
-Build and test workflows run automatically on:
+Build and test workflows run automatically for changes matching their path filters on:
 - Push to main branches
 - Pull request creation
 - Pull request updates
