@@ -140,7 +140,7 @@ sudo apt-get install libssl-dev
 4. Test in clean DevContainer environment
 
 ### When Modifying Build Process
-1. Update `Makefile` or relevant makefile.* files
+1. Update relevant makefile.* files
 2. Update build instructions in this document
 3. Verify changes in DevContainer
 4. Document any new build flags or options
