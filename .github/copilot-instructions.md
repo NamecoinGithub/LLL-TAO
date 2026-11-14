@@ -185,7 +185,6 @@ automatic review requests.
 
 ### Lower Level Protocol (LLP)
 - Custom P2P networking stack
-- Event-driven architecture using libevent
 - Supports both legacy (8-bit) and stateless (16-bit) opcodes
 
 ## Support
