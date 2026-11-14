@@ -62,7 +62,7 @@ make -f makefile.cli -j$(nproc)
 
 ### Debug Build
 ```bash
-make -f makefile.cli DEBUG=1 -j$(nproc)
+make -f makefile.cli ENABLE_DEBUG=1 -j$(nproc)
 ```
 
 ### Verbose Build (see all commands)
