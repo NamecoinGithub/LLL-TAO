@@ -104,7 +104,7 @@ make -f makefile.cli clean
 make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
 # Run LLP-focused tests from the produced nexus binary
-./nexus "[llp]"
+test_home="$(mktemp -d)" && HOME="$test_home" ./nexus "[llp]"
 
 # Run ledger-focused tests
 ./nexus "[ledger]"
