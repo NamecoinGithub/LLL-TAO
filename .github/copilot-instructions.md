@@ -20,7 +20,7 @@ Nexus LLL-TAO is a blockchain node implementation written in C++20. It requires 
 #### Required Libraries
 | Library | Version | Package | Purpose |
 |---------|---------|---------|---------|
-| Berkeley DB | 5.3.x | `libdb5.3++-dev` | Blockchain database storage |
+| Berkeley DB | 5.3.x | `libdb5.3++-dev` | Legacy wallet database storage |
 | OpenSSL | 1.1.1+ | `libssl-dev` | Cryptographic operations (hashing, signatures) |
 | Boost | 1.71+ | `libboost-all-dev` | Utilities, threading, filesystem |
 | MiniUPnP | 2.1+ | `libminiupnpc-dev` | NAT traversal for P2P networking |
