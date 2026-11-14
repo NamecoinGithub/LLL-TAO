@@ -89,9 +89,12 @@ make -f makefile.cli VERBOSE=1 -j$(nproc)
 ## Testing
 
 ### Run All Tests
+On Unix, use a fresh isolated HOME for each test process; bootstrap clears its data directory before processing Catch arguments.
+
 ```bash
 make -f makefile.cli clean
 make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
+test_home="$(mktemp -d)" && HOME="$test_home" ./nexus
 ```
 
 ### Run Specific Test Suite
