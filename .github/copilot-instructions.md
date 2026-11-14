@@ -199,7 +199,7 @@ automatic review requests.
 ./nexus
 
 # Run with testnet
-./nexus -testnet
+./nexus -testnet=1
 
 # Enable verbose logging
 ./nexus -verbose=3
