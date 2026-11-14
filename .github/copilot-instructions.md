@@ -107,7 +107,7 @@ make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 test_home="$(mktemp -d)" && HOME="$test_home" ./nexus "[llp]"
 
 # Run ledger-focused tests
-./nexus "[ledger]"
+test_home="$(mktemp -d)" && HOME="$test_home" ./nexus "[ledger]"
 ```
 
 ## Common Build Issues
