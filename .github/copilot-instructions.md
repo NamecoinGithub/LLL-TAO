@@ -192,7 +192,6 @@ automatic review requests.
 ### Documentation
 - Project README: `/README.md`
 - API documentation: `/docs/`
-- Protocol specification: `/docs/PROTOCOL.md`
 
 ### Common Commands
 ```bash
