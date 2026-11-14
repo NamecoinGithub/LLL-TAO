@@ -182,7 +182,6 @@ automatic review requests.
 ### Tritium Protocol
 - Core blockchain logic in `src/TAO/Ledger/`
 - Three mining channels: Proof-of-Stake (0), Prime (1), Hash (2)
-- Uses Berkeley DB for block storage
 
 ### Lower Level Protocol (LLP)
 - Custom P2P networking stack
