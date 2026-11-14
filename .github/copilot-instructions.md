@@ -155,7 +155,6 @@ Build and test workflows run automatically for changes matching their path filte
 
 ### DevContainer Testing
 Copilot Coding Agent uses the Copilot setup workflow plus the shared devcontainer bootstrap to:
-- Run automated tests
 - Check for dependency issues
 - Validate code changes before merge
 
