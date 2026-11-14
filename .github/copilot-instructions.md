@@ -178,7 +178,6 @@ automatic review requests.
 - Located in `src/LLP/` directory
 - Uses Falcon post-quantum cryptography
 - Requires OpenSSL 1.1.1+ for ChaCha20-Poly1305
-- Network protocol on ports 9323-9325
 
 ### Tritium Protocol
 - Core blockchain logic in `src/TAO/Ledger/`
