@@ -100,6 +100,7 @@ test_home="$(mktemp -d)" && HOME="$test_home" ./nexus
 ### Run Specific Test Suite
 ```bash
 # Build unit-test binary
+make -f makefile.cli clean
 make -f makefile.cli UNIT_TESTS=1 -j$(nproc)
 
 # Run LLP-focused tests from the produced nexus binary
