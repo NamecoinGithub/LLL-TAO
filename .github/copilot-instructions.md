@@ -204,8 +204,8 @@ automatic review requests.
 # Enable verbose logging
 ./nexus -verbose=3
 
-# Run API server
-./nexus -api
+# Run API server (set apiuser and apipassword in nexus.conf first)
+./nexus
 
 # Mining configuration
 ./nexus -mining -generate=
