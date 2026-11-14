@@ -170,7 +170,6 @@ automatic review requests.
 
 ### Optimization Flags
 - Production: `-O3` (maximum optimization)
-- Debug: `-g -O0` (no optimization, full debug symbols)
 - Profile: `-O2 -g` (optimized with debug info)
 
 ## Architecture-Specific Notes
