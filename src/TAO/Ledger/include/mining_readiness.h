@@ -88,6 +88,10 @@ namespace TAO::Ledger::ChainState
                 cacheValid = false;
                 ++revision;
             }
+            /* An identical report can have an earlier timestamp if it waited
+             * for the mutex behind a newer report. Keep the cached bound safe. */
+            if(cacheValid && now + MAX_AGE < expireAt)
+                expireAt = now + MAX_AGE;
 
             /* Re-announcing, changing, or reconnecting an unresolved tip must
              * not restart the veto bound. Disconnect removes the connection
@@ -222,9 +226,9 @@ namespace TAO::Ledger::ChainState
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 started = testTime.value_or(Clock::now());
-                Expire(started);
                 if(cached && cacheValid && cachedKey == key && started < refreshAt && started <= expireAt)
                     return cachedStatus;
+                Expire(started);
                 if(!cached)
                     cacheValid = false;
                 if(bypass)

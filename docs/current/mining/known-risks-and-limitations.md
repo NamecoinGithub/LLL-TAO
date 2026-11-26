@@ -150,6 +150,8 @@ if it is at least as new as the cached result, the next request evaluates
 again. Repeated contradictory partial reports do
 not invalidate an already-uncertain observation. Local bypass checks do not
 depend on peer-evidence revisions, but still enforce shutdown and reorganization.
+Cache hits check the earliest observation expiry without scanning peers;
+expired entries are removed on the next cache miss.
 Slow ledger reads can still delay the mining request itself. Under continuous
 peer churn, repeated fail-closed evaluations may delay readiness.
 Local block admission also checks readiness while holding `PROCESSING_MUTEX`;

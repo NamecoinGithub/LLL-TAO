@@ -656,6 +656,34 @@ TEST_CASE("Mining work readiness caches evidence without delaying invalidation",
     REQUIRE(check(expiry + std::chrono::milliseconds(2)).epoch == beforeExpiry.epoch);
 }
 
+TEST_CASE("Out-of-order identical peer reports retain the correct cache expiry",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    MiningPeerTracker tracker;
+    const auto now = MiningPeerTracker::Clock::now();
+    int peer;
+    unsigned reads = 0;
+    const auto resolve = [&](const uint1024_t&, uint32_t)
+    {
+        ++reads;
+        return MiningPeerEvidence::SUPPORTING;
+    };
+    const auto check = [&](auto time)
+    {
+        return tracker.CheckCached(1, 1, 1, false, true, false, false, resolve, time);
+    };
+    tracker.Observe(&peer, "one", 1, 100, now);
+    REQUIRE(check(now + MiningPeerTracker::MAX_AGE - std::chrono::milliseconds(500)).ready);
+    tracker.Observe(&peer, "one", 1, 100, now - std::chrono::milliseconds(200));
+    const auto expiry = now + MiningPeerTracker::MAX_AGE - std::chrono::milliseconds(200);
+    REQUIRE(check(expiry).ready);
+    REQUIRE(reads == 1);
+    const auto expired = check(expiry + std::chrono::milliseconds(1));
+    REQUIRE_FALSE(expired.ready);
+    REQUIRE(expired.reason == "insufficient-fresh-peers");
+}
+
 TEST_CASE("Mining work epochs follow committed hashes including unsampled reorgs",
     "[ledger][mining-readiness][template_freshness]")
 {
