@@ -149,6 +149,8 @@ are in flight, the older evaluation fails closed with `peer-evidence-changed`;
 the next request evaluates again.
 Slow ledger reads can still delay the mining request itself. Under continuous
 peer churn, repeated fail-closed evaluations may delay readiness.
+Local block admission also checks readiness while holding `PROCESSING_MUTEX`;
+a cache miss can still delay other block processing on slow ledger reads.
 It includes `mining_readiness` with `ready`,
 `reason`, `epoch`, `fresh_peers` (supporting distinct IPs), `required_peers`,
 `local_bypass`, and `ignored_unresolved_peers`. Existing `synchronized`/`syncing` fields are unchanged and need
