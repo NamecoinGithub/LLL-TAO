@@ -1442,6 +1442,101 @@ TEST_CASE("Concurrent readiness evaluations cannot overwrite newer evidence deci
     }
 }
 
+TEST_CASE("Failed readiness evaluations invalidate only older cached evidence",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    for(const bool failedIsOlder : {false, true})
+    for(const bool failedIsCached : {false, true})
+    {
+        INFO("failedIsOlder=" << failedIsOlder << " failedIsCached=" << failedIsCached);
+        MiningPeerTracker tracker;
+        const auto now = MiningPeerTracker::Clock::now();
+        const auto later = now + std::chrono::seconds(1);
+        int peer;
+        tracker.Observe(&peer, "one", 1, 100, now);
+        const auto unresolved = [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::UNRESOLVED; };
+        REQUIRE(tracker.CheckCached(1, 1, 1, false, true, false, false, unresolved, now).reason
+                == "unresolved-peer-tip");
+
+        std::promise<void> oldEntered, newEntered, releaseOld, releaseNew;
+        auto oldStarted = oldEntered.get_future();
+        auto newStarted = newEntered.get_future();
+        auto oldRelease = releaseOld.get_future().share();
+        auto newRelease = releaseNew.get_future().share();
+        const auto launch = [&](bool cached, MiningPeerEvidence evidence,
+                                std::promise<void>& entered, std::shared_future<void> release)
+        {
+            return std::async(std::launch::async, [&, cached, evidence, release]()
+            {
+                const auto resolve = [&](const uint1024_t&, uint32_t)
+                {
+                    entered.set_value();
+                    release.wait();
+                    return evidence;
+                };
+                return cached
+                    ? tracker.CheckCached(1, 1, 1, false, true, false, false, resolve, later)
+                    : tracker.Check(1, false, true, false, false, resolve, later);
+            });
+        };
+        auto old = launch(!failedIsOlder || failedIsCached,
+                          failedIsOlder ? MiningPeerEvidence::UNRESOLVED : MiningPeerEvidence::SUPPORTING,
+                          oldEntered, oldRelease);
+        const auto oldStartedStatus = oldStarted.wait_for(std::chrono::seconds(5));
+        if(oldStartedStatus != std::future_status::ready)
+        {
+            releaseOld.set_value();
+            old.get();
+            REQUIRE(oldStartedStatus == std::future_status::ready);
+            return;
+        }
+        auto newer = launch(failedIsOlder || failedIsCached,
+                            failedIsOlder ? MiningPeerEvidence::SUPPORTING : MiningPeerEvidence::UNRESOLVED,
+                            newEntered, newRelease);
+        const auto newStartedStatus = newStarted.wait_for(std::chrono::seconds(5));
+        if(newStartedStatus != std::future_status::ready)
+        {
+            releaseOld.set_value();
+            releaseNew.set_value();
+            old.get();
+            newer.get();
+            REQUIRE(newStartedStatus == std::future_status::ready);
+            return;
+        }
+
+        MiningStatus successful, failed;
+        if(failedIsOlder)
+        {
+            releaseNew.set_value();
+            successful = newer.get();
+            releaseOld.set_value();
+            failed = old.get();
+        }
+        else
+        {
+            releaseOld.set_value();
+            successful = old.get();
+            releaseNew.set_value();
+            failed = newer.get();
+        }
+        REQUIRE(successful.ready);
+        REQUIRE_FALSE(failed.ready);
+        REQUIRE(failed.reason == "peer-evidence-changed");
+
+        unsigned reads = 0;
+        const auto retry = tracker.CheckCached(1, 1, 1, false, true, false, false,
+            [&](const uint1024_t&, uint32_t)
+            {
+                ++reads;
+                return MiningPeerEvidence::UNRESOLVED;
+            }, later);
+        REQUIRE(reads == (failedIsOlder ? 0 : 1));
+        REQUIRE(retry.ready == failedIsOlder);
+        REQUIRE(retry.reason == (failedIsOlder ? "ready" : "unresolved-peer-tip"));
+    }
+}
+
 TEST_CASE("Peer evidence expiring during resolution cannot admit work",
     "[ledger][mining-readiness]")
 {

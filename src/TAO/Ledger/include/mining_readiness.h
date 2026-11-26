@@ -249,6 +249,8 @@ namespace TAO::Ledger::ChainState
             if(revision != snapshotRevision
             || (evaluation < completedEvaluation && evidence != completedEvidence))
             {
+                if(evaluation >= cachedEvaluation)
+                    cacheValid = false;
                 MiningStatus status;
                 status.bypass = bypass;
                 status.required = required;
