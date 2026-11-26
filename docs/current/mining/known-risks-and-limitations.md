@@ -146,7 +146,9 @@ Peer-tip ledger reads run outside the peer tracker mutex, so slow storage does
 not hold up peer observations or disconnects. If peer evidence or veto state
 changes, or a newer evaluation resolves different evidence while those reads
 are in flight, the older evaluation fails closed with `peer-evidence-changed`;
-the next request evaluates again.
+the next request evaluates again. Repeated contradictory partial reports do
+not invalidate an already-uncertain observation. Local bypass checks do not
+depend on peer-evidence revisions, but still enforce shutdown and reorganization.
 Slow ledger reads can still delay the mining request itself. Under continuous
 peer churn, repeated fail-closed evaluations may delay readiness.
 Local block admission also checks readiness while holding `PROCESSING_MUTEX`;

@@ -113,8 +113,8 @@ namespace TAO::Ledger::ChainState
                 return;
 
             auto& observation = it->second;
-            if((hasHash && observation.hash != hash)
-            || (hasHeight && observation.height != height))
+            if(!observation.uncertain && ((hasHash && observation.hash != hash)
+            || (hasHeight && observation.height != height)))
             {
                 observation.uncertain = true;
                 cacheValid = false;
@@ -212,9 +212,9 @@ namespace TAO::Ledger::ChainState
                               bool synchronized, bool reorg, bool shutdown, Resolve resolve,
                               std::optional<Clock::time_point> testTime)
         {
-            /* Peer callbacks must not wait for ledger I/O. Only publish an
-             * evaluation if neither peer evidence nor veto state changed
-             * while the mutex was released. */
+            /* Peer callbacks must not wait for ledger I/O. Peer-dependent
+             * evaluations fail closed if evidence or veto state changes
+             * while the mutex is released. */
             std::map<const void*, Observation> snapshot;
             uint64_t snapshotRevision;
             uint64_t evaluation;
@@ -227,18 +227,21 @@ namespace TAO::Ledger::ChainState
                     return cachedStatus;
                 if(!cached)
                     cacheValid = false;
+                if(bypass)
+                {
+                    std::vector<VetoLog> vetoLogs;
+                    return CheckLocked(required, true, synchronized, reorg, shutdown,
+                        [](const void*) { return MiningPeerEvidence::UNRESOLVED; }, started, vetoLogs);
+                }
                 snapshot = observations;
                 snapshotRevision = revision;
                 evaluation = ++nextEvaluation;
             }
 
             std::map<const void*, MiningPeerEvidence> evidence;
-            if(!bypass)
-            {
-                for(const auto& item : snapshot)
-                    evidence.emplace(item.first, item.second.uncertain ? MiningPeerEvidence::UNRESOLVED
-                        : resolve(item.second.hash, item.second.height));
-            }
+            for(const auto& item : snapshot)
+                evidence.emplace(item.first, item.second.uncertain ? MiningPeerEvidence::UNRESOLVED
+                    : resolve(item.second.hash, item.second.height));
 
             std::unique_lock<std::mutex> lock(mutex);
             const auto now = testTime.value_or(Clock::now());

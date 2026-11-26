@@ -67,6 +67,7 @@ ________________________________________________________________________________
 #include <cstring>
 #include <cerrno>
 #include <chrono>
+#include <atomic>
 #include <future>
 #include <thread>
 #include <utility>
@@ -1213,6 +1214,177 @@ TEST_CASE("Peer updates do not wait for readiness resolution or admit stale evid
         const auto fresh = tracker.CheckCached(1, 1, 1, false, true, false, false,
             [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::SUPPORTING; });
         REQUIRE(fresh.ready == (change != 1 && change != 2));
+    }
+}
+
+TEST_CASE("Duplicate partial reports do not invalidate in-flight or cached evidence",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+
+    for(const bool cached : {false, true})
+    for(const bool changedHash : {false, true})
+    {
+        INFO("cached=" << cached << " changedHash=" << changedHash);
+        MiningPeerTracker tracker;
+        const auto now = MiningPeerTracker::Clock::now();
+        const auto expired = now + MiningPeerTracker::UNRESOLVED_VETO_MAX;
+        int supporting, uncertain;
+        tracker.Observe(&supporting, "one", 1, 100, now);
+        tracker.Observe(&uncertain, "two", 1, 100, now);
+        tracker.InvalidatePartial(&uncertain, true, 2, false, 0);
+        const auto supportingEvidence = [](const uint1024_t&, uint32_t)
+        {
+            return MiningPeerEvidence::SUPPORTING;
+        };
+        REQUIRE(tracker.Check(1, false, true, false, false, supportingEvidence, now).reason
+                == "unresolved-peer-tip");
+
+        std::promise<void> resolverEntered, releaseResolver;
+        auto entered = resolverEntered.get_future();
+        auto release = releaseResolver.get_future();
+        unsigned reads = 0;
+        const auto resolve = [&](const uint1024_t&, uint32_t)
+        {
+            ++reads;
+            resolverEntered.set_value();
+            release.wait();
+            return MiningPeerEvidence::SUPPORTING;
+        };
+        auto admission = std::async(std::launch::async, [&]()
+        {
+            return cached
+                ? tracker.CheckCached(1, 1, 1, false, true, false, false, resolve, expired)
+                : tracker.Check(1, false, true, false, false, resolve, expired);
+        });
+        const auto enteredStatus = entered.wait_for(std::chrono::seconds(5));
+        if(enteredStatus != std::future_status::ready)
+        {
+            releaseResolver.set_value();
+            admission.get();
+            REQUIRE(enteredStatus == std::future_status::ready);
+            return;
+        }
+
+        tracker.InvalidatePartial(&uncertain, changedHash, 2, !changedHash, 101);
+        releaseResolver.set_value();
+        const auto result = admission.get();
+        REQUIRE(result.ready);
+        REQUIRE(result.peers == 1);
+        REQUIRE(result.ignored == 1);
+
+        if(cached)
+        {
+            tracker.InvalidatePartial(&uncertain, changedHash, 2, !changedHash, 101);
+            const auto reused = tracker.CheckCached(1, 1, 1, false, true, false, false,
+                [&](const uint1024_t&, uint32_t)
+                {
+                    ++reads;
+                    return MiningPeerEvidence::SUPPORTING;
+                }, expired);
+            REQUIRE(reused.ready);
+            REQUIRE(reused.ignored == 1);
+            REQUIRE(reads == 1);
+        }
+    }
+}
+
+TEST_CASE("Bypassed readiness ignores concurrent peer changes but retains safety gates",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    for(const bool cached : {false, true})
+    {
+        INFO("cached=" << cached);
+        MiningPeerTracker tracker;
+        const auto now = MiningPeerTracker::Clock::now();
+        int peers[128];
+        for(auto& peer : peers)
+            tracker.Observe(&peer, "peer", 1, 100, now);
+
+        std::atomic<bool> stop{false};
+        std::promise<void> updateStarted;
+        auto started = updateStarted.get_future();
+        auto updates = std::async(std::launch::async, [&]()
+        {
+            updateStarted.set_value();
+            uint32_t height = 100;
+            while(!stop.load())
+            {
+                height = height == 100 ? 101 : 100;
+                tracker.Height(&peers[0], height);
+            }
+        });
+        started.wait();
+        unsigned reads = 0;
+        const auto resolve = [&](const uint1024_t&, uint32_t)
+        {
+            ++reads;
+            return MiningPeerEvidence::SUPPORTING;
+        };
+        std::vector<MiningStatus> results;
+        for(int i = 0; i < 200; ++i)
+        for(const auto& gates : {std::pair{false, false}, std::pair{true, false},
+                                 std::pair{false, true}, std::pair{true, true}})
+            results.push_back(cached
+                ? tracker.CheckCached(1, 1, 2, true, false, gates.first, gates.second, resolve, now)
+                : tracker.Check(2, true, false, gates.first, gates.second, resolve, now));
+        stop.store(true);
+        updates.get();
+
+        REQUIRE(reads == 0);
+        for(std::size_t i = 0; i < results.size(); ++i)
+        {
+            const auto& status = results[i];
+            REQUIRE(status.bypass);
+            REQUIRE(status.ready == (i % 4 == 0));
+            REQUIRE(status.reason == (i % 4 == 0 ? "local-network" :
+                                      i % 4 == 1 ? "chain-reorganization" : "shutdown"));
+        }
+    }
+}
+
+TEST_CASE("A bypass check does not supersede in-flight peer evidence",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    for(const bool cached : {false, true})
+    {
+        MiningPeerTracker tracker;
+        int peer;
+        tracker.Observe(&peer, "one", 1, 100);
+        std::promise<void> resolverEntered, releaseResolver;
+        auto entered = resolverEntered.get_future();
+        auto release = releaseResolver.get_future();
+        auto admission = std::async(std::launch::async, [&]()
+        {
+            return tracker.Check(1, false, true, false, false,
+                [&](const uint1024_t&, uint32_t)
+                {
+                    resolverEntered.set_value();
+                    release.wait();
+                    return MiningPeerEvidence::SUPPORTING;
+                });
+        });
+        const auto enteredStatus = entered.wait_for(std::chrono::seconds(5));
+        if(enteredStatus != std::future_status::ready)
+        {
+            releaseResolver.set_value();
+            admission.get();
+            REQUIRE(enteredStatus == std::future_status::ready);
+            return;
+        }
+
+        const auto resolve = [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::SUPPORTING; };
+        const auto bypassed = cached
+            ? tracker.CheckCached(1, 1, 1, true, false, false, false, resolve)
+            : tracker.Check(1, true, false, false, false, resolve);
+        releaseResolver.set_value();
+        const auto result = admission.get();
+        REQUIRE(bypassed.ready);
+        REQUIRE(bypassed.reason == "local-network");
+        REQUIRE(result.ready);
+        REQUIRE(result.reason == "ready");
     }
 }
 
