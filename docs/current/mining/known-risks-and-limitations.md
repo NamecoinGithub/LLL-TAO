@@ -142,6 +142,13 @@ mining-admission result under a separate status lock; it neither resolves peer
 tips nor waits for a concurrent evidence resolution. Late evaluations cannot
 replace results from newer-started evaluations. Cached evidence
 is keyed by the committed work epoch, including across unsampled reorganizations.
+Peer-tip ledger reads run outside the peer tracker mutex, so slow storage does
+not hold up peer observations or disconnects. If peer evidence or veto state
+changes, or a newer evaluation resolves different evidence while those reads
+are in flight, the older evaluation fails closed with `peer-evidence-changed`;
+the next request evaluates again.
+Slow ledger reads can still delay the mining request itself. Under continuous
+peer churn, repeated fail-closed evaluations may delay readiness.
 It includes `mining_readiness` with `ready`,
 `reason`, `epoch`, `fresh_peers` (supporting distinct IPs), `required_peers`,
 `local_bypass`, and `ignored_unresolved_peers`. Existing `synchronized`/`syncing` fields are unchanged and need

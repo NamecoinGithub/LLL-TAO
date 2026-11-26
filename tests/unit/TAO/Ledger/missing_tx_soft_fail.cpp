@@ -1154,6 +1154,182 @@ TEST_CASE("A readiness snapshot does not wait for peer tip resolution",
     }
 }
 
+TEST_CASE("Peer updates do not wait for readiness resolution or admit stale evidence",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+
+    for(const bool cached : {false, true})
+    for(const int change : {0, 1, 2, 3, 4})
+    {
+        INFO("cached=" << cached << " change=" << change);
+        MiningPeerTracker tracker;
+        int peer;
+        tracker.Observe(&peer, "one", 1, 100);
+        std::promise<void> resolverEntered, releaseResolver;
+        auto entered = resolverEntered.get_future();
+        auto release = releaseResolver.get_future();
+        const auto resolve = [&](const uint1024_t&, uint32_t)
+        {
+            resolverEntered.set_value();
+            release.wait();
+            return MiningPeerEvidence::SUPPORTING;
+        };
+        auto admission = std::async(std::launch::async, [&]()
+        {
+            return cached
+                ? tracker.CheckCached(1, 1, 1, false, true, false, false, resolve)
+                : tracker.Check(1, false, true, false, false, resolve);
+        });
+
+        const auto enteredStatus = entered.wait_for(std::chrono::seconds(5));
+        if(enteredStatus != std::future_status::ready)
+        {
+            releaseResolver.set_value();
+            admission.get();
+            REQUIRE(enteredStatus == std::future_status::ready);
+            return;
+        }
+
+        auto update = std::async(std::launch::async, [&]()
+        {
+            switch(change)
+            {
+                case 0: tracker.Observe(&peer, "one", 2, 101); break;
+                case 1: tracker.Remove(&peer); break;
+                case 2: tracker.InvalidatePartial(&peer, true, 2, false, 0); break;
+                case 3: tracker.Height(&peer, 101); break;
+                case 4: tracker.Observe(&peer, "one", 1, 100); break;
+            }
+        });
+        const auto updateStatus = update.wait_for(std::chrono::seconds(2));
+        releaseResolver.set_value();
+        update.get();
+        const auto result = admission.get();
+
+        REQUIRE(updateStatus == std::future_status::ready);
+        REQUIRE(result.ready == (change == 4));
+        REQUIRE(result.reason == (change == 4 ? "ready" : "peer-evidence-changed"));
+        const auto fresh = tracker.CheckCached(1, 1, 1, false, true, false, false,
+            [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::SUPPORTING; });
+        REQUIRE(fresh.ready == (change != 1 && change != 2));
+    }
+}
+
+TEST_CASE("Concurrent readiness evaluations cannot overwrite newer evidence decisions",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    for(const auto evidence : {MiningPeerEvidence::UNRESOLVED, MiningPeerEvidence::BEHIND})
+    {
+        MiningPeerTracker tracker;
+        int peer;
+        tracker.Observe(&peer, "one", 1, 100);
+        std::promise<void> resolverEntered, releaseResolver;
+        auto entered = resolverEntered.get_future();
+        auto release = releaseResolver.get_future();
+        auto old = std::async(std::launch::async, [&]()
+        {
+            return tracker.CheckCached(1, 1, 1, false, true, false, false,
+                [&](const uint1024_t&, uint32_t)
+                {
+                    resolverEntered.set_value();
+                    release.wait();
+                    return MiningPeerEvidence::SUPPORTING;
+                });
+        });
+        const auto enteredStatus = entered.wait_for(std::chrono::seconds(5));
+        if(enteredStatus != std::future_status::ready)
+        {
+            releaseResolver.set_value();
+            old.get();
+            REQUIRE(enteredStatus == std::future_status::ready);
+            return;
+        }
+
+        auto newer = std::async(std::launch::async, [&]()
+        {
+            return tracker.CheckCached(1, 1, 1, false, true, false, false,
+                [evidence](const uint1024_t&, uint32_t) { return evidence; });
+        });
+        const auto newerStatus = newer.wait_for(std::chrono::seconds(2));
+        releaseResolver.set_value();
+        const auto newResult = newer.get();
+        const auto oldResult = old.get();
+        const char* reason = evidence == MiningPeerEvidence::UNRESOLVED
+            ? "unresolved-peer-tip" : "insufficient-fresh-peers";
+        REQUIRE(newerStatus == std::future_status::ready);
+        REQUIRE_FALSE(newResult.ready);
+        REQUIRE(newResult.reason == reason);
+        REQUIRE_FALSE(oldResult.ready);
+        REQUIRE(oldResult.reason == "peer-evidence-changed");
+        const auto cached = tracker.CheckCached(1, 1, 1, false, true, false, false,
+            [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::SUPPORTING; });
+        REQUIRE_FALSE(cached.ready);
+        REQUIRE(cached.reason == reason);
+    }
+}
+
+TEST_CASE("Peer evidence expiring during resolution cannot admit work",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    MiningPeerTracker tracker;
+    int peer;
+    tracker.Observe(&peer, "one", 1, 100,
+        MiningPeerTracker::Clock::now() - MiningPeerTracker::MAX_AGE + std::chrono::milliseconds(200));
+    const auto status = tracker.Check(1, false, true, false, false,
+        [](const uint1024_t&, uint32_t)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            return MiningPeerEvidence::SUPPORTING;
+        });
+    REQUIRE_FALSE(status.ready);
+}
+
+TEST_CASE("Concurrent matching readiness evaluations both admit work",
+    "[ledger][mining-readiness]")
+{
+    using namespace TAO::Ledger::ChainState;
+    MiningPeerTracker tracker;
+    int peer;
+    tracker.Observe(&peer, "one", 1, 100);
+    std::promise<void> resolverEntered, releaseResolver;
+    auto entered = resolverEntered.get_future();
+    auto release = releaseResolver.get_future();
+    auto old = std::async(std::launch::async, [&]()
+    {
+        return tracker.Check(1, false, true, false, false,
+            [&](const uint1024_t&, uint32_t)
+            {
+                resolverEntered.set_value();
+                release.wait();
+                return MiningPeerEvidence::SUPPORTING;
+            });
+    });
+    const auto enteredStatus = entered.wait_for(std::chrono::seconds(5));
+    if(enteredStatus != std::future_status::ready)
+    {
+        releaseResolver.set_value();
+        old.get();
+        REQUIRE(enteredStatus == std::future_status::ready);
+        return;
+    }
+
+    auto newer = std::async(std::launch::async, [&]()
+    {
+        return tracker.Check(1, false, true, false, false,
+            [](const uint1024_t&, uint32_t) { return MiningPeerEvidence::SUPPORTING; });
+    });
+    const auto newerStatus = newer.wait_for(std::chrono::seconds(2));
+    releaseResolver.set_value();
+    const auto newResult = newer.get();
+    const auto oldResult = old.get();
+    REQUIRE(newerStatus == std::future_status::ready);
+    REQUIRE(newResult.ready);
+    REQUIRE(oldResult.ready);
+}
+
 TEST_CASE("A late readiness evaluation cannot overwrite a newer snapshot",
     "[ledger][mining-readiness]")
 {
