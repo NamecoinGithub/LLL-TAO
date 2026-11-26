@@ -9,9 +9,12 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace TAO::Ledger::ChainState
 {
@@ -81,7 +84,14 @@ namespace TAO::Ledger::ChainState
             if(it == observations.end() || it->second.hash != hash
             || it->second.height != height || it->second.address != address
             || it->second.uncertain)
+            {
                 cacheValid = false;
+                ++revision;
+            }
+            /* An identical report can have an earlier timestamp if it waited
+             * for the mutex behind a newer report. Keep the cached bound safe. */
+            if(cacheValid && now + MAX_AGE < expireAt)
+                expireAt = now + MAX_AGE;
 
             /* Re-announcing, changing, or reconnecting an unresolved tip must
              * not restart the veto bound. Disconnect removes the connection
@@ -107,11 +117,12 @@ namespace TAO::Ledger::ChainState
                 return;
 
             auto& observation = it->second;
-            if((hasHash && observation.hash != hash)
-            || (hasHeight && observation.height != height))
+            if(!observation.uncertain && ((hasHash && observation.hash != hash)
+            || (hasHeight && observation.height != height)))
             {
                 observation.uncertain = true;
                 cacheValid = false;
+                ++revision;
             }
         }
 
@@ -123,6 +134,7 @@ namespace TAO::Ledger::ChainState
             {
                 cacheValid = false;
                 it->second.height = height;
+                ++revision;
             }
         }
 
@@ -130,17 +142,19 @@ namespace TAO::Ledger::ChainState
         {
             std::lock_guard<std::mutex> lock(mutex);
             if(observations.erase(peer))
+            {
                 cacheValid = false;
+                ++revision;
+            }
         }
 
         template<typename Resolve>
         MiningStatus Check(uint32_t required, bool bypass, bool synchronized,
                            bool reorg, bool shutdown, Resolve resolve,
-                           Clock::time_point now = Clock::now())
+                           std::optional<Clock::time_point> now = std::nullopt)
         {
-            std::lock_guard<std::mutex> lock(mutex);
-            cacheValid = false;
-            return CheckLocked(required, bypass, synchronized, reorg, shutdown, resolve, now);
+            return Evaluate(false, CacheKey{}, required, bypass, synchronized,
+                            reorg, shutdown, resolve, now);
         }
 
         /* Work checks reuse evidence for at most one second. Peer changes,
@@ -148,25 +162,10 @@ namespace TAO::Ledger::ChainState
         template<typename Resolve>
         MiningStatus CheckCached(const uint1024_t& tip, uint64_t epoch, uint32_t required, bool bypass,
                                  bool synchronized, bool reorg, bool shutdown, Resolve resolve,
-                                 Clock::time_point now = Clock::now())
+                                 std::optional<Clock::time_point> now = std::nullopt)
         {
-            std::lock_guard<std::mutex> lock(mutex);
             const CacheKey key{tip, epoch, required, bypass, synchronized, reorg, shutdown};
-            if(cacheValid && cachedKey == key && now < refreshAt && now <= expireAt)
-                return cachedStatus;
-
-            cachedStatus = CheckLocked(required, bypass, synchronized, reorg, shutdown, resolve, now);
-            cachedKey = key;
-            refreshAt = now + std::chrono::seconds(1);
-            expireAt = Clock::time_point::max();
-            for(const auto& item : observations)
-            {
-                const auto expiry = item.second.observed + MAX_AGE;
-                if(expiry < expireAt)
-                    expireAt = expiry;
-            }
-            cacheValid = true;
-            return cachedStatus;
+            return Evaluate(true, key, required, bypass, synchronized, reorg, shutdown, resolve, now);
         }
 
         /* Assign before sampling admission inputs; a later-started evaluation
@@ -203,9 +202,106 @@ namespace TAO::Ledger::ChainState
         }
 
     private:
+        using CacheKey = std::tuple<uint1024_t, uint64_t, uint32_t, bool, bool, bool, bool>;
+
+        struct VetoLog
+        {
+            std::string address;
+            uint32_t height;
+            uint1024_t hash;
+        };
+
+        template<typename Resolve>
+        MiningStatus Evaluate(bool cached, const CacheKey& key, uint32_t required, bool bypass,
+                              bool synchronized, bool reorg, bool shutdown, Resolve resolve,
+                              std::optional<Clock::time_point> testTime)
+        {
+            /* Peer callbacks must not wait for ledger I/O. Peer-dependent
+             * evaluations fail closed if evidence or veto state changes
+             * while the mutex is released. */
+            std::map<const void*, Observation> snapshot;
+            uint64_t snapshotRevision;
+            uint64_t evaluation;
+            Clock::time_point started;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                started = testTime.value_or(Clock::now());
+                if(cached && cacheValid && cachedKey == key && started < refreshAt && started <= expireAt)
+                    return cachedStatus;
+                Expire(started);
+                if(!cached)
+                    cacheValid = false;
+                if(bypass)
+                {
+                    std::vector<VetoLog> vetoLogs;
+                    return CheckLocked(required, true, synchronized, reorg, shutdown,
+                        [](const void*) { return MiningPeerEvidence::UNRESOLVED; }, started, vetoLogs);
+                }
+                snapshot = observations;
+                snapshotRevision = revision;
+                evaluation = ++nextEvaluation;
+            }
+
+            std::map<const void*, MiningPeerEvidence> evidence;
+            for(const auto& item : snapshot)
+                evidence.emplace(item.first, item.second.uncertain ? MiningPeerEvidence::UNRESOLVED
+                    : resolve(item.second.hash, item.second.height));
+
+            std::unique_lock<std::mutex> lock(mutex);
+            const auto now = testTime.value_or(Clock::now());
+            Expire(now);
+            if(revision != snapshotRevision
+            || (evaluation < completedEvaluation && evidence != completedEvidence))
+            {
+                if(evaluation >= cachedEvaluation)
+                    cacheValid = false;
+                MiningStatus status;
+                status.bypass = bypass;
+                status.required = required;
+                status.reason = shutdown ? "shutdown" : reorg ? "chain-reorganization" : "peer-evidence-changed";
+                return status;
+            }
+
+            const auto lookup = [&evidence](const void* peer)
+            {
+                return evidence.at(peer);
+            };
+            std::vector<VetoLog> vetoLogs;
+            const auto status = CheckLocked(required, bypass, synchronized, reorg, shutdown, lookup, now, vetoLogs);
+            if(evaluation > completedEvaluation)
+            {
+                completedEvaluation = evaluation;
+                completedEvidence = std::move(evidence);
+            }
+            if(cached && evaluation >= cachedEvaluation)
+            {
+                cachedStatus = status;
+                cachedKey = key;
+                cachedEvaluation = evaluation;
+                refreshAt = started + std::chrono::seconds(1);
+                expireAt = Clock::time_point::max();
+                for(const auto& item : observations)
+                {
+                    const auto expiry = item.second.observed + MAX_AGE;
+                    if(expiry < expireAt)
+                        expireAt = expiry;
+                }
+                cacheValid = true;
+            }
+            else if(!cached && evaluation >= cachedEvaluation)
+                cacheValid = false;
+            lock.unlock();
+            for(const auto& item : vetoLogs)
+                debug::log(0, "MiningPeerTracker: ignoring unresolved tip from ",
+                           item.address, " height=", item.height, " hash=", item.hash.SubString(),
+                           " after veto bound expired");
+            return status;
+        }
+
         template<typename Resolve>
         MiningStatus CheckLocked(uint32_t required, bool bypass, bool synchronized,
-                                 bool reorg, bool shutdown, Resolve resolve, Clock::time_point now)
+                                 bool reorg, bool shutdown, Resolve resolve, Clock::time_point now,
+                                 std::vector<VetoLog>& vetoLogs)
         {
             Expire(now);
             MiningStatus status;
@@ -220,10 +316,11 @@ namespace TAO::Ledger::ChainState
                 for(auto& item : observations)
                 {
                     auto& observation = item.second;
-                    const auto evidence = observation.uncertain ? MiningPeerEvidence::UNRESOLVED
-                        : resolve(observation.hash, observation.height);
+                    const auto evidence = resolve(item.first);
                     if(evidence != MiningPeerEvidence::UNRESOLVED)
                     {
+                        if(observation.unresolvedSince != Clock::time_point{} || observation.vetoExpiredLogged)
+                            ++revision;
                         observation.unresolvedSince = Clock::time_point{};
                         observation.vetoExpiredLogged = false;
                         resolvedAddresses.insert(observation.address);
@@ -235,9 +332,13 @@ namespace TAO::Ledger::ChainState
                     /* A new connection for an address already inside its veto
                      * window continues that window. Only a fully resolved
                      * address may start another one. */
+                    const auto previousSince = observation.unresolvedSince;
+                    const bool previouslyLogged = observation.vetoExpiredLogged;
                     ApplyAddressVeto(observation);
                     if(observation.unresolvedSince == Clock::time_point{})
                         observation.unresolvedSince = now;
+                    if(previousSince != observation.unresolvedSince || previouslyLogged != observation.vetoExpiredLogged)
+                        ++revision;
                     unresolvedAddresses.insert(observation.address);
                     RememberAddressVeto(observation, now);
                     if(now - observation.unresolvedSince < UNRESOLVED_VETO_MAX)
@@ -249,18 +350,16 @@ namespace TAO::Ledger::ChainState
                     ++status.ignored;
                     if(!observation.vetoExpiredLogged)
                     {
+                        vetoLogs.push_back({observation.address, observation.height, observation.hash});
                         observation.vetoExpiredLogged = true;
+                        ++revision;
                         RememberAddressVeto(observation, now);
-                        debug::log(0, "MiningPeerTracker: ignoring unresolved tip from ",
-                                   observation.address, " height=", observation.height,
-                                   " hash=", observation.hash.SubString(),
-                                   " after veto bound expired");
                     }
                 }
                 for(const auto& address : resolvedAddresses)
                 {
-                    if(unresolvedAddresses.count(address) == 0)
-                        addressVetoes.erase(address);
+                    if(unresolvedAddresses.count(address) == 0 && addressVetoes.erase(address))
+                        ++revision;
                 }
             }
             status.peers = supporting.size();
@@ -321,6 +420,9 @@ namespace TAO::Ledger::ChainState
             auto it = addressVetoes.find(observation.address);
             if(it != addressVetoes.end())
             {
+                if(it->second.since != observation.unresolvedSince
+                || it->second.logged != observation.vetoExpiredLogged)
+                    ++revision;
                 it->second.since = observation.unresolvedSince;
                 it->second.logged = observation.vetoExpiredLogged;
                 return;
@@ -333,6 +435,7 @@ namespace TAO::Ledger::ChainState
 
             addressVetoes.emplace(observation.address,
                                   AddressVeto{observation.unresolvedSince, observation.vetoExpiredLogged});
+            ++revision;
         }
 
         void DropExpiredAbsentVetoes(Clock::time_point now)
@@ -346,7 +449,10 @@ namespace TAO::Ledger::ChainState
                 const bool expired = it->second.since != Clock::time_point{}
                     && now - it->second.since >= UNRESOLVED_VETO_MAX;
                 if(expired && live.count(it->first) == 0)
+                {
                     it = addressVetoes.erase(it);
+                    ++revision;
+                }
                 else
                     ++it;
             }
@@ -360,6 +466,7 @@ namespace TAO::Ledger::ChainState
                 {
                     it = observations.erase(it);
                     cacheValid = false;
+                    ++revision;
                 }
                 else
                     ++it;
@@ -371,7 +478,9 @@ namespace TAO::Ledger::ChainState
         std::mutex mutex;
         std::map<const void*, Observation> observations;
         std::map<std::string, AddressVeto> addressVetoes;
-        using CacheKey = std::tuple<uint1024_t, uint64_t, uint32_t, bool, bool, bool, bool>;
+        uint64_t revision{0};
+        uint64_t nextEvaluation{0}, completedEvaluation{0}, cachedEvaluation{0};
+        std::map<const void*, MiningPeerEvidence> completedEvidence;
         CacheKey cachedKey;
         MiningStatus cachedStatus;
         Clock::time_point refreshAt{}, expireAt{};
