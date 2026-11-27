@@ -522,6 +522,7 @@ namespace TAO
 
             debug::log(0, FUNCTION, "activated validated candidate source=",
                 (pszSource ? pszSource : "ledger"),
+                " height=", stateCandidate.nHeight,
                 " hash=", stateCandidate.GetHash().SubString(),
                 " connect=", nConnectDepth,
                 " disconnect=", nDisconnectDepth);

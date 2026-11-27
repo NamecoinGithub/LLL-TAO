@@ -97,7 +97,9 @@ make a stale template valid. The epoch is bound to its exact tip hash; a
 partially published or inconsistent tip cannot issue work, even on a local
 development network. Epoch advances log the committed hash and reason, and submission
 rejections include the template parent and height alongside the current tip
-and height. These are point-in-time diagnostics, not a synchronized snapshot.
+and height. The node also logs the loaded best-block height on startup and the
+height of each activated candidate, including during initial synchronization.
+These are point-in-time diagnostics, not a synchronized snapshot.
 
 Template cache publication checks both the build tip and the work epoch.
 Its diagnostics distinguish a tip change from an epoch revocation; neither

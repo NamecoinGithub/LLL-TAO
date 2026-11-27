@@ -443,6 +443,8 @@ namespace TAO
             /* Fill out the best chain stats. */
             nBestHeight     = tStateBest.load().nHeight;
             nBestChainTrust = tStateBest.load().nChainTrust;
+            debug::log(0, FUNCTION, "loaded best block height=", nBestHeight.load(),
+                " hash=", hashBestChain.load().SubString());
 
             /* Set the checkpoint. */
             hashCheckpoint = tStateBest.load().hashCheckpoint;
